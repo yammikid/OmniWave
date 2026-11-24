@@ -25,7 +25,7 @@
 ## Требования
 
 - **Windows 10 / 11** (`x64`)
-- **[.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)** (или .NET 8/9 SDK для сборки)
+- **[.NET 8 SDK (x64)](https://dotnet.microsoft.com/download/dotnet/8.0)** *(нужен именно **SDK**, а не **Runtime**, чтобы собрать `.exe` из исходников — либо установите командой `winget install Microsoft.DotNet.SDK.8`)*
 - **Microsoft Edge WebView2 Runtime** (предустановлен в Windows 11)
 - **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** *(опционально — для резервного резолва аудиопотоков; можно установить через `winget install yt-dlp.yt-dlp` или положить `yt-dlp.exe` рядом с `DynamicIsland.exe`)*
 
@@ -33,7 +33,7 @@
 
 В репозитории находится исходный код без готового `.exe` — перед первым запуском приложение нужно собрать локально:
 
-1. Установите **[.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)** (или в PowerShell: `winget install Microsoft.DotNet.SDK.8`).
+1. Установите **[.NET 8 SDK (x64)](https://dotnet.microsoft.com/download/dotnet/8.0)** *(именно **SDK**, не Runtime; скрипт [`build.bat`](build.bat) также проверяет его наличие и при необходимости предлагает установку через `winget`)*.
 2. Скачайте исходный код (`git clone https://github.com/yammikid/OmniWave.git` или **Code → Download ZIP** и распакуйте архив).
 3. Запустите [`build.bat`](build.bat) — скрипт соберёт проект в папку `publish/` и автоматически запустит `publish\DynamicIsland.exe` — либо выполните команды вручную:
 
