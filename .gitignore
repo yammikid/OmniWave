@@ -1,0 +1,13 @@
+bin/
+obj/
+publish/
+.vs/
+*.user
+*.suo
+*.log
+*.tmp
+.env
+*.env
+settings.json
+library.json
+WebView2*/

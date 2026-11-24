@@ -1,0 +1,637 @@
+<Window x:Class="DynamicIsland.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Icon="pack://application:,,,/Assets/omniwave.ico"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        Topmost="True"
+        ShowActivated="False"
+        ShowInTaskbar="False"
+        ResizeMode="NoResize"
+        Width="324" Height="74"
+        TextOptions.TextFormattingMode="Ideal"
+        TextOptions.TextRenderingMode="ClearType"
+        RenderOptions.BitmapScalingMode="HighQuality"
+        PreviewMouseWheel="Window_PreviewMouseWheel"
+        PreviewKeyDown="Window_PreviewKeyDown">
+
+    <Window.Resources>
+        <LinearGradientBrush x:Key="GlassBtnBorderBrush" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#66FFFFFF" Offset="0.0"/>
+            <GradientStop Color="#1CFFFFFF" Offset="0.5"/>
+            <GradientStop Color="#38FFFFFF" Offset="1.0"/>
+        </LinearGradientBrush>
+
+        <Style x:Key="MediaBtnStyle" TargetType="Button">
+            <Setter Property="Width" Value="34"/>
+            <Setter Property="Height" Value="34"/>
+            <Setter Property="Background" Value="#1EFFFFFF"/>
+            <Setter Property="BorderBrush" Value="{StaticResource GlassBtnBorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Foreground" Value="#F2FFFFFF"/>
+            <Setter Property="FontFamily" Value="Segoe MDL2 Assets"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd"
+                                RenderTransformOrigin="0.5,0.5"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="17">
+                            <Border.RenderTransform>
+                                <ScaleTransform x:Name="BtnScale" ScaleX="1" ScaleY="1"/>
+                            </Border.RenderTransform>
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#36FFFFFF"/>
+                                <Setter Property="Foreground" Value="White"/>
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="BtnScale" Storyboard.TargetProperty="ScaleX" To="1.06" Duration="0:0:0.14"/>
+                                            <DoubleAnimation Storyboard.TargetName="BtnScale" Storyboard.TargetProperty="ScaleY" To="1.06" Duration="0:0:0.14"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="BtnScale" Storyboard.TargetProperty="ScaleX" To="1.0" Duration="0:0:0.16"/>
+                                            <DoubleAnimation Storyboard.TargetName="BtnScale" Storyboard.TargetProperty="ScaleY" To="1.0" Duration="0:0:0.16"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#4CFFFFFF"/>
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="BtnScale" Storyboard.TargetProperty="ScaleX" To="0.92" Duration="0:0:0.08"/>
+                                            <DoubleAnimation Storyboard.TargetName="BtnScale" Storyboard.TargetProperty="ScaleY" To="0.92" Duration="0:0:0.08"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="BtnScale" Storyboard.TargetProperty="ScaleX" To="1.06" Duration="0:0:0.12"/>
+                                            <DoubleAnimation Storyboard.TargetName="BtnScale" Storyboard.TargetProperty="ScaleY" To="1.06" Duration="0:0:0.12"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="IslandMiniBtnStyle" TargetType="Button">
+            <Setter Property="Width" Value="24"/>
+            <Setter Property="Height" Value="24"/>
+            <Setter Property="Background" Value="#1EFFFFFF"/>
+            <Setter Property="BorderBrush" Value="{StaticResource GlassBtnBorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Foreground" Value="#D8FFFFFF"/>
+            <Setter Property="FontFamily" Value="Segoe MDL2 Assets"/>
+            <Setter Property="FontSize" Value="10.5"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd"
+                                RenderTransformOrigin="0.5,0.5"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="12">
+                            <Border.RenderTransform>
+                                <ScaleTransform x:Name="MiniScale" ScaleX="1" ScaleY="1"/>
+                            </Border.RenderTransform>
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#38FFFFFF"/>
+                                <Setter Property="Foreground" Value="White"/>
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="MiniScale" Storyboard.TargetProperty="ScaleX" To="1.07" Duration="0:0:0.14"/>
+                                            <DoubleAnimation Storyboard.TargetName="MiniScale" Storyboard.TargetProperty="ScaleY" To="1.07" Duration="0:0:0.14"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="MiniScale" Storyboard.TargetProperty="ScaleX" To="1.0" Duration="0:0:0.16"/>
+                                            <DoubleAnimation Storyboard.TargetName="MiniScale" Storyboard.TargetProperty="ScaleY" To="1.0" Duration="0:0:0.16"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#4EFFFFFF"/>
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="MiniScale" Storyboard.TargetProperty="ScaleX" To="0.92" Duration="0:0:0.08"/>
+                                            <DoubleAnimation Storyboard.TargetName="MiniScale" Storyboard.TargetProperty="ScaleY" To="0.92" Duration="0:0:0.08"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="MiniScale" Storyboard.TargetProperty="ScaleX" To="1.07" Duration="0:0:0.12"/>
+                                            <DoubleAnimation Storyboard.TargetName="MiniScale" Storyboard.TargetProperty="ScaleY" To="1.07" Duration="0:0:0.12"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="IslandPlayBtnStyle" TargetType="Button">
+            <Setter Property="Width" Value="38"/>
+            <Setter Property="Height" Value="38"/>
+            <Setter Property="Background" Value="#F5FFFFFF"/>
+            <Setter Property="BorderBrush" Value="#FFFFFFFF"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Foreground" Value="#0B0D13"/>
+            <Setter Property="FontFamily" Value="Segoe MDL2 Assets"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd"
+                                RenderTransformOrigin="0.5,0.5"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="19">
+                            <Border.RenderTransform>
+                                <ScaleTransform x:Name="PlayScale" ScaleX="1" ScaleY="1"/>
+                            </Border.RenderTransform>
+                            <Border.Effect>
+                                <DropShadowEffect Color="White" BlurRadius="14" ShadowDepth="0" Opacity="0.28"/>
+                            </Border.Effect>
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#FFFFFFFF"/>
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="PlayScale" Storyboard.TargetProperty="ScaleX" To="1.07" Duration="0:0:0.14"/>
+                                            <DoubleAnimation Storyboard.TargetName="PlayScale" Storyboard.TargetProperty="ScaleY" To="1.07" Duration="0:0:0.14"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="PlayScale" Storyboard.TargetProperty="ScaleX" To="1.0" Duration="0:0:0.16"/>
+                                            <DoubleAnimation Storyboard.TargetName="PlayScale" Storyboard.TargetProperty="ScaleY" To="1.0" Duration="0:0:0.16"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#DDE2F2"/>
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="PlayScale" Storyboard.TargetProperty="ScaleX" To="0.92" Duration="0:0:0.08"/>
+                                            <DoubleAnimation Storyboard.TargetName="PlayScale" Storyboard.TargetProperty="ScaleY" To="0.92" Duration="0:0:0.08"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="PlayScale" Storyboard.TargetProperty="ScaleX" To="1.07" Duration="0:0:0.12"/>
+                                            <DoubleAnimation Storyboard.TargetName="PlayScale" Storyboard.TargetProperty="ScaleY" To="1.07" Duration="0:0:0.12"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <LinearGradientBrush x:Key="MarqueeFadeMask" StartPoint="0,0" EndPoint="1,0">
+            <GradientStop Color="#00000000" Offset="0.0"/>
+            <GradientStop Color="#FF000000" Offset="0.06"/>
+            <GradientStop Color="#FF000000" Offset="0.94"/>
+            <GradientStop Color="#00000000" Offset="1.0"/>
+        </LinearGradientBrush>
+    </Window.Resources>
+
+    <Border x:Name="IslandBorder"
+            Margin="14"
+            Background="#980E121C"
+            BorderThickness="1"
+            CornerRadius="23"
+            RenderTransformOrigin="0.5,0"
+            MouseLeftButtonDown="IslandBorder_MouseLeftButtonDown"
+            MouseEnter="IslandBorder_MouseEnter"
+            MouseLeave="IslandBorder_MouseLeave">
+        <Border.BorderBrush>
+            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                <GradientStop Color="#96FFFFFF" Offset="0.0"/>
+                <GradientStop Color="#38FFFFFF" Offset="0.45"/>
+                <GradientStop Color="#55FFFFFF" Offset="1.0"/>
+            </LinearGradientBrush>
+        </Border.BorderBrush>
+        <Border.LayoutTransform>
+            <ScaleTransform x:Name="IslandScaleTransform" ScaleX="1" ScaleY="1"/>
+        </Border.LayoutTransform>
+        <Border.RenderTransform>
+            <TransformGroup>
+                <ScaleTransform x:Name="IslandCollapseScale" ScaleX="1" ScaleY="1"/>
+                <TranslateTransform x:Name="IslandCollapseTranslate" X="0" Y="0"/>
+            </TransformGroup>
+        </Border.RenderTransform>
+        <Border.Effect>
+            <DropShadowEffect x:Name="IslandGlowEffect" Color="Black" BlurRadius="20" ShadowDepth="0" Opacity="0.48"/>
+        </Border.Effect>
+
+        <Border.ContextMenu>
+            <ContextMenu Style="{StaticResource DarkContextMenu}">
+                <MenuItem Header="Открыть плеер и поиск (OmniWave)" Style="{StaticResource DarkMenuItem}" Click="OpenPlayer_Click">
+                    <MenuItem.Icon>
+                        <TextBlock Text="&#xE8D6;" FontFamily="Segoe MDL2 Assets" FontSize="14" Foreground="#FFCC00"/>
+                    </MenuItem.Icon>
+                </MenuItem>
+                <MenuItem Header="Настройки" Style="{StaticResource DarkMenuItem}" Click="OpenSettings_Click">
+                    <MenuItem.Icon>
+                        <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="14" Foreground="#EAEAF2"/>
+                    </MenuItem.Icon>
+                </MenuItem>
+                <Separator Style="{StaticResource DarkMenuSeparator}"/>
+                <MenuItem x:Name="AlwaysOnTopMenuItem" Header="Поверх всех окон" IsCheckable="True"
+                          Style="{StaticResource DarkMenuItem}" Click="AlwaysOnTopMenuItem_Click"/>
+                <MenuItem x:Name="PinMenuItem" Header="Закрепить раскрытым" IsCheckable="True"
+                          Style="{StaticResource DarkMenuItem}" Click="PinMenuItem_Click"/>
+                <MenuItem Header="Скрыть к левому краю" Style="{StaticResource DarkMenuItem}" Click="DockLeft_Click"/>
+                <MenuItem Header="Скрыть к правому краю" Style="{StaticResource DarkMenuItem}" Click="DockRight_Click"/>
+                <MenuItem Header="Скрыть к верхнему краю" Style="{StaticResource DarkMenuItem}" Click="DockTop_Click"/>
+                <MenuItem Header="Скрыть к нижнему краю" Style="{StaticResource DarkMenuItem}" Click="DockBottom_Click"/>
+                <MenuItem Header="Вернуть в центр сверху" Style="{StaticResource DarkMenuItem}" Click="ResetPosition_Click"/>
+                <Separator Style="{StaticResource DarkMenuSeparator}"/>
+                <MenuItem Header="Выход" Style="{StaticResource DarkMenuItem}" Click="Exit_Click">
+                    <MenuItem.Icon>
+                        <TextBlock Text="&#xE7E8;" FontFamily="Segoe MDL2 Assets" FontSize="14" Foreground="#FF6B6B"/>
+                    </MenuItem.Icon>
+                </MenuItem>
+            </ContextMenu>
+        </Border.ContextMenu>
+
+        <Grid>
+            <!-- Верхний стеклянный блик Clear Glass -->
+            <Border x:Name="IslandGlassSheen" IsHitTestVisible="False" CornerRadius="23">
+                <Border.Background>
+                    <LinearGradientBrush StartPoint="0.1,0" EndPoint="0.8,1">
+                        <GradientStop Color="#2CFFFFFF" Offset="0.0"/>
+                        <GradientStop Color="#08FFFFFF" Offset="0.38"/>
+                        <GradientStop Color="#00FFFFFF" Offset="1.0"/>
+                    </LinearGradientBrush>
+                </Border.Background>
+            </Border>
+
+            <!-- Компактный режим (296 x 46) -->
+            <Grid x:Name="CompactPanel" VerticalAlignment="Center" Margin="9,0,13,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <Border x:Name="CompactCover" Width="28" Height="28" CornerRadius="8" Background="#2A2A35" VerticalAlignment="Center"/>
+
+                <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="10,0,8,0">
+                    <Grid x:Name="CompactTitleClip" ClipToBounds="True"
+                          OpacityMask="{StaticResource MarqueeFadeMask}"
+                          SizeChanged="TitleClip_SizeChanged">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <TextBlock x:Name="CompactTitle"
+                                       Text="Ничего не играет"
+                                       Foreground="#FFFFFF" FontSize="12.5" FontWeight="Bold"
+                                       VerticalAlignment="Center">
+                                <TextBlock.RenderTransform>
+                                    <TranslateTransform x:Name="CompactTitleTransform"/>
+                                </TextBlock.RenderTransform>
+                            </TextBlock>
+                        </StackPanel>
+                    </Grid>
+                    <StackPanel Orientation="Horizontal" Margin="0,1,0,0" VerticalAlignment="Center">
+                        <Ellipse x:Name="CompactDot" Width="6" Height="6" Fill="#FFCC00"
+                                 VerticalAlignment="Center" Margin="0,0,5,0"/>
+                        <TextBlock x:Name="CompactSub" Text="OmniWave" Foreground="#A6FFFFFF"
+                                   FontSize="10.5" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </StackPanel>
+
+                <!-- Симметричный 12-полосный спектр -->
+                <StackPanel x:Name="CompactEqPanel" Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center"
+                            HorizontalAlignment="Right" Height="18">
+                    <Border x:Name="CEq0" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center" Margin="0,0,2,0"/>
+                    <Border x:Name="CEq1" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center" Margin="0,0,2,0"/>
+                    <Border x:Name="CEq2" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center" Margin="0,0,2,0"/>
+                    <Border x:Name="CEq3" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center" Margin="0,0,2,0"/>
+                    <Border x:Name="CEq4" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center" Margin="0,0,2,0"/>
+                    <Border x:Name="CEq5" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center" Margin="0,0,2,0"/>
+                    <Border x:Name="CEq6" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center" Margin="0,0,2,0"/>
+                    <Border x:Name="CEq7" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center" Margin="0,0,2,0"/>
+                    <Border x:Name="CEq8" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center" Margin="0,0,2,0"/>
+                    <Border x:Name="CEq9" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center" Margin="0,0,2,0"/>
+                    <Border x:Name="CEq10" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center" Margin="0,0,2,0"/>
+                    <Border x:Name="CEq11" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center"/>
+                </StackPanel>
+            </Grid>
+
+            <!-- Развёрнутый режим (460 x 212) -->
+            <Grid x:Name="ExpandedPanel" Visibility="Collapsed" Margin="14,12">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <!-- Источники + поиск + закрепление + аккаунты + настройки + перетаскивание -->
+                <Grid Grid.Row="0" Margin="0,0,0,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <StackPanel x:Name="SourcesPanel" Orientation="Horizontal" VerticalAlignment="Center"/>
+
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="6,0,0,0">
+                        <Button Content="&#xE721;" ToolTip="Открыть поиск и плеер OmniWave"
+                                Style="{StaticResource IslandMiniBtnStyle}" Margin="0,0,4,0"
+                                Click="OpenPlayer_Click"/>
+                        <Button x:Name="BtnIslandAlwaysOnTop" Content="&#xE81E;" ToolTip="Поверх всех окон"
+                                Style="{StaticResource IslandMiniBtnStyle}" Margin="0,0,4,0"
+                                Click="AlwaysOnTopButton_Click"/>
+                        <Button x:Name="BtnIslandPin" Content="&#xE718;" ToolTip="Закрепить остров раскрытым"
+                                Style="{StaticResource IslandMiniBtnStyle}" Margin="0,0,4,0"
+                                Click="PinButton_Click"/>
+                        <Button Content="&#xE77B;" ToolTip="Аккаунты Яндекс Музыки и ВК"
+                                Style="{StaticResource IslandMiniBtnStyle}" Margin="0,0,4,0"
+                                Click="OpenAccounts_Click"/>
+                        <Button Content="&#xE713;" ToolTip="Настройки OmniWave"
+                                Style="{StaticResource IslandMiniBtnStyle}" Margin="0,0,4,0"
+                                Click="OpenSettings_Click"/>
+                        <TextBlock Text="⋮⋮" Foreground="#80FFFFFF" FontSize="12"
+                                   VerticalAlignment="Center" Margin="2,0,2,0"
+                                   ToolTip="Потяните, чтобы переместить панель"/>
+                    </StackPanel>
+                </Grid>
+
+                <!-- Обложка 54x54, бегущее название и 12-полосный спектр -->
+                <Grid Grid.Row="1" Margin="0,0,0,6">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <Border x:Name="ExpandedCover" Width="54" Height="54" CornerRadius="12" Background="#2A2A35" VerticalAlignment="Center">
+                        <Border.Effect>
+                            <DropShadowEffect Color="Black" BlurRadius="16" ShadowDepth="4" Opacity="0.48"/>
+                        </Border.Effect>
+                    </Border>
+
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="11,0,10,0">
+                        <Grid x:Name="ExpandedTitleClip" ClipToBounds="True"
+                              OpacityMask="{StaticResource MarqueeFadeMask}"
+                              SizeChanged="TitleClip_SizeChanged">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock x:Name="ExpandedTitle" Text="Ничего не играет"
+                                           Foreground="White" FontSize="14.5" FontWeight="ExtraBold">
+                                    <TextBlock.RenderTransform>
+                                        <TranslateTransform x:Name="ExpandedTitleTransform"/>
+                                    </TextBlock.RenderTransform>
+                                </TextBlock>
+                            </StackPanel>
+                        </Grid>
+                        <StackPanel Orientation="Horizontal" Margin="0,3,0,0" VerticalAlignment="Center">
+                            <Border x:Name="ExpandedSourceBadge"
+                                    CornerRadius="6"
+                                    Padding="6,1.5"
+                                    Margin="0,0,6,0"
+                                    VerticalAlignment="Center"
+                                    Background="#FFCC00">
+                                <TextBlock x:Name="ExpandedSourceBadgeText"
+                                           Text="OmniWave"
+                                           FontSize="9.5"
+                                           FontWeight="ExtraBold"
+                                           Foreground="#111111"
+                                           VerticalAlignment="Center"/>
+                            </Border>
+                            <TextBlock x:Name="ExpandedArtist" Text="Нажмите 🔍 для поиска треков"
+                                       Foreground="#B0FFFFFF" FontSize="12" FontWeight="Medium"
+                                       TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </StackPanel>
+
+                    <StackPanel x:Name="ExpandedEqPanel" Grid.Column="2" Orientation="Horizontal"
+                                VerticalAlignment="Center" Height="22" Margin="0,0,2,0">
+                        <Border x:Name="EEq0" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center" Margin="0,0,2,0"/>
+                        <Border x:Name="EEq1" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center" Margin="0,0,2,0"/>
+                        <Border x:Name="EEq2" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center" Margin="0,0,2,0"/>
+                        <Border x:Name="EEq3" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center" Margin="0,0,2,0"/>
+                        <Border x:Name="EEq4" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center" Margin="0,0,2,0"/>
+                        <Border x:Name="EEq5" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center" Margin="0,0,2,0"/>
+                        <Border x:Name="EEq6" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center" Margin="0,0,2,0"/>
+                        <Border x:Name="EEq7" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center" Margin="0,0,2,0"/>
+                        <Border x:Name="EEq8" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center" Margin="0,0,2,0"/>
+                        <Border x:Name="EEq9" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center" Margin="0,0,2,0"/>
+                        <Border x:Name="EEq10" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center" Margin="0,0,2,0"/>
+                        <Border x:Name="EEq11" Width="2" Height="4" CornerRadius="1" Background="#FFCC00" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Grid>
+
+                <!-- Обновленный Liquid Glass таймлайн с подсветкой наведения и точным предпросмотром времени -->
+                <Grid x:Name="IslandProgressContainer" Grid.Row="2" Panel.ZIndex="20" Visibility="Collapsed" Margin="0,2,0,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <TextBlock x:Name="IslandCurTime" Grid.Column="0" Text="0:00" FontSize="10.5" FontWeight="Bold" Foreground="#F2FFFFFF"
+                               Width="34" TextAlignment="Right" VerticalAlignment="Center"/>
+
+                    <Border x:Name="IslandProgressHitArea" Grid.Column="1" Height="24" Margin="8,0" Background="Transparent"
+                            Cursor="Hand" ClipToBounds="False"
+                            MouseEnter="IslandProgress_MouseEnter"
+                            MouseLeave="IslandProgress_MouseLeave"
+                            MouseMove="IslandProgress_MouseMove"
+                            MouseLeftButtonDown="IslandProgress_MouseLeftButtonDown"
+                            MouseLeftButtonUp="IslandProgress_MouseLeftButtonUp">
+                        <Grid ClipToBounds="False">
+                            <Border x:Name="IslandProgressTrack" Height="6" CornerRadius="3"
+                                    Background="#24FFFFFF" BorderBrush="#24FFFFFF" BorderThickness="1"
+                                    VerticalAlignment="Center" ClipToBounds="True">
+                                <Grid>
+                                    <Border x:Name="IslandProgressHoverFill" Height="6" Width="0"
+                                            HorizontalAlignment="Left" CornerRadius="3" Background="#3AFFFFFF"
+                                            Visibility="Collapsed" IsHitTestVisible="False"/>
+                                    <Border x:Name="IslandProgressFill" Height="6" Width="0"
+                                            HorizontalAlignment="Left" CornerRadius="3" Background="#FFCC00"
+                                            IsHitTestVisible="False"/>
+                                </Grid>
+                            </Border>
+
+                            <Border x:Name="IslandProgressThumb" Width="12" Height="12" CornerRadius="6"
+                                    Background="#FFFFFF" BorderBrush="#FFCC00" BorderThickness="2"
+                                    HorizontalAlignment="Left" VerticalAlignment="Center" IsHitTestVisible="False">
+                                <Border.RenderTransform>
+                                    <TranslateTransform x:Name="IslandThumbTransform" X="-2"/>
+                                </Border.RenderTransform>
+                                <Border.Effect>
+                                    <DropShadowEffect Color="White" BlurRadius="8" ShadowDepth="0" Opacity="0.45"/>
+                                </Border.Effect>
+                            </Border>
+
+                            <Border x:Name="IslandSeekPreviewBadge" Visibility="Collapsed" IsHitTestVisible="False"
+                                    HorizontalAlignment="Left" VerticalAlignment="Top" Margin="0,-21,0,0"
+                                    CornerRadius="8" Padding="7,2" Background="#F2101420"
+                                    BorderBrush="#58FFFFFF" BorderThickness="1">
+                                <Border.RenderTransform>
+                                    <TranslateTransform x:Name="IslandSeekPreviewTransform" X="0"/>
+                                </Border.RenderTransform>
+                                <Border.Effect>
+                                    <DropShadowEffect Color="Black" BlurRadius="10" ShadowDepth="2" Opacity="0.65"/>
+                                </Border.Effect>
+                                <TextBlock x:Name="IslandSeekPreviewText" Text="0:00" FontSize="10.5" FontWeight="ExtraBold" Foreground="#FFCC00"/>
+                            </Border>
+                        </Grid>
+                    </Border>
+
+                    <TextBlock x:Name="IslandTotTime" Grid.Column="2" Text="0:00" FontSize="10.5" FontWeight="SemiBold" Foreground="#99FFFFFF"
+                               Width="34" VerticalAlignment="Center"/>
+                </Grid>
+
+                <!-- Центрированные круглые стеклянные кнопки управления -->
+                <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <Grid Margin="0,0,6,0">
+                        <Button x:Name="BtnRepeat" Content="&#xE8EE;"
+                                Style="{StaticResource MediaBtnStyle}" ToolTip="Повтор: Выкл"
+                                Click="BtnRepeat_Click"/>
+                        <Border x:Name="IslandRepeat1Badge" Width="14" Height="14" CornerRadius="7"
+                                Background="#FFCC00" HorizontalAlignment="Right" VerticalAlignment="Top"
+                                Margin="0,-3,-3,0" IsHitTestVisible="False" Visibility="Collapsed">
+                            <TextBlock Text="1" FontSize="9" FontWeight="ExtraBold" Foreground="Black"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </Grid>
+                    <Button x:Name="BtnSeekBack15" Content="-15" FontFamily="Segoe UI" FontSize="10.5" FontWeight="Bold"
+                            Style="{StaticResource MediaBtnStyle}" ToolTip="Назад на 15 сек"
+                            Click="BtnSeekBack15_Click" Margin="0,0,6,0"/>
+                    <Button x:Name="BtnPrev" Content="&#xE892;"
+                            Style="{StaticResource MediaBtnStyle}" ToolTip="Предыдущий трек"
+                            Click="BtnPrev_Click" Margin="0,0,6,0"/>
+                    <Button x:Name="BtnPlay" Content="&#xE768;"
+                            Style="{StaticResource IslandPlayBtnStyle}"
+                            ToolTip="Воспроизвести / Пауза"
+                            Click="BtnPlay_Click" Margin="0,0,6,0"/>
+                    <Button x:Name="BtnNext" Content="&#xE893;"
+                            Style="{StaticResource MediaBtnStyle}" ToolTip="Следующий трек"
+                            Click="BtnNext_Click" Margin="0,0,6,0"/>
+                    <Button x:Name="BtnSeekFwd15" Content="+15" FontFamily="Segoe UI" FontSize="10.5" FontWeight="Bold"
+                            Style="{StaticResource MediaBtnStyle}" ToolTip="Вперёд на 15 сек"
+                            Click="BtnSeekFwd15_Click" Margin="0,0,6,0"/>
+                    <Button x:Name="BtnIslandLike" Content="&#xEB51;"
+                            Style="{StaticResource MediaBtnStyle}" ToolTip="Добавить в избранное"
+                            Click="BtnIslandLike_Click" Margin="0,0,6,0"/>
+                    <Button x:Name="BtnIslandPlaylist" Content="&#xE710;"
+                            Style="{StaticResource MediaBtnStyle}" ToolTip="Сохранить в плейлист"
+                            Click="BtnIslandPlaylist_Click"/>
+                </StackPanel>
+
+                <!-- Внутренний регулятор громкости (независимый от микшера Windows) -->
+                <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,7,0,0">
+                    <Button x:Name="BtnIslandMute" Content="&#xE767;"
+                            Style="{StaticResource IslandMiniBtnStyle}" Width="22" Height="22" Margin="0,0,7,0"
+                            ToolTip="Звук / Без звука (без микшера Windows)"
+                            Click="BtnIslandMute_Click"/>
+                    <Slider x:Name="IslandVolumeSlider"
+                            Style="{StaticResource ModernSlider}"
+                            Minimum="0" Maximum="100" Value="80"
+                            Width="165" VerticalAlignment="Center"
+                            ValueChanged="IslandVolumeSlider_ValueChanged"/>
+                    <TextBlock x:Name="IslandVolumeText" Text="80%"
+                               FontSize="10.5" FontWeight="Bold" Foreground="#CCFFFFFF"
+                               Width="34" Margin="7,0,0,0" VerticalAlignment="Center"/>
+                </StackPanel>
+            </Grid>
+
+            <!-- Компактный режим свёрнутый у края экрана (Dock Tab) -->
+            <Grid x:Name="DockedEdgePanel" Visibility="Collapsed" Cursor="Hand"
+                  ToolTip="Нажмите, чтобы развернуть Dynamic Island">
+                <StackPanel x:Name="DockedContentStack"
+                            Orientation="Vertical"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center">
+                    <Ellipse x:Name="DockedPlayDot" Width="5" Height="5" Fill="#FFCC00"
+                             Opacity="0.45" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,0,0,6"/>
+                    <Border x:Name="DockedAccentBar" Width="3" Height="32" CornerRadius="1.5"
+                            Background="#FFCC00" HorizontalAlignment="Center" VerticalAlignment="Center">
+                        <Border.Effect>
+                            <DropShadowEffect x:Name="DockedAccentGlow" Color="#FFCC00" BlurRadius="8" ShadowDepth="0" Opacity="0.7"/>
+                        </Border.Effect>
+                    </Border>
+                    <TextBlock x:Name="DockedChevron" Text="&#xE76C;" FontFamily="Segoe MDL2 Assets" FontSize="9.5"
+                               Foreground="#E6FFFFFF" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,6,0,0"/>
+                </StackPanel>
+            </Grid>
+
+            <!-- Морфинг-пилюля действий поверх Острова (громкость / источник / лайк / плейлист) -->
+            <Border x:Name="ActionPillToast"
+                    Visibility="Collapsed"
+                    IsHitTestVisible="False"
+                    Background="#DB0B0D13"
+                    CornerRadius="23">
+                <Border HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        RenderTransformOrigin="0.5,0.5"
+                        Background="#28FFFFFF"
+                        BorderBrush="{StaticResource GlassBtnBorderBrush}"
+                        BorderThickness="1"
+                        CornerRadius="16"
+                        Padding="14,6">
+                    <Border.RenderTransform>
+                        <ScaleTransform x:Name="ToastScaleTransform" ScaleX="1" ScaleY="1"/>
+                    </Border.RenderTransform>
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock x:Name="ActionPillIcon" Text="&#xE767;" FontFamily="Segoe MDL2 Assets" FontSize="12.5"
+                                   Foreground="#FFCC00" VerticalAlignment="Center" Margin="0,0,7,0"/>
+                        <TextBlock x:Name="ActionPillText" Text="80%" Foreground="White"
+                                   FontSize="12.5" FontWeight="Bold" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Border>
+            </Border>
+        </Grid>
+    </Border>
+</Window>

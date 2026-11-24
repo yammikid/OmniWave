@@ -1,0 +1,301 @@
+<Window x:Class="DynamicIsland.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Настройки OmniWave"
+        Icon="pack://application:,,,/Assets/omniwave.ico"
+        Width="490" SizeToContent="Height"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterScreen"
+        TextOptions.TextFormattingMode="Ideal"
+        TextOptions.TextRenderingMode="ClearType">
+
+    <Window.Resources>
+        <Style x:Key="SettingsActionBtn" TargetType="Button">
+            <Setter Property="Background" Value="#1FFFFFFF"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="14,9"/>
+            <Setter Property="FontSize" Value="12.5"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="10" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#34FFFFFF"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#48FFFFFF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="SettingTitle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#F4F4F8"/>
+            <Setter Property="FontSize" Value="13.5"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+
+        <Style x:Key="SettingSub" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#88899C"/>
+            <Setter Property="FontSize" Value="11.5"/>
+            <Setter Property="Margin" Value="0,2,0,0"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+        </Style>
+    </Window.Resources>
+
+    <Border Margin="14"
+            Background="#F712131A"
+            BorderBrush="#24FFFFFF"
+            BorderThickness="1"
+            CornerRadius="20">
+        <Border.Effect>
+            <DropShadowEffect Color="Black" BlurRadius="28" ShadowDepth="8" Opacity="0.72"/>
+        </Border.Effect>
+
+        <Grid Margin="22,18,22,22">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+
+            <!-- Перетаскиваемая шапка -->
+            <Grid Grid.Row="0" Background="Transparent" MouseLeftButtonDown="Header_MouseLeftButtonDown" Margin="0,0,0,16">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="17" Foreground="#FFCC00"
+                               VerticalAlignment="Center" Margin="0,0,10,0"/>
+                    <TextBlock Text="Настройки OmniWave" FontSize="17" FontWeight="Bold" Foreground="White" VerticalAlignment="Center"/>
+                </StackPanel>
+
+                <Button Grid.Column="1" Content="✕" Width="30" Height="30" Padding="0"
+                        Style="{StaticResource SettingsActionBtn}" Click="Close_Click"/>
+            </Grid>
+
+            <ScrollViewer Grid.Row="1" MaxHeight="610" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <StackPanel Margin="0,0,4,0">
+
+            <!-- Секция: Запуск и поведение -->
+            <TextBlock Text="ПОВЕДЕНИЕ И СИСТЕМА" FontSize="11" FontWeight="Bold" Foreground="#FFCC00" Margin="0,0,0,10"/>
+
+            <Border Background="#0DFFFFFF" CornerRadius="14" Padding="14,12" Margin="0,0,0,14">
+                <StackPanel>
+                    <Grid Margin="0,0,0,12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Margin="0,0,12,0">
+                            <TextBlock Text="Автозапуск с Windows" Style="{StaticResource SettingTitle}"/>
+                            <TextBlock Text="Запускать плеер и Dynamic Island при входе в систему" Style="{StaticResource SettingSub}"/>
+                        </StackPanel>
+                        <CheckBox x:Name="ChkAutoStart" Grid.Column="1" Style="{StaticResource PillCheckBox}"
+                                  VerticalAlignment="Center" Checked="ChkAutoStart_Changed" Unchecked="ChkAutoStart_Changed"/>
+                    </Grid>
+
+                    <Grid Margin="0,0,0,12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Margin="0,0,12,0">
+                            <TextBlock Text="Запуск свёрнутым в Остров" Style="{StaticResource SettingTitle}"/>
+                            <TextBlock Text="При старте открывать только Остров и иконку в трее" Style="{StaticResource SettingSub}"/>
+                        </StackPanel>
+                        <CheckBox x:Name="ChkStartMinimized" Grid.Column="1" Style="{StaticResource PillCheckBox}"
+                                  VerticalAlignment="Center" Checked="ToggleSetting_Changed" Unchecked="ToggleSetting_Changed"/>
+                    </Grid>
+
+                    <Grid Margin="0,0,0,12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Margin="0,0,12,0">
+                            <TextBlock Text="Автопауза при переключении" Style="{StaticResource SettingTitle}"/>
+                            <TextBlock Text="Ставить предыдущий плеер на паузу при выборе другого источника" Style="{StaticResource SettingSub}"/>
+                        </StackPanel>
+                        <CheckBox x:Name="ChkAutoPause" Grid.Column="1" Style="{StaticResource PillCheckBox}"
+                                  VerticalAlignment="Center" Checked="ToggleSetting_Changed" Unchecked="ToggleSetting_Changed"/>
+                    </Grid>
+
+                    <Button Content="Аккаунты (Яндекс Музыка / ВК)"
+                            Style="{StaticResource SettingsActionBtn}"
+                            Click="OpenAccounts_Click"/>
+                </StackPanel>
+            </Border>
+
+            <!-- Секция: Dynamic Island -->
+            <TextBlock Text="DYNAMIC ISLAND" FontSize="11" FontWeight="Bold" Foreground="#FFCC00" Margin="0,0,0,10"/>
+
+            <Border Background="#0DFFFFFF" CornerRadius="14" Padding="14,12" Margin="0,0,0,14">
+                <StackPanel>
+                    <Grid Margin="0,0,0,12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Margin="0,0,12,0">
+                            <TextBlock Text="Закрепить Остров поверх всех окон" Style="{StaticResource SettingTitle}"/>
+                            <TextBlock Text="Если включено — Остров всегда поверх окон; если выключено — находится за всеми окнами (на уровне рабочего стола)" Style="{StaticResource SettingSub}"/>
+                        </StackPanel>
+                        <CheckBox x:Name="ChkIslandAlwaysOnTop" Grid.Column="1" Style="{StaticResource PillCheckBox}"
+                                  VerticalAlignment="Center" Checked="ToggleSetting_Changed" Unchecked="ToggleSetting_Changed"/>
+                    </Grid>
+
+                    <Grid Margin="0,0,0,12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Margin="0,0,12,0">
+                            <TextBlock Text="Живой эквалайзер на Острове" Style="{StaticResource SettingTitle}"/>
+                            <TextBlock Text="Анимированные полосы ритма в компактном режиме" Style="{StaticResource SettingSub}"/>
+                        </StackPanel>
+                        <CheckBox x:Name="ChkShowEq" Grid.Column="1" Style="{StaticResource PillCheckBox}"
+                                  VerticalAlignment="Center" Checked="ToggleSetting_Changed" Unchecked="ToggleSetting_Changed"/>
+                    </Grid>
+
+                    <Grid Margin="0,0,0,12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Margin="0,0,12,0">
+                            <TextBlock Text="Подсветка рамки от обложки" Style="{StaticResource SettingTitle}"/>
+                            <TextBlock Text="Окрашивать контур и свечение Острова в цвета трека" Style="{StaticResource SettingSub}"/>
+                        </StackPanel>
+                        <CheckBox x:Name="ChkCoverGlow" Grid.Column="1" Style="{StaticResource PillCheckBox}"
+                                  VerticalAlignment="Center" Checked="ToggleSetting_Changed" Unchecked="ToggleSetting_Changed"/>
+                    </Grid>
+
+                    <Grid Margin="0,0,0,12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Margin="0,0,12,0">
+                            <TextBlock Text="Размытие Acrylic на Острове" Style="{StaticResource SettingTitle}"/>
+                            <TextBlock Text="Системный эффект матового стекла Windows 11 на фоне Dynamic Island" Style="{StaticResource SettingSub}"/>
+                        </StackPanel>
+                        <CheckBox x:Name="ChkEnableIslandAcrylic" Grid.Column="1" Style="{StaticResource PillCheckBox}"
+                                  VerticalAlignment="Center" Checked="ToggleSetting_Changed" Unchecked="ToggleSetting_Changed"/>
+                    </Grid>
+
+                    <Grid Margin="0,0,0,14">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Margin="0,0,12,0">
+                            <TextBlock Text="Бегущая строка для длинных названий" Style="{StaticResource SettingTitle}"/>
+                            <TextBlock Text="Плавная прокрутка длинных названий треков на Острове с затуханием краёв" Style="{StaticResource SettingSub}"/>
+                        </StackPanel>
+                        <CheckBox x:Name="ChkEnableIslandMarquee" Grid.Column="1" Style="{StaticResource PillCheckBox}"
+                                  VerticalAlignment="Center" Checked="ToggleSetting_Changed" Unchecked="ToggleSetting_Changed"/>
+                    </Grid>
+
+                    <!-- Размер Острова -->
+                    <Grid Margin="0,0,0,10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="Размер Острова" Style="{StaticResource SettingTitle}"/>
+                        <TextBlock x:Name="TxtScaleValue" Grid.Column="1" Text="100%" Foreground="#FFCC00" FontWeight="Bold" FontSize="13"/>
+                    </Grid>
+                    <Slider x:Name="SliderScale" Style="{StaticResource ModernSlider}"
+                            Minimum="0.85" Maximum="1.30" TickFrequency="0.01" IsSnapToTickEnabled="True"
+                            ValueChanged="SliderScale_ValueChanged" Margin="0,0,0,12"/>
+
+                    <!-- Прозрачность Острова -->
+                    <Grid Margin="0,0,0,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="Прозрачность фона" Style="{StaticResource SettingTitle}"/>
+                        <TextBlock x:Name="TxtOpacityValue" Grid.Column="1" Text="94%" Foreground="#FFCC00" FontWeight="Bold" FontSize="13"/>
+                    </Grid>
+                    <Slider x:Name="SliderOpacity" Style="{StaticResource ModernSlider}"
+                            Minimum="0.50" Maximum="1.00" TickFrequency="0.01" IsSnapToTickEnabled="True"
+                            ValueChanged="SliderOpacity_ValueChanged" Margin="0,0,0,14"/>
+
+                    <Button Content="Вернуть Остров в центр сверху"
+                            Style="{StaticResource SettingsActionBtn}"
+                            Click="ResetIslandPosition_Click"/>
+                </StackPanel>
+            </Border>
+
+            <!-- Секция: Загрузки -->
+            <TextBlock Text="ЗАГРУЗКИ" FontSize="11" FontWeight="Bold" Foreground="#FFCC00" Margin="0,0,0,10"/>
+
+            <Border Background="#0DFFFFFF" CornerRadius="14" Padding="14,12" Margin="0,0,0,14">
+                <StackPanel>
+                    <TextBlock Text="Папка сохранения треков" Style="{StaticResource SettingTitle}" Margin="0,0,0,6"/>
+                    <Border Background="#16FFFFFF" CornerRadius="10" Padding="10,7" Margin="0,0,0,10">
+                        <TextBox x:Name="TxtDownloadFolder"
+                                 Background="Transparent" BorderThickness="0"
+                                 Foreground="White" CaretBrush="#FFCC00" FontSize="12.5"
+                                 LostFocus="TxtDownloadFolder_LostFocus"
+                                 KeyDown="TxtDownloadFolder_KeyDown"/>
+                    </Border>
+                    <Button Content="Открыть папку загрузок"
+                            Style="{StaticResource SettingsActionBtn}"
+                            Click="OpenDownloadFolder_Click"/>
+                </StackPanel>
+            </Border>
+
+            <!-- Секция: Горячие клавиши -->
+            <TextBlock Text="ГОРЯЧИЕ КЛАВИШИ (КЛАВИАТУРА)" FontSize="11" FontWeight="Bold" Foreground="#FFCC00" Margin="0,0,0,10"/>
+
+            <Border Background="#0DFFFFFF" CornerRadius="14" Padding="14,12" Margin="0,0,0,14">
+                <StackPanel>
+                    <TextBlock Text="Клавиши через Fn (мультимедийные, работают глобально во всех окнах и играх)" Style="{StaticResource SettingTitle}"/>
+                    <TextBlock Text="Fn + ⏮ / ⏭ (Media Prev / Next) — переключение треков • Fn + ⏯ (Media Play/Pause) — пауза / воспроизведение • Fn + ⏹ (Media Stop) — стоп."
+                               Style="{StaticResource SettingSub}" Margin="0,3,0,10"/>
+
+                    <TextBlock Text="Внутри плеера OmniWave и на Острове" Style="{StaticResource SettingTitle}"/>
+                    <TextBlock Text="← / → — перемотка ±15 сек • Пробел / K — пауза • ↑ / ↓ — громкость • M — без звука • L — лайк • R — повтор • S — перемешать."
+                               Style="{StaticResource SettingSub}" Margin="0,3,0,0"/>
+                </StackPanel>
+            </Border>
+
+            <!-- Секция: Диагностика yt-dlp -->
+            <TextBlock Text="ДИАГНОСТИКА ИСТОЧНИКОВ" FontSize="11" FontWeight="Bold" Foreground="#FFCC00" Margin="0,0,0,10"/>
+
+            <Border Background="#0DFFFFFF" CornerRadius="14" Padding="14,12">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Margin="0,0,12,0" VerticalAlignment="Center">
+                        <TextBlock Text="Движок поиска (yt-dlp)" Style="{StaticResource SettingTitle}"/>
+                        <TextBlock x:Name="TxtYtDlpStatus" Text="Проверка..." Style="{StaticResource SettingSub}"/>
+                    </StackPanel>
+                    <Button x:Name="BtnCheckYtDlp" Grid.Column="1" Content="Проверить"
+                            Style="{StaticResource SettingsActionBtn}"
+                            VerticalAlignment="Center"
+                            Click="CheckYtDlp_Click"/>
+                </Grid>
+            </Border>
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
+    </Border>
+</Window>

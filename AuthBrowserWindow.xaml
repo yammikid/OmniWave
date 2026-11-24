@@ -1,0 +1,112 @@
+<Window x:Class="DynamicIsland.AuthBrowserWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        Title="Авторизация OmniWave"
+        Icon="pack://application:,,,/Assets/omniwave.ico"
+        Width="460" Height="660"
+        WindowStyle="None"
+        AllowsTransparency="False"
+        Background="#12131A"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner"
+        TextOptions.TextFormattingMode="Ideal"
+        TextOptions.TextRenderingMode="ClearType">
+
+    <Window.Resources>
+        <Style x:Key="AuthBtn" TargetType="Button">
+            <Setter Property="Background" Value="#22FFFFFF"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="10,6"/>
+            <Setter Property="FontSize" Value="11.5"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="8" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#38FFFFFF"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#4EFFFFFF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Border BorderBrush="#26FFFFFF" BorderThickness="1">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Шапка окна -->
+            <Grid Grid.Row="0" Background="#181922" MouseLeftButtonDown="Header_MouseLeftButtonDown" Height="44">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="14,0,0,0">
+                    <TextBlock x:Name="HeaderLockIcon" Text="&#xE72E;" FontFamily="Segoe MDL2 Assets" FontSize="14" Foreground="#0077FF"
+                               VerticalAlignment="Center" Margin="0,0,8,0"/>
+                    <TextBlock x:Name="TxtTitle" Text="Авторизация" FontSize="14" FontWeight="Bold"
+                               Foreground="White" VerticalAlignment="Center"/>
+                </StackPanel>
+
+                <Button Grid.Column="1" Content="✕" Width="30" Height="30" Padding="0" Margin="0,0,10,0"
+                        Style="{StaticResource AuthBtn}" Click="Close_Click"/>
+            </Grid>
+
+            <!-- Статус -->
+            <Border Grid.Row="1" Background="#14151D" BorderBrush="#18FFFFFF" BorderThickness="0,1,0,1" Padding="14,6">
+                <TextBlock x:Name="TxtStatus" Text="Инициализация встроенного браузера..."
+                           Foreground="#9FA2B6" FontSize="11.5" TextTrimming="CharacterEllipsis"/>
+            </Border>
+
+            <!-- Встроенный WebView2 -->
+            <wv2:WebView2 x:Name="AuthWebView" Grid.Row="2"/>
+
+            <!-- Резервный блок ручного ввода / внешнего браузера -->
+            <Border Grid.Row="3" Background="#181922" BorderBrush="#1CFFFFFF" BorderThickness="0,1,0,0" Padding="12,10">
+                <StackPanel>
+                    <Button x:Name="BtnManualFallback"
+                            Content="Открыть во внешнем браузере / вставить код вручную"
+                            Style="{StaticResource AuthBtn}"
+                            Click="ManualFallback_Click"/>
+
+                    <StackPanel x:Name="ManualPanel" Visibility="Collapsed" Margin="0,8,0,0">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <Border Grid.Column="0" Background="#16FFFFFF" CornerRadius="8" Padding="9,6" Margin="0,0,6,0">
+                                <TextBox x:Name="TxtManualInput" Background="Transparent" BorderThickness="0"
+                                         Foreground="White" CaretBrush="#0077FF" FontSize="12"
+                                         VerticalContentAlignment="Center"/>
+                            </Border>
+                            <Button x:Name="BtnApplyManual" Grid.Column="1" Content="Применить" Style="{StaticResource AuthBtn}"
+                                    Background="#0077FF" Foreground="White" FontWeight="Bold"
+                                    Click="ApplyManual_Click"/>
+                        </Grid>
+                        <Button x:Name="BtnOpenExternalBrowser" Content="Открыть страницу входа в обычном браузере"
+                                Style="{StaticResource AuthBtn}" Margin="0,6,0,0"
+                                Visibility="Collapsed" Click="OpenExternalBrowser_Click"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Grid>
+    </Border>
+</Window>
