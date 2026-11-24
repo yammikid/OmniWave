@@ -92,6 +92,13 @@ public class LyricsService : IDisposable
                 result = await QuerySearchAsync(query, track.Duration, ct);
         }
 
+        if ((result == null || !result.HasLyrics) &&
+            !string.IsNullOrWhiteSpace(artist) &&
+            !string.IsNullOrWhiteSpace(title))
+        {
+            result = await QuerySearchAsync(title, track.Duration, ct);
+        }
+
         result ??= new LyricsResult { SourceInfo = "Текст не найден" };
         if (_cache.Count > 60) _cache.Clear();
         _cache[track.UniqueKey] = result;

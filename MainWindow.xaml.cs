@@ -82,6 +82,8 @@ public partial class MainWindow : Window
     private bool _isFoldedForFullscreen;
     private int _fullscreenAnimGen;
     private bool _isClosing;
+    private int _seekPreviewHideGen;
+    private long _islandScrubStartMs;
 
     public MainWindow()
     {
@@ -853,6 +855,7 @@ public partial class MainWindow : Window
         e.Handled = true;
         if (IslandProgressTrack.ActualWidth <= 0) return;
         _isScrubbingIslandProgress = true;
+        _islandScrubStartMs = GetActiveIslandTimes().CurrentMs;
         IslandProgressHitArea.CaptureMouse();
         double frac = UpdateSeekPreviewAtPoint(e);
         var (_, total) = GetActiveIslandTimes();
@@ -880,14 +883,18 @@ public partial class MainWindow : Window
 
         double frac = UpdateSeekPreviewAtPoint(e);
         var (_, total) = GetActiveIslandTimes();
-        if (!IslandProgressHitArea.IsMouseOver)
-            HideIslandSeekPreview();
-
         await _controller.SeekFractionAsync(frac);
         if (total > 0)
         {
             long targetMs = (long)Math.Round(total * frac);
+            long deltaMs = targetMs - _islandScrubStartMs;
+            FlashIslandSeekPreview(targetMs, deltaMs, total);
+            _playerWindow?.NotifySeekVisual(targetMs, deltaMs);
             ShowToast("\uE893", $"Перемотка → {FormatTimeMs(targetMs)}");
+        }
+        else if (!IslandProgressHitArea.IsMouseOver)
+        {
+            HideIslandSeekPreview();
         }
     }
 
@@ -1749,11 +1756,48 @@ public partial class MainWindow : Window
         menu.IsOpen = true;
     }
 
+    private void FlashIslandSeekPreview(long targetMs, long deltaMs, long totalMs)
+    {
+        UpdateIslandProgressBar(targetMs, totalMs);
+
+        if (totalMs <= 0 || IslandProgressTrack.ActualWidth <= 0) return;
+
+        double trackW = IslandProgressTrack.ActualWidth;
+        double frac = Math.Clamp((double)targetMs / totalMs, 0.0, 1.0);
+        double x = trackW * frac;
+        long absDelta = Math.Abs(deltaMs);
+        string sign = deltaMs >= 0 ? "+" : "-";
+        string deltaStr = FormatTimeMs(absDelta);
+
+        IslandProgressHoverFill.Visibility = Visibility.Visible;
+        IslandProgressHoverFill.Width = x;
+
+        IslandSeekPreviewText.Text = absDelta >= 1000
+            ? $"{FormatTimeMs(targetMs)} ({sign}{deltaStr})"
+            : FormatTimeMs(targetMs);
+        IslandSeekPreviewBadge.Visibility = Visibility.Visible;
+        IslandSeekPreviewBadge.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        double badgeW = IslandSeekPreviewBadge.DesiredSize.Width;
+        IslandSeekPreviewTransform.X = Math.Clamp(x - badgeW / 2.0, 0.0, Math.Max(0.0, trackW - badgeW));
+
+        int gen = ++_seekPreviewHideGen;
+        _ = HideIslandSeekPreviewAfterDelayAsync(gen);
+    }
+
+    private async Task HideIslandSeekPreviewAfterDelayAsync(int gen)
+    {
+        await Task.Delay(900);
+        if (gen == _seekPreviewHideGen && !_isScrubbingIslandProgress && !IslandProgressHitArea.IsMouseOver)
+            HideIslandSeekPreview();
+    }
+
     private async Task SeekRelativeWithToastAsync(long deltaMs, string glyph, string prefix)
     {
         var (cur, tot) = GetActiveIslandTimes();
         long target = tot > 0 ? Math.Clamp(cur + deltaMs, 0, tot) : Math.Max(0, cur + deltaMs);
         await _controller.SeekRelativeMsAsync(deltaMs);
+        FlashIslandSeekPreview(target, deltaMs, tot);
+        _playerWindow?.NotifySeekVisual(target, deltaMs);
         ShowToast(glyph, tot > 0 ? $"{prefix} → {FormatTimeMs(target)}" : $"{prefix}");
     }
 

@@ -49,7 +49,7 @@ public class AudioPlayerService : IDisposable
     private Func<Task<List<TrackItem>>>? _vkMixReplenishProvider;
     private int _waveReplenishing;
     private bool _isLoadingTrack;
-    private long _pendingSeekMs;
+    private long _pendingSeekMs = -1;
     private readonly Dictionary<string, (List<TrackItem> Queue, int Index, long PositionMs, bool IsWave)> _savedBrandQueues = new(StringComparer.OrdinalIgnoreCase);
     private List<TrackItem> _queue = new();
     private int _currentIndex = -1;
@@ -106,8 +106,8 @@ public class AudioPlayerService : IDisposable
         else
             Core.Initialize();
 
-        _libVlc = new LibVLC("--no-video", "--quiet");
-        _player = new MediaPlayer(_libVlc) { Volume = 100 };
+        _libVlc = new LibVLC("--no-video", "--quiet", "--aout=directsound");
+        _player = new MediaPlayer(_libVlc) { Volume = _softwareVolume };
         ApplyAudioFxToPlayer();
 
         // Не вызываем методы/свойства MediaPlayer синхронно внутри нативных коллбэков LibVLC
@@ -119,13 +119,18 @@ public class AudioPlayerService : IDisposable
         };
         _player.Playing += (_, _) =>
         {
-            long pending = Interlocked.Exchange(ref _pendingSeekMs, 0);
-            if (pending > 0)
+            long pending = Interlocked.Exchange(ref _pendingSeekMs, -1);
+            if (pending >= 0)
             {
                 _lastTimeMs = pending;
                 _ = Task.Run(() =>
                 {
-                    try { _player.Time = pending; } catch { }
+                    try
+                    {
+                        if (Math.Abs(_player.Time - pending) > 1500)
+                            _player.Time = pending;
+                    }
+                    catch { }
                 });
             }
             PlaybackStateChanged?.Invoke(true);
@@ -754,26 +759,43 @@ public class AudioPlayerService : IDisposable
             _player.Play();
     }
 
+    private void SeekInternalMs(long targetMs)
+    {
+        long len = _player.Length > 0 ? _player.Length : _cachedLengthMs;
+        if (len <= 0) return;
+
+        long clamped = Math.Clamp(targetMs, 0, len);
+        _lastTimeMs = clamped;
+        _pendingSeekMs = clamped;
+
+        if (_player.Length > 0)
+        {
+            try { _player.Time = clamped; } catch { }
+        }
+
+        PositionChanged?.Invoke(clamped, len);
+    }
+
     public void SeekFraction(double fraction)
     {
         fraction = Math.Clamp(fraction, 0.0, 1.0);
-        long len = _player.Length;
+        long len = _player.Length > 0 ? _player.Length : _cachedLengthMs;
         if (len > 0)
-            _player.Time = (long)(len * fraction);
+            SeekInternalMs((long)(len * fraction));
     }
 
-    public void SeekToMs(long ms)
-    {
-        long len = _player.Length;
-        if (len > 0)
-            _player.Time = Math.Clamp(ms, 0, len);
-    }
+    public void SeekToMs(long ms) => SeekInternalMs(ms);
 
     public void SeekRelativeMs(long deltaMs)
     {
-        long len = _player.Length;
-        if (len > 0)
-            _player.Time = Math.Clamp(_player.Time + deltaMs, 0, len);
+        long len = _player.Length > 0 ? _player.Length : _cachedLengthMs;
+        if (len <= 0) return;
+
+        long playerTime = _player.Time;
+        long baseMs = _player.IsPlaying && playerTime >= 0
+            ? playerTime
+            : (_lastTimeMs >= 0 ? _lastTimeMs : Math.Max(0, playerTime));
+        SeekInternalMs(baseMs + deltaMs);
     }
 
     public void SetVolume(int volume0To100)
@@ -812,25 +834,24 @@ public class AudioPlayerService : IDisposable
         {
             try
             {
-                _equalizer ??= new Equalizer();
+                bool muted = _softwareVolume <= 0;
+                _player.Mute = muted;
+                _player.Volume = muted ? 0 : _softwareVolume;
 
-                // Программная регулировка громкости через внутренний Equalizer DSP (-40 дБ .. 0 дБ)
-                // без изменения ползунка приложения в системном микшере громкости Windows.
-                float volDb = _softwareVolume <= 0
-                    ? -40f
-                    : 20f * MathF.Log10(_softwareVolume / 100f);
-
-                float basePreamp = EqualizerEnabled ? EqualizerPreamp : 0f;
-                float finalPreamp = Math.Clamp(basePreamp + volDb * 0.5f, -20f, 20f);
-                float remDb = (basePreamp + volDb) - finalPreamp;
-
-                _equalizer.SetPreamp(finalPreamp);
-                for (uint i = 0; i < 10; i++)
+                if (EqualizerEnabled)
                 {
-                    float baseBand = EqualizerEnabled ? EqualizerBands[i] : 0f;
-                    _equalizer.SetAmp(Math.Clamp(baseBand + remDb, -20f, 20f), i);
+                    _equalizer ??= new Equalizer();
+                    _equalizer.SetPreamp(Math.Clamp(EqualizerPreamp, -20f, 20f));
+                    for (uint i = 0; i < 10; i++)
+                    {
+                        _equalizer.SetAmp(Math.Clamp(EqualizerBands[i], -20f, 20f), i);
+                    }
+                    _player.SetEqualizer(_equalizer);
                 }
-                _player.SetEqualizer(_equalizer);
+                else
+                {
+                    _player.UnsetEqualizer();
+                }
 
                 _player.SetRate(PlaybackRate);
             }

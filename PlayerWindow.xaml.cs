@@ -1248,11 +1248,18 @@ public partial class PlayerWindow : Window
         if (totalMs > 0) _totalMs = totalMs;
 
         long now = Environment.TickCount64;
-        if (now - _lastPosPushTick < 180) return;
+        if (_player.IsPlaying && now - _lastPosPushTick < 180) return;
         _lastPosPushTick = now;
 
         Dispatcher.BeginInvoke(() =>
             PostToWeb("position", new { currentMs = _currentMs, totalMs = _totalMs }));
+    }
+
+    public void NotifySeekVisual(long targetMs, long deltaMs)
+    {
+        if (!_webViewReady) return;
+        Dispatcher.BeginInvoke(() =>
+            PostToWeb("seekFeedback", new { targetMs, deltaMs }));
     }
 
     private void OnPlaybackStateChanged(bool isPlaying)

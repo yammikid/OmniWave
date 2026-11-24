@@ -459,6 +459,7 @@ public static class PlayerLiquidGlassHtml
     display: flex;
     justify-content: space-between;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
     padding: 14px 18px;
     z-index: 5;
@@ -482,6 +483,7 @@ public static class PlayerLiquidGlassHtml
     display: inline-flex;
     align-items: center;
     gap: 6px;
+    flex-shrink: 0;
     white-space: nowrap;
     cursor: pointer;
     transition: transform 0.2s var(--spring), background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
@@ -538,6 +540,7 @@ public static class PlayerLiquidGlassHtml
   }
 
   #heroCoverBox {
+    position: relative;
     width: clamp(114px, 18.5vh, 168px);
     height: clamp(114px, 18.5vh, 168px);
     border-radius: 22px;
@@ -552,6 +555,40 @@ public static class PlayerLiquidGlassHtml
   }
   #heroCoverBox.playing {
     animation: heroCoverBreathe 3.4s ease-in-out infinite;
+  }
+  .hero-seek-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    background: rgba(8, 12, 22, 0.58);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    color: #ffffff;
+    font-variant-numeric: tabular-nums;
+    opacity: 0;
+    transform: scale(0.92);
+    pointer-events: none;
+    z-index: 4;
+    transition: opacity 0.16s ease, transform 0.22s var(--spring);
+  }
+  .hero-seek-overlay.show {
+    opacity: 1;
+    transform: scale(1);
+  }
+  .hero-seek-overlay-delta {
+    font-size: 20px;
+    font-weight: 900;
+    color: var(--accent);
+    text-shadow: 0 2px 14px rgba(var(--accent-rgb), 0.65);
+  }
+  .hero-seek-overlay-time {
+    font-size: 12px;
+    font-weight: 700;
+    color: rgba(255, 255, 255, 0.9);
   }
 
   .hero-capsule-row {
@@ -648,6 +685,14 @@ public static class PlayerLiquidGlassHtml
   }
   .glass-progress-capsule:hover {
     border-color: rgba(255, 255, 255, 0.48);
+  }
+  .glass-progress-capsule.seek-flash {
+    border-color: rgba(var(--accent-rgb), 0.88);
+    box-shadow:
+      inset 0 1px 0.8px rgba(255, 255, 255, 0.68),
+      0 0 26px rgba(var(--accent-rgb), 0.46),
+      0 14px 36px rgba(0, 0, 0, 0.34);
+    transform: scale(1.015);
   }
 
   .glass-hover-fill {
@@ -992,7 +1037,7 @@ public static class PlayerLiquidGlassHtml
     <header id="stageTopBar" class="stage-top-bar">
       <button id="btnToggleSidebar" class="top-pill-btn glass-glare">☰ Скрыть панель</button>
 
-      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end;min-width:0;">
+      <div style="display:flex;align-items:center;gap:6px;flex:1 1 auto;flex-wrap:wrap;justify-content:flex-end;min-width:0;">
         <button id="btnYandexWave" class="top-pill-btn glass-glare" title="Запустить «Мою волну» Яндекса" style="border-color:rgba(255,204,0,0.45);color:#FFD84D;">🌊 Моя волна</button>
         <button id="btnVkMix" class="top-pill-btn glass-glare" title="Запустить бесконечный поток «VK Микс»" style="border-color:rgba(0,119,255,0.5);color:#6EB4FF;">🔥 VK Микс</button>
         <button class="top-pill-btn glass-glare" data-drawer="0">Текст</button>
@@ -1019,6 +1064,10 @@ public static class PlayerLiquidGlassHtml
         <img id="heroCoverImg" alt="" style="width:100%;height:100%;object-fit:cover;display:none;"/>
         <div id="heroCoverPlaceholder" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,0.08);color:rgba(255,255,255,0.45);font-size:42px;">
           ♫
+        </div>
+        <div id="heroSeekOverlay" class="hero-seek-overlay">
+          <span id="heroSeekOverlayDelta" class="hero-seek-overlay-delta">+15 с</span>
+          <span id="heroSeekOverlayTime" class="hero-seek-overlay-time">0:00</span>
         </div>
       </div>
 
@@ -1631,7 +1680,7 @@ function updateStageKaraoke() {
   if (!lyr.hasSynced || !lyr.syncedLines || lyr.syncedLines.length === 0) {
     const first = lyr.plainText ? lyr.plainText.split(/\r?\n/).find(x => x.trim()) : '';
     p.textContent = '';
-    c.textContent = first || (lyr.emptyMessage || (st.currentTrack ? '♪' : ''));
+    c.textContent = first || '';
     n.textContent = '';
     p.dataset.ms = ''; c.dataset.ms = ''; n.dataset.ms = '';
     return;
@@ -1682,19 +1731,52 @@ function syncActiveLyric(ms) {
 }
 
 // ==================== EQ & SOUND ====================
-function renderSoundControls() {
+function syncEqEnabledUi() {
   const eqBtn = document.getElementById('btnEqToggle');
-  eqBtn.textContent = st.eq.enabled ? 'Вкл' : 'Выкл';
-  eqBtn.classList.toggle('active', st.eq.enabled);
+  if (eqBtn) {
+    eqBtn.textContent = st.eq.enabled ? 'Вкл' : 'Выкл';
+    eqBtn.classList.toggle('active', st.eq.enabled);
+  }
+  const pSlider = document.getElementById('preampSlider');
+  if (pSlider) {
+    pSlider.style.transition = 'opacity 0.18s ease';
+    pSlider.style.opacity = st.eq.enabled ? '1' : '0.45';
+  }
+  const grid = document.getElementById('eqBandsGrid');
+  if (grid && grid.parentElement) {
+    grid.parentElement.style.transition = 'opacity 0.18s ease';
+    grid.parentElement.style.opacity = st.eq.enabled ? '1' : '0.45';
+  }
+}
+
+function applyCustomEqFromSlider() {
+  st.eq.enabled = true;
+  st.eq.preset = 'Custom';
+  document.querySelectorAll('#eqPresetsWrap .top-pill-btn').forEach(x => x.classList.remove('active'));
+  syncEqEnabledUi();
+  postCmd('eq.update', { enabled: true, preset: 'Custom', preamp: st.eq.preamp, bands: st.eq.bands });
+}
+
+function renderSoundControls() {
+  syncEqEnabledUi();
 
   const pWrap = document.getElementById('eqPresetsWrap');
   pWrap.innerHTML = '';
   Object.keys(st.eq.presets || {}).forEach(name => {
     const b = document.createElement('button');
-    b.className = `top-pill-btn ${st.eq.preset === name ? 'active' : ''}`;
+    const isPresetActive = st.eq.enabled && st.eq.preset === name;
+    b.className = `top-pill-btn ${isPresetActive ? 'active' : ''}`;
     b.style.cssText = 'padding:4px 9px;font-size:11px;';
     b.textContent = name;
-    b.onclick = () => postCmd('eq.applyPreset', { preset: name });
+    b.onclick = () => {
+      if (st.eq.enabled && st.eq.preset === name) {
+        st.eq.enabled = false;
+        postCmd('eq.update', { enabled: false, preset: st.eq.preset, preamp: st.eq.preamp, bands: st.eq.bands });
+        renderSoundControls();
+      } else {
+        postCmd('eq.applyPreset', { preset: name });
+      }
+    };
     pWrap.appendChild(b);
   });
 
@@ -1716,8 +1798,7 @@ function renderSoundControls() {
     sl.className = 'eq-slider-v';
     sl.oninput = e => {
       st.eq.bands[i] = Number(e.target.value);
-      st.eq.preset = 'Custom';
-      postCmd('eq.update', { enabled: st.eq.enabled, preset: 'Custom', preamp: st.eq.preamp, bands: st.eq.bands });
+      applyCustomEqFromSlider();
     };
     const t = document.createElement('span');
     t.style.cssText = 'font-size:9px;color:rgba(255,255,255,0.52);';
@@ -1747,9 +1828,8 @@ document.getElementById('btnEqToggle').onclick = () => {
 };
 document.getElementById('preampSlider').oninput = e => {
   st.eq.preamp = Number(e.target.value);
-  st.eq.preset = 'Custom';
   document.getElementById('preampValText').textContent = `${st.eq.preamp > 0 ? '+' : ''}${st.eq.preamp.toFixed(1)} дБ`;
-  postCmd('eq.update', { enabled: st.eq.enabled, preset: 'Custom', preamp: st.eq.preamp, bands: st.eq.bands });
+  applyCustomEqFromSlider();
 };
 
 // ==================== STAGE & CONTROLS ====================
@@ -1787,6 +1867,58 @@ function renderStage() {
   }
 }
 
+let seekVisualTimer = null;
+function triggerSeekVisualEffect(targetMs, deltaMs) {
+  const clamped = st.totalMs > 0
+    ? Math.min(st.totalMs, Math.max(0, targetMs))
+    : Math.max(0, targetMs);
+  st.currentMs = clamped;
+  updateProgressUi();
+  syncActiveLyric(clamped);
+
+  const cap = document.getElementById('heroProgressCapsule');
+  const tip = document.getElementById('heroSeekTooltip');
+  const ov = document.getElementById('heroSeekOverlay');
+  const ovDelta = document.getElementById('heroSeekOverlayDelta');
+  const ovTime = document.getElementById('heroSeekOverlayTime');
+
+  const sign = deltaMs >= 0 ? '+' : '-';
+  const absSec = Math.round(Math.abs(deltaMs) / 1000);
+  const deltaLabel = absSec > 0 ? `${sign}${absSec} с` : fmtMs(clamped);
+
+  if (ov && ovDelta && ovTime) {
+    ovDelta.textContent = deltaLabel;
+    ovTime.textContent = st.totalMs > 0 ? `${fmtMs(clamped)} / ${fmtMs(st.totalMs)}` : fmtMs(clamped);
+    ov.classList.add('show');
+  }
+  if (cap) {
+    cap.classList.remove('seek-flash');
+    void cap.offsetWidth;
+    cap.classList.add('seek-flash');
+  }
+  if (tip && st.totalMs > 0) {
+    const pct = Math.min(1, Math.max(0, clamped / Math.max(1, st.totalMs)));
+    const r = cap ? cap.getBoundingClientRect() : { width: 320 };
+    const relX = r.width * pct;
+    tip.textContent = absSec > 0 ? `${fmtMs(clamped)} (${sign}${fmtMs(Math.abs(deltaMs))})` : fmtMs(clamped);
+    tip.style.left = `${Math.max(40, Math.min(r.width - 40, relX))}px`;
+    tip.classList.add('show');
+  }
+
+  if (seekVisualTimer) clearTimeout(seekVisualTimer);
+  seekVisualTimer = setTimeout(() => {
+    if (ov) ov.classList.remove('show');
+    if (cap) cap.classList.remove('seek-flash');
+    if (!st.scrubbing && tip) tip.classList.remove('show');
+  }, 900);
+}
+
+function triggerRelativeSeek(deltaMs) {
+  const target = (st.currentMs || 0) + deltaMs;
+  triggerSeekVisualEffect(target, deltaMs);
+  postCmd('player.seekRelative', { deltaMs });
+}
+
 function updateProgressUi() {
   document.getElementById('heroCurTime').textContent = fmtMs(st.currentMs);
   document.getElementById('heroTotTime').textContent = st.totalMs > 0 ? fmtMs(st.totalMs) : (st.currentTrack?.durationText || '0:00');
@@ -1800,6 +1932,7 @@ function updateProgressUi() {
 const capEl = document.getElementById('heroProgressCapsule');
 const seekTipEl = document.getElementById('heroSeekTooltip');
 const hoverFillEl = document.getElementById('heroHoverFill');
+let scrubStartMs = 0;
 const previewAtPointer = (e, applyCurrent) => {
   const r = capEl.getBoundingClientRect();
   const relX = Math.min(r.width, Math.max(0, e.clientX - r.left));
@@ -1810,7 +1943,7 @@ const previewAtPointer = (e, applyCurrent) => {
   }
   if (seekTipEl && st.totalMs > 0) {
     const targetMs = Math.round(st.totalMs * frac);
-    const diffMs = targetMs - (st.currentMs || 0);
+    const diffMs = targetMs - (st.scrubbing ? scrubStartMs : (st.currentMs || 0));
     const sign = diffMs >= 0 ? '+' : '-';
     seekTipEl.textContent = Math.abs(diffMs) >= 1000
       ? `${fmtMs(targetMs)} (${sign}${fmtMs(Math.abs(diffMs))})`
@@ -1833,6 +1966,7 @@ capEl.onpointerleave = () => {
 };
 capEl.onpointerdown = e => {
   st.scrubbing = true;
+  scrubStartMs = st.currentMs || 0;
   capEl.setPointerCapture(e.pointerId);
   previewAtPointer(e, true);
 };
@@ -1841,10 +1975,13 @@ capEl.onpointerup = e => {
   if (!st.scrubbing) return;
   st.scrubbing = false;
   const frac = previewAtPointer(e, true);
+  if (st.totalMs > 0) {
+    const targetMs = Math.round(st.totalMs * frac);
+    triggerSeekVisualEffect(targetMs, targetMs - scrubStartMs);
+  }
   postCmd('player.seekFraction', { fraction: frac });
   const r = capEl.getBoundingClientRect();
   if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) {
-    if (seekTipEl) seekTipEl.classList.remove('show');
     if (hoverFillEl) hoverFillEl.style.opacity = '0';
   }
 };
@@ -1959,10 +2096,10 @@ document.getElementById('btnSettings').onclick = () => postCmd('window.openSetti
 document.getElementById('btnAccounts').onclick = () => postCmd('window.openAccounts');
 
 document.getElementById('btnPlayPause').onclick = () => postCmd('player.togglePause');
-document.getElementById('btnSeekBack15').onclick = () => postCmd('player.seekRelative', { deltaMs: -15000 });
+document.getElementById('btnSeekBack15').onclick = () => triggerRelativeSeek(-15000);
 document.getElementById('btnPrev').onclick = () => postCmd('player.prev');
 document.getElementById('btnNext').onclick = () => postCmd('player.next');
-document.getElementById('btnSeekFwd15').onclick = () => postCmd('player.seekRelative', { deltaMs: 15000 });
+document.getElementById('btnSeekFwd15').onclick = () => triggerRelativeSeek(15000);
 document.getElementById('btnRepeat').onclick = () => postCmd('player.cycleRepeat');
 document.getElementById('btnShuffle').onclick = () => postCmd('player.shuffle');
 document.getElementById('btnMute').onclick = () => postCmd('player.toggleMute');
@@ -1996,10 +2133,10 @@ window.addEventListener('keydown', e => {
     postCmd('player.togglePause');
   } else if (e.code === 'ArrowRight' && !hasMod) {
     e.preventDefault();
-    postCmd('player.seekRelative', { deltaMs: 15000 });
+    triggerRelativeSeek(15000);
   } else if (e.code === 'ArrowLeft' && !hasMod) {
     e.preventDefault();
-    postCmd('player.seekRelative', { deltaMs: -15000 });
+    triggerRelativeSeek(-15000);
   } else if (e.code === 'ArrowUp' && !hasMod) {
     e.preventDefault();
     st.volume = Math.min(100, st.volume + 5);
@@ -2243,6 +2380,10 @@ window.chrome?.webview?.addEventListener('message', event => {
 
     case 'windowState':
       document.getElementById('btnWinMax').textContent = m.maximized ? '❐' : '□';
+      break;
+
+    case 'seekFeedback':
+      triggerSeekVisualEffect(m.targetMs || 0, m.deltaMs || 0);
       break;
 
     case 'focusNewPlaylist':

@@ -442,7 +442,12 @@ public sealed class YandexMusicProvider : IMusicProvider, IDisposable
                 string? dlUrl = ReadStringOrNumber(v, "downloadInfoUrl");
                 if (string.IsNullOrWhiteSpace(dlUrl)) continue;
 
-                int score = codec.Equals("mp3", StringComparison.OrdinalIgnoreCase) ? bitrate + 1000 : bitrate;
+                int score = codec.Contains("flac", StringComparison.OrdinalIgnoreCase)
+                    ? bitrate + 2000
+                    : (codec.Equals("mp3", StringComparison.OrdinalIgnoreCase) ||
+                       (codec.Contains("aac", StringComparison.OrdinalIgnoreCase) && bitrate >= 192))
+                        ? bitrate + 1000
+                        : bitrate;
                 if (score > bestBitrate)
                 {
                     bestBitrate = score;

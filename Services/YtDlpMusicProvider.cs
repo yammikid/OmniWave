@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 
@@ -126,17 +127,113 @@ public class YtDlpMusicProvider : IMusicProvider
         }
     }
 
-    private static string ResolveYtDlpExecutable()
+    private const string YtDlpLatestReleaseUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
+    private static readonly SemaphoreSlim YtDlpDownloadGate = new(1, 1);
+
+    private static string AppDataYtDlpPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "OmniWave",
+        "tools",
+        "yt-dlp.exe");
+
+    private static string? FindExistingYtDlpExecutable()
     {
-        var localExe = Path.Combine(AppContext.BaseDirectory, "yt-dlp.exe");
-        return File.Exists(localExe) ? localExe : "yt-dlp";
+        var baseExe = Path.Combine(AppContext.BaseDirectory, "yt-dlp.exe");
+        if (File.Exists(baseExe)) return baseExe;
+
+        var appDataExe = AppDataYtDlpPath;
+        if (File.Exists(appDataExe)) return appDataExe;
+
+        var localApp = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (!string.IsNullOrWhiteSpace(localApp))
+        {
+            var winGetLink = Path.Combine(localApp, "Microsoft", "WinGet", "Links", "yt-dlp.exe");
+            if (File.Exists(winGetLink)) return winGetLink;
+
+            var winGetPkgRoot = Path.Combine(localApp, "Microsoft", "WinGet", "Packages");
+            if (Directory.Exists(winGetPkgRoot))
+            {
+                try
+                {
+                    foreach (var pkgDir in Directory.EnumerateDirectories(winGetPkgRoot, "yt-dlp*"))
+                    {
+                        var candidate = Path.Combine(pkgDir, "yt-dlp.exe");
+                        if (File.Exists(candidate)) return candidate;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        var pathEnv = Environment.GetEnvironmentVariable("PATH");
+        if (!string.IsNullOrWhiteSpace(pathEnv))
+        {
+            foreach (var dir in pathEnv.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+            {
+                try
+                {
+                    var candidate = Path.Combine(dir.Trim().Trim('"'), "yt-dlp.exe");
+                    if (File.Exists(candidate)) return candidate;
+                }
+                catch { }
+            }
+        }
+
+        return null;
+    }
+
+    public static string ResolveYtDlpExecutable()
+        => FindExistingYtDlpExecutable() ?? "yt-dlp";
+
+    public static async Task<string> EnsureYtDlpExecutableAsync(CancellationToken ct = default)
+    {
+        var existing = FindExistingYtDlpExecutable();
+        if (existing != null) return existing;
+
+        await YtDlpDownloadGate.WaitAsync(ct);
+        try
+        {
+            existing = FindExistingYtDlpExecutable();
+            if (existing != null) return existing;
+
+            var targetPath = AppDataYtDlpPath;
+            var dir = Path.GetDirectoryName(targetPath)!;
+            Directory.CreateDirectory(dir);
+            var partPath = targetPath + ".part";
+
+            using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(3) };
+            http.DefaultRequestHeaders.UserAgent.ParseAdd("OmniWave/1.0");
+            using var resp = await http.GetAsync(YtDlpLatestReleaseUrl, HttpCompletionOption.ResponseHeadersRead, ct);
+            if (resp.IsSuccessStatusCode)
+            {
+                await using (var fs = new FileStream(partPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, useAsync: true))
+                {
+                    await resp.Content.CopyToAsync(fs, ct);
+                }
+
+                if (new FileInfo(partPath).Length > 1_000_000)
+                {
+                    File.Move(partPath, targetPath, overwrite: true);
+                    return targetPath;
+                }
+                try { File.Delete(partPath); } catch { }
+            }
+        }
+        catch { }
+        finally
+        {
+            YtDlpDownloadGate.Release();
+        }
+
+        return ResolveYtDlpExecutable();
     }
 
     private static async Task<string?> RunYtDlpAsync(string arguments, CancellationToken ct)
     {
+        var exe = await EnsureYtDlpExecutableAsync(ct);
         var psi = new ProcessStartInfo
         {
-            FileName = ResolveYtDlpExecutable(),
+            FileName = exe,
             Arguments = arguments,
             RedirectStandardOutput = true,
             RedirectStandardError = true,

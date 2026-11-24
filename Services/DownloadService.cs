@@ -258,10 +258,11 @@ public class DownloadService : IDisposable
         var uniqueBase = $"{baseName}_{Math.Abs(track.UniqueKey.GetHashCode()):X}";
         var outTemplate = Path.Combine(folder, $"{uniqueBase}.%(ext)s");
         var args = $"--newline -f \"bestaudio/best\" --no-playlist --no-warnings -o \"{outTemplate}\" \"{streamUrl}\"";
+        var ytDlpExe = await YtDlpMusicProvider.EnsureYtDlpExecutableAsync(ct);
 
         var psi = new ProcessStartInfo
         {
-            FileName = ResolveYtDlpExecutable(),
+            FileName = ytDlpExe,
             Arguments = args,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -417,10 +418,7 @@ public class DownloadService : IDisposable
     }
 
     private static string ResolveYtDlpExecutable()
-    {
-        var localExe = Path.Combine(AppContext.BaseDirectory, "yt-dlp.exe");
-        return File.Exists(localExe) ? localExe : "yt-dlp";
-    }
+        => YtDlpMusicProvider.ResolveYtDlpExecutable();
 
     private Dictionary<string, string> LoadIndex()
     {

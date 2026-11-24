@@ -51,6 +51,7 @@ dotnet publish -c Release -r win-x64 --self-contained false -o ./publish
 set "BUILD_EXIT=%errorlevel%"
 if %BUILD_EXIT% neq 0 goto :BuildFailed
 if not exist "%~dp0publish\DynamicIsland.exe" goto :MissingExe
+if exist "%~dp0yt-dlp.exe" copy /y "%~dp0yt-dlp.exe" "%~dp0publish\yt-dlp.exe" >nul
 
 echo.
 echo Done! Starting publish\DynamicIsland.exe...

@@ -261,8 +261,11 @@ public class YouTubeFastProvider : IMusicProvider, IDisposable
             }
         }
 
-        if (!string.IsNullOrWhiteSpace(bestMp4Url)) return bestMp4Url;
+        if (!string.IsNullOrWhiteSpace(bestWebmUrl) && !string.IsNullOrWhiteSpace(bestMp4Url))
+            return bestWebmBitrate > bestMp4Bitrate ? bestWebmUrl : bestMp4Url;
+
         if (!string.IsNullOrWhiteSpace(bestWebmUrl)) return bestWebmUrl;
+        if (!string.IsNullOrWhiteSpace(bestMp4Url)) return bestMp4Url;
 
         if (sd.TryGetProperty("formats", out var formats) && formats.ValueKind == JsonValueKind.Array)
         {

@@ -114,6 +114,13 @@ public class SettingsService
                 if (loaded != null)
                 {
                     loaded.Normalize();
+                    if (loaded.EqualizerEnabled &&
+                        string.Equals(loaded.EqualizerPreset, "Flat", StringComparison.OrdinalIgnoreCase) &&
+                        MathF.Abs(loaded.EqualizerPreamp) < 0.01f &&
+                        loaded.EqualizerBands.All(b => MathF.Abs(b) < 0.01f))
+                    {
+                        loaded.EqualizerEnabled = false;
+                    }
                     return loaded;
                 }
             }
