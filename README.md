@@ -10,6 +10,12 @@
 
 ---
 
+## Быстрый запуск (готовый `.exe`)
+
+1. Скачайте репозиторий (**Code → Download ZIP** и распакуйте архив, либо `git clone https://github.com/yammikid/OmniWave.git`).
+2. Запустите **`DynamicIsland.exe`** прямо из основной папки проекта — собирать ничего не нужно!
+3. Если Windows сообщит об отсутствии среды выполнения, установите лёгкий **[.NET 8 Desktop Runtime (x64)](https://dotnet.microsoft.com/download/dotnet/8.0)** *(SDK для запуска готового `.exe` не требуется)*.
+
 ## Возможности
 
 - **Clear Liquid Glass UI:** главное окно на базе WebView2 с адаптивным фоновым свечением от обложки трека.
@@ -25,13 +31,13 @@
 ## Требования
 
 - **Windows 10 / 11** (`x64`)
-- **[.NET 8 SDK (x64)](https://dotnet.microsoft.com/download/dotnet/8.0)** *(нужен именно **SDK**, а не **Runtime**, чтобы собрать `.exe` из исходников — либо установите командой `winget install Microsoft.DotNet.SDK.8`)*
+- **[.NET 8 Desktop Runtime (x64)](https://dotnet.microsoft.com/download/dotnet/8.0)** — для запуска готового `DynamicIsland.exe` *(или **[.NET 8 SDK (x64)](https://dotnet.microsoft.com/download/dotnet/8.0)**, если планируете собирать проект из исходников)*
 - **Microsoft Edge WebView2 Runtime** (предустановлен в Windows 11)
 - **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** *(опционально — для резервного резолва аудиопотоков; можно установить через `winget install yt-dlp.yt-dlp` или положить `yt-dlp.exe` рядом с `DynamicIsland.exe`)*
 
-## Сборка и запуск
+## Сборка из исходников (для разработчиков)
 
-В репозитории находится исходный код без готового `.exe` — перед первым запуском приложение нужно собрать локально:
+Если хотите пересобрать проект самостоятельно:
 
 1. Установите **[.NET 8 SDK (x64)](https://dotnet.microsoft.com/download/dotnet/8.0)** *(именно **SDK**, не Runtime; скрипт [`build.bat`](build.bat) также проверяет его наличие и при необходимости предлагает установку через `winget`)*.
 2. Скачайте исходный код (`git clone https://github.com/yammikid/OmniWave.git` или **Code → Download ZIP** и распакуйте архив).

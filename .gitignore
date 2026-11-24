@@ -11,3 +11,5 @@ publish/
 settings.json
 library.json
 WebView2*/
+*.pdb
+libvlc/win-x86/
