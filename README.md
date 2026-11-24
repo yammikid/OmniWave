@@ -10,6 +10,12 @@
 
 ---
 
+## Скачать готовую сборку
+
+1. Откройте [**GitHub Releases**](https://github.com/yammikid/OmniWave/releases/latest) и скачайте архив **`OmniWave-v1.0.0-win-x64.zip`**.
+2. Распакуйте папку `OmniWave` в удобное место и запустите **`DynamicIsland.exe`**.
+3. Для запуска требуются **Windows 10 / 11 (x64)** и установленный **[.NET 8 Desktop Runtime (x64)](https://dotnet.microsoft.com/download/dotnet/8.0)** (WebView2 уже встроен в Windows 11).
+
 ## Возможности
 
 - **Clear Liquid Glass UI:** главное окно на базе WebView2 с адаптивным фоновым свечением от обложки трека.
