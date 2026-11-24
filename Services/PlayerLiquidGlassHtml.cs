@@ -993,6 +993,14 @@ public static class PlayerLiquidGlassHtml
             <div id="favTransferBarFill" style="height:100%;width:0%;background:#FFCC00;border-radius:999px;transition:width 0.2s ease;"></div>
           </div>
         </div>
+        <div style="flex-shrink:0;padding:0 14px 8px;">
+          <div class="search-input-wrap" style="padding:5px 10px;">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.55)" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input id="favoritesSearchInput" type="text" placeholder="Поиск в любимых треках..."
+                   style="flex:1;min-width:0;background:transparent;border:none;outline:none;color:#fff;font-family:inherit;font-size:12px;"/>
+            <button id="btnClearFavSearch" style="display:none;width:18px;height:18px;border-radius:50%;border:none;background:rgba(255,255,255,0.2);color:#fff;font-size:10px;cursor:pointer;align-items:center;justify-content:center;" title="Очистить">✕</button>
+          </div>
+        </div>
         <div id="favoritesList" class="glass-scroll" style="flex:1;min-height:0;overflow-y:auto;padding:0 10px 12px 14px;display:flex;flex-direction:column;gap:5px;"></div>
       </div>
 
@@ -1017,6 +1025,15 @@ public static class PlayerLiquidGlassHtml
             </div>
           </div>
 
+          <div style="flex-shrink:0;padding:0 14px 8px;">
+            <div class="search-input-wrap" style="padding:5px 10px;">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.55)" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              <input id="playlistsOverviewSearchInput" type="text" placeholder="Поиск плейлиста или трека в списках..."
+                     style="flex:1;min-width:0;background:transparent;border:none;outline:none;color:#fff;font-family:inherit;font-size:12px;"/>
+              <button id="btnClearPlOverviewSearch" style="display:none;width:18px;height:18px;border-radius:50%;border:none;background:rgba(255,255,255,0.2);color:#fff;font-size:10px;cursor:pointer;align-items:center;justify-content:center;" title="Очистить">✕</button>
+            </div>
+          </div>
+
           <div id="playlistsList" class="glass-scroll" style="flex:1;min-height:0;overflow-y:auto;padding:0 10px 12px 14px;display:flex;flex-direction:column;gap:6px;"></div>
         </div>
 
@@ -1028,6 +1045,14 @@ public static class PlayerLiquidGlassHtml
               <div id="detailPlCount" style="font-size:10.5px;color:rgba(255,255,255,0.55);">0 треков</div>
             </div>
             <button id="btnPlayOpenedPl" style="padding:5px 10px;border-radius:8px;border:none;background:#FFCC00;color:#000;font-family:inherit;font-size:11px;font-weight:800;cursor:pointer;">▶ Играть</button>
+          </div>
+          <div style="flex-shrink:0;padding:0 14px 8px;">
+            <div class="search-input-wrap" style="padding:5px 10px;">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.55)" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              <input id="playlistTrackSearchInput" type="text" placeholder="Поиск трека в этом плейлисте..."
+                     style="flex:1;min-width:0;background:transparent;border:none;outline:none;color:#fff;font-family:inherit;font-size:12px;"/>
+              <button id="btnClearPlTrackSearch" style="display:none;width:18px;height:18px;border-radius:50%;border:none;background:rgba(255,255,255,0.2);color:#fff;font-size:10px;cursor:pointer;align-items:center;justify-content:center;" title="Очистить">✕</button>
+            </div>
           </div>
           <div id="playlistTracksList" class="glass-scroll" style="flex:1;min-height:0;overflow-y:auto;padding:0 10px 12px 14px;display:flex;flex-direction:column;gap:5px;"></div>
         </div>
@@ -1277,7 +1302,10 @@ const st = {
   vkConnected: false,
   results: [],
   favorites: [],
+  favoritesQuery: '',
   playlists: [],
+  playlistOverviewQuery: '',
+  playlistTrackQuery: '',
   openedPlaylistId: null,
   queue: [],
   currentTrack: null,
@@ -1408,7 +1436,7 @@ document.getElementById('btnScrollUp').onclick = () => document.getElementById('
 document.getElementById('btnScrollDown').onclick = () => document.getElementById('resultsList').scrollBy({ top: 240, behavior: 'smooth' });
 
 // ==================== TRACK CARD RENDERER ====================
-function createTrackCard(tr, index, listKind, playlistId = null) {
+function createTrackCard(tr, index, listKind, playlistId = null, playlistLabel = null) {
   const isCur = st.currentTrack && st.currentTrack.uniqueKey === tr.uniqueKey;
   const card = document.createElement('div');
   card.className = `track-card ${isCur ? 'active' : ''}`;
@@ -1431,6 +1459,7 @@ function createTrackCard(tr, index, listKind, playlistId = null) {
         <span style="font-size:11px;color:rgba(255,255,255,0.62);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(tr.artist)}</span>
         ${tr.durationText ? `<span style="font-size:10px;color:rgba(255,255,255,0.44);flex-shrink:0;">${esc(tr.durationText)}</span>` : ''}
       </div>
+      ${playlistLabel ? `<div style="font-size:10px;color:#FFCC00;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">📁 ${esc(playlistLabel)}</div>` : ''}
     </div>
     <div style="display:flex;align-items:center;gap:3px;flex-shrink:0;">
       <button class="card-icon-btn" data-act="play" title="Играть">▶</button>
@@ -1492,8 +1521,81 @@ const submitNewPlaylist = () => {
 };
 document.getElementById('btnCreatePl').onclick = submitNewPlaylist;
 document.getElementById('newPlInput').onkeydown = e => { if (e.key === 'Enter') submitNewPlaylist(); };
-document.getElementById('btnBackPlaylists').onclick = () => { st.openedPlaylistId = null; renderPlaylists(); };
-document.getElementById('btnPlayOpenedPl').onclick = () => { if (st.openedPlaylistId) postCmd('playlists.play', { id: st.openedPlaylistId }); };
+document.getElementById('btnBackPlaylists').onclick = () => {
+  st.openedPlaylistId = null;
+  resetPlaylistTrackSearchUi();
+  renderPlaylists();
+};
+document.getElementById('btnPlayOpenedPl').onclick = () => {
+  if (!st.openedPlaylistId) return;
+  const opened = st.playlists.find(p => p.id === st.openedPlaylistId);
+  const q = st.playlistTrackQuery.trim();
+  if (opened && q) {
+    const filtered = filterTracksByQuery(opened.tracks, q);
+    if (filtered.length > 0) {
+      postCmd('search.playTrack', { list: 'playlist', playlistId: opened.id, trackKey: filtered[0].uniqueKey, index: 0 });
+      return;
+    }
+  }
+  postCmd('playlists.play', { id: st.openedPlaylistId });
+};
+
+function filterTracksByQuery(tracks, rawQuery) {
+  const words = (rawQuery || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return tracks || [];
+  return (tracks || []).filter(tr => {
+    const hay = `${tr.title || ''} ${tr.artist || ''} ${tr.source || ''}`.toLowerCase();
+    return words.every(w => hay.includes(w));
+  });
+}
+
+function wireLocalFilterInput(inputId, clearBtnId, setter, renderer) {
+  const inp = document.getElementById(inputId);
+  const clr = document.getElementById(clearBtnId);
+  if (!inp || !clr) return;
+  const applyVal = val => {
+    clr.style.display = val ? 'inline-flex' : 'none';
+    setter(val);
+    renderer();
+  };
+  inp.oninput = () => applyVal(inp.value);
+  inp.onkeydown = e => {
+    if (e.key === 'Escape' && inp.value) {
+      e.stopPropagation();
+      inp.value = '';
+      applyVal('');
+    }
+  };
+  clr.onclick = () => {
+    inp.value = '';
+    applyVal('');
+    inp.focus();
+  };
+}
+
+function resetPlaylistTrackSearchUi() {
+  st.playlistTrackQuery = '';
+  const inp = document.getElementById('playlistTrackSearchInput');
+  const clr = document.getElementById('btnClearPlTrackSearch');
+  if (inp) inp.value = '';
+  if (clr) clr.style.display = 'none';
+}
+
+wireLocalFilterInput('favoritesSearchInput', 'btnClearFavSearch', q => { st.favoritesQuery = q; }, renderFavorites);
+wireLocalFilterInput('playlistsOverviewSearchInput', 'btnClearPlOverviewSearch', q => { st.playlistOverviewQuery = q; }, renderPlaylists);
+wireLocalFilterInput('playlistTrackSearchInput', 'btnClearPlTrackSearch', q => { st.playlistTrackQuery = q; }, renderPlaylists);
+
+function renderFavorites() {
+  const filtered = filterTracksByQuery(st.favorites, st.favoritesQuery);
+  const q = st.favoritesQuery.trim();
+  document.getElementById('favoritesCountText').textContent = q
+    ? `Найдено: ${filtered.length} из ${st.favorites.length}`
+    : `${st.favorites.length} треков`;
+  const emptyMsg = q
+    ? 'По запросу в любимых треках ничего не найдено.'
+    : 'Нажмите ♥ на любом треке, чтобы сохранить его здесь.';
+  renderTrackList('favoritesList', filtered, 'favorites', emptyMsg);
+}
 
 let draggedPlaylistId = null;
 
@@ -1512,7 +1614,17 @@ function renderPlaylists() {
       wrap.innerHTML = '<div style="margin:auto;padding:24px;text-align:center;font-size:12px;color:rgba(255,255,255,0.48);">Пока нет плейлистов. Нажмите «+ Новый список».</div>';
       return;
     }
-    st.playlists.forEach(pl => {
+
+    const qOverview = st.playlistOverviewQuery.trim();
+    const overviewWords = qOverview.toLowerCase().split(/\s+/).filter(Boolean);
+    const matchingPlaylists = overviewWords.length === 0
+      ? st.playlists
+      : st.playlists.filter(pl => {
+          const hay = `${pl.name || ''} ${pl.platformBadgeText || ''}`.toLowerCase();
+          return overviewWords.every(w => hay.includes(w));
+        });
+
+    matchingPlaylists.forEach(pl => {
       const row = document.createElement('div');
       row.className = `playlist-row ${pl.isPinned ? 'pinned' : ''}`;
       row.draggable = true;
@@ -1572,16 +1684,54 @@ function renderPlaylists() {
         if (pact === 'play') { e.stopPropagation(); postCmd('playlists.play', { id: pl.id }); return; }
         if (pact === 'del') { e.stopPropagation(); postCmd('playlists.delete', { id: pl.id }); return; }
         st.openedPlaylistId = pl.id;
+        resetPlaylistTrackSearchUi();
         renderPlaylists();
       };
       wrap.appendChild(row);
     });
+
+    if (qOverview) {
+      const matchedTracks = [];
+      for (const pl of st.playlists) {
+        if (!pl.tracks || pl.tracks.length === 0) continue;
+        for (let idx = 0; idx < pl.tracks.length; idx++) {
+          const tr = pl.tracks[idx];
+          const hay = `${tr.title || ''} ${tr.artist || ''} ${tr.source || ''}`.toLowerCase();
+          if (overviewWords.every(w => hay.includes(w))) {
+            matchedTracks.push({ tr, idx, pl });
+            if (matchedTracks.length >= 60) break;
+          }
+        }
+        if (matchedTracks.length >= 60) break;
+      }
+
+      if (matchedTracks.length > 0) {
+        const hdr = document.createElement('div');
+        hdr.style.cssText = 'padding:8px 2px 2px;font-size:10px;font-weight:800;letter-spacing:0.04em;color:rgba(255,204,0,0.88);';
+        hdr.textContent = `НАЙДЕННЫЕ ТРЕКИ В ПЛЕЙЛИСТАХ (${matchedTracks.length}${matchedTracks.length === 60 ? '+' : ''})`;
+        wrap.appendChild(hdr);
+        matchedTracks.forEach(item => {
+          wrap.appendChild(createTrackCard(item.tr, item.idx, 'playlist', item.pl.id, item.pl.name));
+        });
+      }
+
+      if (matchingPlaylists.length === 0 && matchedTracks.length === 0) {
+        wrap.innerHTML = '<div style="margin:auto;padding:24px;text-align:center;font-size:12px;color:rgba(255,255,255,0.48);">По запросу плейлисты и треки не найдены.</div>';
+      }
+    }
   } else {
     ov.style.display = 'none';
     det.style.display = 'flex';
     document.getElementById('detailPlTitle').textContent = opened.name;
-    document.getElementById('detailPlCount').textContent = opened.countText;
-    renderTrackList('playlistTracksList', opened.tracks, 'playlist', 'Плейлист пуст. Добавьте треки через ＋.', opened.id);
+    const qTrack = st.playlistTrackQuery.trim();
+    const filteredTracks = filterTracksByQuery(opened.tracks, qTrack);
+    document.getElementById('detailPlCount').textContent = qTrack
+      ? `Найдено: ${filteredTracks.length} из ${opened.tracks.length}`
+      : opened.countText;
+    const emptyMsg = qTrack
+      ? 'По запросу треков в плейлисте не найдено.'
+      : 'Плейлист пуст. Добавьте треки через ＋.';
+    renderTrackList('playlistTracksList', filteredTracks, 'playlist', emptyMsg, opened.id);
   }
 }
 
@@ -2246,7 +2396,7 @@ function applyTrackVisuals(msg) {
   }
   renderStage();
   renderTrackList('resultsList', st.results, 'search', '');
-  renderTrackList('favoritesList', st.favorites, 'favorites', 'Нажмите ♥ на любом треке, чтобы сохранить его здесь.');
+  renderFavorites();
   renderPlaylists();
   renderQueue();
 }
@@ -2269,7 +2419,6 @@ window.chrome?.webview?.addEventListener('message', event => {
       st.volume = m.volume ?? 80;
       st.repeatMode = m.repeatMode || 0;
       if (m.eq) st.eq = m.eq;
-      document.getElementById('favoritesCountText').textContent = `${st.favorites.length} треков`;
       renderFilters();
       applyTrackVisuals(m);
       updateProgressUi();
@@ -2292,8 +2441,7 @@ window.chrome?.webview?.addEventListener('message', event => {
         if (typeof m.currentTrackLiked === 'boolean') st.currentTrack.isLiked = m.currentTrackLiked;
         if (typeof m.currentTrackDownloaded === 'boolean') st.currentTrack.isDownloaded = m.currentTrackDownloaded;
       }
-      document.getElementById('favoritesCountText').textContent = `${st.favorites.length} треков`;
-      renderTrackList('favoritesList', st.favorites, 'favorites', 'Нажмите ♥ на любом треке, чтобы сохранить его здесь.');
+      renderFavorites();
       renderPlaylists();
       renderTrackList('resultsList', st.results, 'search', '');
       renderStage();
