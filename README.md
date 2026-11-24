@@ -10,12 +10,6 @@
 
 ---
 
-## Скачать готовую сборку
-
-1. Откройте [**GitHub Releases**](https://github.com/yammikid/OmniWave/releases/latest) и скачайте архив **`OmniWave-v1.0.0-win-x64.zip`**.
-2. Распакуйте папку `OmniWave` в удобное место и запустите **`DynamicIsland.exe`**.
-3. Для запуска требуются **Windows 10 / 11 (x64)** и установленный **[.NET 8 Desktop Runtime (x64)](https://dotnet.microsoft.com/download/dotnet/8.0)** (WebView2 уже встроен в Windows 11).
-
 ## Возможности
 
 - **Clear Liquid Glass UI:** главное окно на базе WebView2 с адаптивным фоновым свечением от обложки трека.
@@ -37,6 +31,12 @@
 
 ## Сборка и запуск
 
+В репозитории находится исходный код без готового `.exe` — перед первым запуском приложение нужно собрать локально:
+
+1. Установите **[.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)** (или в PowerShell: `winget install Microsoft.DotNet.SDK.8`).
+2. Скачайте исходный код (`git clone https://github.com/yammikid/OmniWave.git` или **Code → Download ZIP** и распакуйте архив).
+3. Запустите [`build.bat`](build.bat) — скрипт соберёт проект в папку `publish/` и автоматически запустит `publish\DynamicIsland.exe` — либо выполните команды вручную:
+
 ```powershell
 # Клонирование репозитория
 git clone https://github.com/yammikid/OmniWave.git
@@ -44,9 +44,10 @@ cd OmniWave
 
 # Сборка готового приложения в папку publish
 dotnet publish -c Release -r win-x64 --self-contained false -o ./publish
-```
 
-Либо просто запустите [`build.bat`](build.bat) — скрипт очистит старый кэш сборки, соберёт релиз в `publish/` и откроет приложение.
+# Запуск собранного приложения
+.\publish\DynamicIsland.exe
+```
 
 ## Приватность и безопасность
 
