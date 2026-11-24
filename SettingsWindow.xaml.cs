@@ -23,7 +23,10 @@ public partial class SettingsWindow : Window
 
         LoadFromSettings();
         _settings.SettingsChanged += OnExternalSettingsChanged;
-        Loaded += async (_, _) => await RunYtDlpCheckAsync();
+        Loaded += async (_, _) =>
+        {
+            await Task.WhenAll(RunYtDlpCheckAsync(), RunAppUpdateCheckAsync());
+        };
     }
 
     private void OnExternalSettingsChanged(AppSettings _)
@@ -162,6 +165,76 @@ public partial class SettingsWindow : Window
             ? new SolidColorBrush(Color.FromRgb(110, 224, 145))
             : new SolidColorBrush(Color.FromRgb(255, 110, 110));
         BtnCheckYtDlp.IsEnabled = true;
+    }
+
+    private async void CheckUpdate_Click(object sender, RoutedEventArgs e)
+        => await RunAppUpdateCheckAsync();
+
+    private async Task RunAppUpdateCheckAsync()
+    {
+        BtnCheckUpdate.IsEnabled = false;
+        BtnInstallUpdate.IsEnabled = false;
+        TxtUpdateStatus.Text = "Проверка последней версии на GitHub...";
+        TxtUpdateStatus.Foreground = new SolidColorBrush(Color.FromRgb(160, 162, 180));
+
+        var res = await AppUpdateService.CheckForUpdateAsync();
+        TxtUpdateStatus.Text = string.IsNullOrWhiteSpace(res.CommitMessage) || !res.IsUpdateAvailable
+            ? res.StatusMessage
+            : $"{res.StatusMessage} {res.CommitMessage}";
+
+        if (!res.CheckedOk)
+        {
+            TxtUpdateStatus.Foreground = new SolidColorBrush(Color.FromRgb(255, 110, 110));
+            BtnInstallUpdate.Content = "Обновить с GitHub";
+            BtnInstallUpdate.IsEnabled = false;
+            BtnInstallUpdate.Background = new SolidColorBrush(Color.FromArgb(31, 255, 255, 255));
+            BtnInstallUpdate.Foreground = Brushes.White;
+        }
+        else if (res.IsUpdateAvailable)
+        {
+            TxtUpdateStatus.Foreground = new SolidColorBrush(Color.FromRgb(255, 204, 0));
+            BtnInstallUpdate.Content = "Обновить с GitHub";
+            BtnInstallUpdate.IsEnabled = true;
+            BtnInstallUpdate.Background = new SolidColorBrush(Color.FromRgb(255, 204, 0));
+            BtnInstallUpdate.Foreground = new SolidColorBrush(Color.FromRgb(17, 17, 22));
+        }
+        else
+        {
+            TxtUpdateStatus.Foreground = new SolidColorBrush(Color.FromRgb(110, 224, 145));
+            BtnInstallUpdate.Content = "Версия актуальна";
+            BtnInstallUpdate.IsEnabled = false;
+            BtnInstallUpdate.Background = new SolidColorBrush(Color.FromArgb(31, 255, 255, 255));
+            BtnInstallUpdate.Foreground = Brushes.White;
+        }
+
+        BtnCheckUpdate.IsEnabled = true;
+    }
+
+    private async void InstallUpdate_Click(object sender, RoutedEventArgs e)
+    {
+        BtnCheckUpdate.IsEnabled = false;
+        BtnInstallUpdate.IsEnabled = false;
+        PbUpdateProgress.Value = 0;
+        PbUpdateProgress.Visibility = Visibility.Visible;
+        TxtUpdateStatus.Foreground = new SolidColorBrush(Color.FromRgb(255, 204, 0));
+
+        var (ok, err) = await AppUpdateService.DownloadAndApplyUpdateAsync((pct, msg) =>
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                PbUpdateProgress.Value = pct;
+                TxtUpdateStatus.Text = msg;
+            });
+        });
+
+        if (!ok)
+        {
+            PbUpdateProgress.Visibility = Visibility.Collapsed;
+            TxtUpdateStatus.Text = err;
+            TxtUpdateStatus.Foreground = new SolidColorBrush(Color.FromRgb(255, 110, 110));
+            BtnCheckUpdate.IsEnabled = true;
+            BtnInstallUpdate.IsEnabled = true;
+        }
     }
 
     private void Header_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)

@@ -278,7 +278,7 @@
             <!-- Секция: Диагностика yt-dlp -->
             <TextBlock Text="ДИАГНОСТИКА ИСТОЧНИКОВ" FontSize="11" FontWeight="Bold" Foreground="#FFCC00" Margin="0,0,0,10"/>
 
-            <Border Background="#0DFFFFFF" CornerRadius="14" Padding="14,12">
+            <Border Background="#0DFFFFFF" CornerRadius="14" Padding="14,12" Margin="0,0,0,14">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
@@ -293,6 +293,33 @@
                             VerticalAlignment="Center"
                             Click="CheckYtDlp_Click"/>
                 </Grid>
+            </Border>
+
+            <!-- Секция: Обновление с GitHub -->
+            <TextBlock Text="ОБНОВЛЕНИЕ ПРИЛОЖЕНИЯ" FontSize="11" FontWeight="Bold" Foreground="#FFCC00" Margin="0,0,0,10"/>
+
+            <Border Background="#0DFFFFFF" CornerRadius="14" Padding="14,12">
+                <StackPanel>
+                    <TextBlock Text="Обновление из репозитория GitHub (yammikid/OmniWave)" Style="{StaticResource SettingTitle}"/>
+                    <TextBlock x:Name="TxtUpdateStatus" Text="Проверка актуальной версии..." Style="{StaticResource SettingSub}" Margin="0,3,0,0"/>
+                    <ProgressBar x:Name="PbUpdateProgress" Height="6" Minimum="0" Maximum="100" Value="0"
+                                 Foreground="#FFCC00" Background="#1FFFFFFF" BorderThickness="0"
+                                 Visibility="Collapsed" Margin="0,10,0,0"/>
+                    <Grid Margin="0,12,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="10"/>
+                            <ColumnDefinition Width="1.4*"/>
+                        </Grid.ColumnDefinitions>
+                        <Button x:Name="BtnCheckUpdate" Grid.Column="0" Content="Проверить"
+                                Style="{StaticResource SettingsActionBtn}"
+                                Click="CheckUpdate_Click"/>
+                        <Button x:Name="BtnInstallUpdate" Grid.Column="2" Content="Обновить с GitHub"
+                                Style="{StaticResource SettingsActionBtn}"
+                                IsEnabled="False"
+                                Click="InstallUpdate_Click"/>
+                    </Grid>
+                </StackPanel>
             </Border>
                 </StackPanel>
             </ScrollViewer>

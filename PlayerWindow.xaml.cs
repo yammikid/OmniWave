@@ -322,6 +322,32 @@ public partial class PlayerWindow : Window
                 break;
             }
 
+            case "playlists.togglePin":
+            {
+                var id = ReadStr(root, "id");
+                if (!string.IsNullOrWhiteSpace(id))
+                    _library.TogglePinPlaylist(id);
+                break;
+            }
+
+            case "playlists.move":
+            {
+                var id = ReadStr(root, "id");
+                int delta = ReadInt(root, "delta", 0);
+                if (!string.IsNullOrWhiteSpace(id) && delta != 0)
+                    _library.MovePlaylist(id, delta);
+                break;
+            }
+
+            case "playlists.reorder":
+            {
+                var src = ReadStr(root, "sourceId");
+                var dst = ReadStr(root, "targetId");
+                if (!string.IsNullOrWhiteSpace(src) && !string.IsNullOrWhiteSpace(dst))
+                    _library.ReorderPlaylist(src, dst);
+                break;
+            }
+
             case "playlists.sync":
             {
                 PostToWeb("status", new { message = "Синхронизация плейлистов из аккаунтов..." });
@@ -1561,6 +1587,7 @@ public partial class PlayerWindow : Window
     {
         id = pl.Id,
         name = pl.Name,
+        isPinned = pl.IsPinned,
         isExternal = pl.IsExternal,
         platformBrand = pl.PlatformBrand,
         countText = pl.CountText,

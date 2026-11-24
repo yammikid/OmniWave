@@ -8,6 +8,7 @@ public class UserPlaylist
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string Name { get; set; } = "Новый плейлист";
+    public bool IsPinned { get; set; }
     public bool IsExternal { get; set; }
     public string PlatformBrand { get; set; } = "local"; // "local", "yandex", "vk"
     public string ExternalId { get; set; } = "";
@@ -103,6 +104,11 @@ public class LibraryService
                     int pruned = data.Playlists.RemoveAll(p =>
                         p.IsExternal &&
                         string.Equals(p.PlatformBrand, "spotify", StringComparison.OrdinalIgnoreCase));
+                    var pinned = data.Playlists.Where(p => p.IsPinned).ToList();
+                    var unpinned = data.Playlists.Where(p => !p.IsPinned).ToList();
+                    data.Playlists.Clear();
+                    data.Playlists.AddRange(pinned);
+                    data.Playlists.AddRange(unpinned);
                     if (pruned > 0)
                     {
                         try
@@ -194,6 +200,7 @@ public class LibraryService
             {
                 Id = pl.Id,
                 Name = pl.Name,
+                IsPinned = pl.IsPinned,
                 IsExternal = pl.IsExternal,
                 PlatformBrand = pl.PlatformBrand,
                 ExternalId = pl.ExternalId,
@@ -208,6 +215,18 @@ public class LibraryService
         }
     }
 
+    private void SortPlaylistsUnlocked()
+    {
+        var pinned = _data.Playlists.Where(p => p.IsPinned).ToList();
+        var unpinned = _data.Playlists.Where(p => !p.IsPinned).ToList();
+        _data.Playlists.Clear();
+        _data.Playlists.AddRange(pinned);
+        _data.Playlists.AddRange(unpinned);
+    }
+
+    private static string ExternalMatchKey(UserPlaylist pl)
+        => !string.IsNullOrWhiteSpace(pl.ExternalId) ? pl.ExternalId : pl.Name;
+
     public List<UserPlaylist> GetLocalPlaylists()
     {
         return GetPlaylists().Where(p => !p.IsExternal).ToList();
@@ -217,20 +236,46 @@ public class LibraryService
     {
         lock (_lock)
         {
-            _data.Playlists.RemoveAll(p =>
-                p.IsExternal &&
-                string.Equals(p.PlatformBrand, platformBrand, StringComparison.OrdinalIgnoreCase));
-
             var likedKeys = _data.Favorites.Select(f => f.UniqueKey).ToHashSet();
+            var existingBrand = _data.Playlists
+                .Where(p => p.IsExternal && string.Equals(p.PlatformBrand, platformBrand, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            var matchedIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
             foreach (var pl in playlists)
             {
-                pl.IsExternal = true;
-                pl.PlatformBrand = platformBrand;
                 foreach (var t in pl.Tracks)
                     t.IsLiked = likedKeys.Contains(t.UniqueKey);
-                _data.Playlists.Add(pl);
+
+                string key = ExternalMatchKey(pl);
+                var existing = existingBrand.FirstOrDefault(e =>
+                    !matchedIds.Contains(e.Id) &&
+                    string.Equals(ExternalMatchKey(e), key, StringComparison.OrdinalIgnoreCase));
+
+                if (existing != null)
+                {
+                    existing.Name = pl.Name;
+                    existing.ExternalId = pl.ExternalId;
+                    if (!string.IsNullOrWhiteSpace(pl.CoverUrl))
+                        existing.CoverUrl = pl.CoverUrl;
+                    existing.Tracks = pl.Tracks;
+                    matchedIds.Add(existing.Id);
+                }
+                else
+                {
+                    pl.IsExternal = true;
+                    pl.PlatformBrand = platformBrand;
+                    _data.Playlists.Add(pl);
+                    matchedIds.Add(pl.Id);
+                }
             }
 
+            _data.Playlists.RemoveAll(p =>
+                p.IsExternal &&
+                string.Equals(p.PlatformBrand, platformBrand, StringComparison.OrdinalIgnoreCase) &&
+                !matchedIds.Contains(p.Id));
+
+            SortPlaylistsUnlocked();
             SaveUnlocked();
         }
 
@@ -319,6 +364,80 @@ public class LibraryService
         {
             changed = _data.Playlists.RemoveAll(p => p.Id == playlistId) > 0;
             if (changed) SaveUnlocked();
+        }
+
+        if (changed)
+            LibraryChanged?.Invoke();
+    }
+
+    public void TogglePinPlaylist(string playlistId)
+    {
+        bool changed = false;
+        lock (_lock)
+        {
+            int idx = _data.Playlists.FindIndex(p => p.Id == playlistId);
+            if (idx >= 0)
+            {
+                var pl = _data.Playlists[idx];
+                pl.IsPinned = !pl.IsPinned;
+                _data.Playlists.RemoveAt(idx);
+                int insertAt = _data.Playlists.Count(p => p.IsPinned);
+                _data.Playlists.Insert(insertAt, pl);
+                SortPlaylistsUnlocked();
+                SaveUnlocked();
+                changed = true;
+            }
+        }
+
+        if (changed)
+            LibraryChanged?.Invoke();
+    }
+
+    public void MovePlaylist(string playlistId, int delta)
+    {
+        if (delta == 0) return;
+        bool changed = false;
+        lock (_lock)
+        {
+            int idx = _data.Playlists.FindIndex(p => p.Id == playlistId);
+            if (idx >= 0)
+            {
+                int targetIdx = idx + (delta < 0 ? -1 : 1);
+                if (targetIdx >= 0 &&
+                    targetIdx < _data.Playlists.Count &&
+                    _data.Playlists[targetIdx].IsPinned == _data.Playlists[idx].IsPinned)
+                {
+                    (_data.Playlists[idx], _data.Playlists[targetIdx]) = (_data.Playlists[targetIdx], _data.Playlists[idx]);
+                    SaveUnlocked();
+                    changed = true;
+                }
+            }
+        }
+
+        if (changed)
+            LibraryChanged?.Invoke();
+    }
+
+    public void ReorderPlaylist(string sourceId, string targetId)
+    {
+        if (string.Equals(sourceId, targetId, StringComparison.Ordinal)) return;
+        bool changed = false;
+        lock (_lock)
+        {
+            int srcIdx = _data.Playlists.FindIndex(p => p.Id == sourceId);
+            int dstIdx = _data.Playlists.FindIndex(p => p.Id == targetId);
+            if (srcIdx >= 0 && dstIdx >= 0 && srcIdx != dstIdx)
+            {
+                var src = _data.Playlists[srcIdx];
+                var dst = _data.Playlists[dstIdx];
+                src.IsPinned = dst.IsPinned;
+                _data.Playlists.RemoveAt(srcIdx);
+                int insertIdx = Math.Clamp(dstIdx, 0, _data.Playlists.Count);
+                _data.Playlists.Insert(insertIdx, src);
+                SortPlaylistsUnlocked();
+                SaveUnlocked();
+                changed = true;
+            }
         }
 
         if (changed)

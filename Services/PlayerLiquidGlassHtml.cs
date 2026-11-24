@@ -394,6 +394,14 @@ public static class PlayerLiquidGlassHtml
     border-color: rgba(255, 255, 255, 0.28);
     transform: translateY(-1px);
   }
+  .playlist-row.pinned {
+    border-color: rgba(255, 204, 0, 0.42);
+    background: rgba(255, 204, 0, 0.08);
+  }
+  .playlist-row.drag-over {
+    border-color: #FFCC00;
+    box-shadow: 0 0 14px rgba(255, 204, 0, 0.28);
+  }
 
   /* ==================== CENTRAL CLEAR GLASS STAGE ==================== */
   #centerStage {
@@ -1147,11 +1155,7 @@ public static class PlayerLiquidGlassHtml
   <aside id="rightDrawer">
     <div class="drawer-inner">
       <div style="flex-shrink:0;padding:12px 14px;border-bottom:1px solid rgba(255,255,255,0.14);display:flex;align-items:center;justify-content:space-between;gap:6px;">
-        <div style="display:flex;align-items:center;gap:5px;">
-          <button class="top-pill-btn glass-glare" style="padding:4px 10px;font-size:11px;" data-drawer-tab="0">Текст</button>
-          <button class="top-pill-btn glass-glare" style="padding:4px 10px;font-size:11px;" data-drawer-tab="1">Очередь</button>
-          <button class="top-pill-btn glass-glare" style="padding:4px 10px;font-size:11px;" data-drawer-tab="2">Звук</button>
-        </div>
+        <span id="drawerHeaderTitle" style="font-size:13px;font-weight:800;color:rgba(255,255,255,0.92);letter-spacing:0.02em;">Очередь</span>
         <button id="btnCloseDrawer" class="top-win-btn glass-glare" title="Закрыть панель">✕</button>
       </div>
 
@@ -1491,6 +1495,8 @@ document.getElementById('newPlInput').onkeydown = e => { if (e.key === 'Enter') 
 document.getElementById('btnBackPlaylists').onclick = () => { st.openedPlaylistId = null; renderPlaylists(); };
 document.getElementById('btnPlayOpenedPl').onclick = () => { if (st.openedPlaylistId) postCmd('playlists.play', { id: st.openedPlaylistId }); };
 
+let draggedPlaylistId = null;
+
 function renderPlaylists() {
   const ov = document.getElementById('playlistsOverview');
   const det = document.getElementById('playlistDetail');
@@ -1508,7 +1514,9 @@ function renderPlaylists() {
     }
     st.playlists.forEach(pl => {
       const row = document.createElement('div');
-      row.className = 'playlist-row';
+      row.className = `playlist-row ${pl.isPinned ? 'pinned' : ''}`;
+      row.draggable = true;
+      row.title = 'Перетащите для изменения порядка';
       row.innerHTML = `
         <div style="width:42px;height:42px;border-radius:10px;overflow:hidden;flex-shrink:0;background:rgba(255,255,255,0.12);display:flex;align-items:center;justify-content:center;">
           ${pl.coverUrl ? `<img src="${esc(pl.coverUrl)}" style="width:100%;height:100%;object-fit:cover;" onerror="this.style.display='none'"/>` : '<span style="opacity:0.45;">♫</span>'}
@@ -1520,14 +1528,47 @@ function renderPlaylists() {
             <span style="font-size:11px;color:rgba(255,255,255,0.58);">${esc(pl.countText)}</span>
           </div>
         </div>
-        <div style="display:flex;align-items:center;gap:4px;flex-shrink:0;">
-          <button class="card-icon-btn" data-pact="play" title="Играть">▶</button>
-          ${pl.isExternal ? '' : '<button class="card-icon-btn" data-pact="del" title="Удалить">✕</button>'}
-          <span style="color:rgba(255,255,255,0.48);font-size:14px;padding:0 2px;">›</span>
+        <div style="display:flex;align-items:center;gap:2px;flex-shrink:0;">
+          <button class="card-icon-btn" data-pact="pin" style="width:22px;height:22px;font-size:11px;color:${pl.isPinned ? '#FFCC00' : ''};opacity:${pl.isPinned ? '1' : '0.48'};" title="${pl.isPinned ? 'Открепить плейлист' : 'Закрепить плейлист'}">📌</button>
+          <button class="card-icon-btn" data-pact="up" style="width:22px;height:22px;font-size:11px;" title="Переместить выше">↑</button>
+          <button class="card-icon-btn" data-pact="down" style="width:22px;height:22px;font-size:11px;" title="Переместить ниже">↓</button>
+          <button class="card-icon-btn" data-pact="play" style="width:22px;height:22px;font-size:11px;" title="Играть">▶</button>
+          ${pl.isExternal ? '' : '<button class="card-icon-btn" data-pact="del" style="width:22px;height:22px;font-size:11px;" title="Удалить">✕</button>'}
         </div>
       `;
+      row.ondragstart = e => {
+        draggedPlaylistId = pl.id;
+        row.style.opacity = '0.5';
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', pl.id);
+        }
+      };
+      row.ondragover = e => {
+        if (!draggedPlaylistId || draggedPlaylistId === pl.id) return;
+        e.preventDefault();
+        if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+        row.classList.add('drag-over');
+      };
+      row.ondragleave = () => row.classList.remove('drag-over');
+      row.ondrop = e => {
+        e.preventDefault();
+        row.classList.remove('drag-over');
+        const srcId = draggedPlaylistId || (e.dataTransfer ? e.dataTransfer.getData('text/plain') : '');
+        draggedPlaylistId = null;
+        if (srcId && srcId !== pl.id)
+          postCmd('playlists.reorder', { sourceId: srcId, targetId: pl.id });
+      };
+      row.ondragend = () => {
+        draggedPlaylistId = null;
+        row.style.opacity = '1';
+        wrap.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+      };
       row.onclick = e => {
         const pact = e.target.closest('[data-pact]')?.dataset.pact;
+        if (pact === 'pin') { e.stopPropagation(); postCmd('playlists.togglePin', { id: pl.id }); return; }
+        if (pact === 'up') { e.stopPropagation(); postCmd('playlists.move', { id: pl.id, delta: -1 }); return; }
+        if (pact === 'down') { e.stopPropagation(); postCmd('playlists.move', { id: pl.id, delta: 1 }); return; }
         if (pact === 'play') { e.stopPropagation(); postCmd('playlists.play', { id: pl.id }); return; }
         if (pact === 'del') { e.stopPropagation(); postCmd('playlists.delete', { id: pl.id }); return; }
         st.openedPlaylistId = pl.id;
@@ -1545,6 +1586,20 @@ function renderPlaylists() {
 }
 
 // ==================== RIGHT DRAWER ====================
+const DRAWER_TITLES = ['Текст песни', 'Очередь', 'Звук и эквалайзер'];
+
+function syncDrawerViewUi() {
+  document.getElementById('drawerLyricsView').style.display = st.drawerTab === 0 ? 'flex' : 'none';
+  document.getElementById('drawerQueueView').style.display = st.drawerTab === 1 ? 'flex' : 'none';
+  document.getElementById('drawerSoundView').style.display = st.drawerTab === 2 ? 'flex' : 'none';
+  const hdr = document.getElementById('drawerHeaderTitle');
+  if (hdr) hdr.textContent = DRAWER_TITLES[st.drawerTab] || 'Панель';
+  document.querySelectorAll('[data-drawer]').forEach(b => {
+    const t = Number(b.dataset.drawer);
+    b.classList.toggle('active', st.drawerOpen && t === st.drawerTab);
+  });
+}
+
 function openDrawer(tab) {
   if (st.drawerOpen && st.drawerTab === tab) {
     st.drawerOpen = false;
@@ -1553,35 +1608,23 @@ function openDrawer(tab) {
     st.drawerTab = tab;
   }
   document.getElementById('rightDrawer').classList.toggle('open', st.drawerOpen);
-  document.getElementById('drawerLyricsView').style.display = st.drawerTab === 0 ? 'flex' : 'none';
-  document.getElementById('drawerQueueView').style.display = st.drawerTab === 1 ? 'flex' : 'none';
-  document.getElementById('drawerSoundView').style.display = st.drawerTab === 2 ? 'flex' : 'none';
-  document.querySelectorAll('[data-drawer], [data-drawer-tab]').forEach(b => {
-    const t = Number(b.dataset.drawer ?? b.dataset.drawerTab);
-    b.classList.toggle('active', st.drawerOpen && t === st.drawerTab);
-  });
+  syncDrawerViewUi();
 }
 
 function showDrawerTab(tab) {
   st.drawerOpen = true;
   st.drawerTab = tab;
   document.getElementById('rightDrawer').classList.add('open');
-  document.getElementById('drawerLyricsView').style.display = st.drawerTab === 0 ? 'flex' : 'none';
-  document.getElementById('drawerQueueView').style.display = st.drawerTab === 1 ? 'flex' : 'none';
-  document.getElementById('drawerSoundView').style.display = st.drawerTab === 2 ? 'flex' : 'none';
-  document.querySelectorAll('[data-drawer], [data-drawer-tab]').forEach(b => {
-    const t = Number(b.dataset.drawer ?? b.dataset.drawerTab);
-    b.classList.toggle('active', t === st.drawerTab);
-  });
+  syncDrawerViewUi();
 }
 
-document.querySelectorAll('[data-drawer], [data-drawer-tab]').forEach(b => {
-  b.onclick = () => openDrawer(Number(b.dataset.drawer ?? b.dataset.drawerTab));
+document.querySelectorAll('[data-drawer]').forEach(b => {
+  b.onclick = () => openDrawer(Number(b.dataset.drawer));
 });
 document.getElementById('btnCloseDrawer').onclick = () => {
   st.drawerOpen = false;
   document.getElementById('rightDrawer').classList.remove('open');
-  document.querySelectorAll('[data-drawer], [data-drawer-tab]').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('[data-drawer]').forEach(b => b.classList.remove('active'));
 };
 
 function renderQueue() {

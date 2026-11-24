@@ -84,6 +84,7 @@ public partial class MainWindow : Window
     private bool _isClosing;
     private int _seekPreviewHideGen;
     private long _islandScrubStartMs;
+    private bool _startupUpdateChecked;
 
     public MainWindow()
     {
@@ -185,6 +186,8 @@ public partial class MainWindow : Window
 
         Loaded += (_, _) =>
         {
+            AppUpdateService.CleanupOldUpdateArtifacts();
+
             if (_dockEdge != DockEdge.None)
                 ApplyDockedGeometry(animate: false);
             else if (_isPinned)
@@ -195,7 +198,31 @@ public partial class MainWindow : Window
 
             if (_yandex.IsAuthenticated || _vk.IsAuthenticated)
                 _ = Task.Run(SyncExternalAccountsAsync);
+
+            if (!_startupUpdateChecked)
+            {
+                _startupUpdateChecked = true;
+                _ = CheckForAppUpdateOnStartupAsync();
+            }
         };
+    }
+
+    private async Task CheckForAppUpdateOnStartupAsync()
+    {
+        try
+        {
+            await Task.Delay(1500);
+            var res = await AppUpdateService.CheckForUpdateAsync();
+            if (res.CheckedOk && res.IsUpdateAvailable && !_isClosing)
+            {
+                _ = Dispatcher.BeginInvoke(() =>
+                {
+                    if (!_isClosing)
+                        AppUpdateService.ShowStartupUpdateDialog(res);
+                });
+            }
+        }
+        catch { }
     }
 
     private void ApplySavedAudioSettings()
@@ -1979,7 +2006,7 @@ public partial class MainWindow : Window
         if (_isClosing) return;
         bool shouldFold = _playerWindow != null &&
                           _playerWindow.IsVisible &&
-                          _playerWindow.WindowState == WindowState.Maximized;
+                          _playerWindow.WindowState != WindowState.Minimized;
         SetFoldedForFullscreen(shouldFold);
     }
 
@@ -2027,6 +2054,9 @@ public partial class MainWindow : Window
             IslandBorder.BeginAnimation(OpacityProperty, opacityAnim);
             return;
         }
+
+        if (!_isPinned && _isExpanded)
+            SetExpanded(false);
 
         if (Visibility != Visibility.Visible)
         {
