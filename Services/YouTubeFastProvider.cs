@@ -343,6 +343,17 @@ public class YouTubeFastProvider : IMusicProvider, IDisposable
         if (string.IsNullOrWhiteSpace(artist)) artist = ReadTextRun(vr, "longBylineText");
         if (string.IsNullOrWhiteSpace(artist)) artist = Name;
 
+        var (cleanArtist, cleanTitle, _) = TrackMatcher.NormalizeArtistAndTitle(
+            artist,
+            title,
+            publisherArtist: null,
+            allowSplitArtistFromTitle: true,
+            stripDisplayVideoNoise: true);
+        if (!string.IsNullOrWhiteSpace(cleanTitle))
+            title = cleanTitle;
+        if (!string.IsNullOrWhiteSpace(cleanArtist))
+            artist = cleanArtist;
+
         string lengthText = ReadTextRun(vr, "lengthText");
         var duration = ParseDurationText(lengthText);
 

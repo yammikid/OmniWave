@@ -221,15 +221,18 @@ public sealed class YandexMusicProvider : IMusicProvider, IDisposable
                     catch { }
                 }
 
-                if (results.Count < targetCount &&
-                    res.TryGetProperty("tracks", out var tracksObj) &&
+                if (res.TryGetProperty("tracks", out var tracksObj) &&
                     tracksObj.TryGetProperty("results", out var arr) &&
                     arr.ValueKind == JsonValueKind.Array)
                 {
+                    int directAdded = 0;
+                    int directCap = Math.Max(8, targetCount);
                     foreach (var itemEl in arr.EnumerateArray())
                     {
+                        int before = results.Count;
                         AddTrackUnique(ParseYandexTrack(itemEl));
-                        if (results.Count >= targetCount) break;
+                        if (results.Count > before && ++directAdded >= directCap)
+                            break;
                     }
                 }
             }

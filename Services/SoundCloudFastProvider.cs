@@ -265,6 +265,31 @@ public class SoundCloudFastProvider : IMusicProvider, IDisposable
                 avatarUrl = avEl.GetString() ?? "";
         }
 
+        string? publisherArtist = null;
+        if (el.TryGetProperty("publisher_metadata", out var pubEl) &&
+            pubEl.ValueKind == JsonValueKind.Object &&
+            pubEl.TryGetProperty("artist", out var pubArtEl) &&
+            pubArtEl.ValueKind == JsonValueKind.String)
+        {
+            var candidatePubArtist = pubArtEl.GetString()?.Trim();
+            if (!string.IsNullOrWhiteSpace(candidatePubArtist) &&
+                !candidatePubArtist.Equals("Various Artists", StringComparison.OrdinalIgnoreCase))
+            {
+                publisherArtist = candidatePubArtist;
+            }
+        }
+
+        var (cleanArtist, cleanTitle, _) = TrackMatcher.NormalizeArtistAndTitle(
+            artist,
+            title,
+            publisherArtist,
+            allowSplitArtistFromTitle: true,
+            stripDisplayVideoNoise: true);
+        if (!string.IsNullOrWhiteSpace(cleanTitle))
+            title = cleanTitle;
+        if (!string.IsNullOrWhiteSpace(cleanArtist))
+            artist = cleanArtist;
+
         string pageUrl = el.TryGetProperty("permalink_url", out var pEl) && pEl.ValueKind == JsonValueKind.String
             ? (pEl.GetString() ?? "")
             : "";

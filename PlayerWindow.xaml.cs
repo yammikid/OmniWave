@@ -952,14 +952,8 @@ public partial class PlayerWindow : Window
         return merged;
     }
 
-    private static readonly System.Text.RegularExpressions.Regex SearchNoiseSuffixRegex = new(
-        @"\s*[\(\[](?:official\s*(?:music\s*)?(?:video|audio|clip|lyric\s*video|visualizer)|lyrics?|audio|hd|hq|4k|prod\.?[^\)\]]+|mv|клип|live)[\)\]]",
-        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
-    private static readonly System.Text.RegularExpressions.Regex FeatSuffixRegex = new(
-        @"\s*[\(\[]?(?:feat\.?|ft\.?|featuring|при уч\.?)\b.*$",
-        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
-    private static readonly System.Text.RegularExpressions.Regex NonWordPunctRegex = new(
-        @"[^\p{L}\p{Nd}\s]+",
+    private static readonly System.Text.RegularExpressions.Regex SearchWordCleanRegex = new(
+        @"[^\p{L}\p{Nd}\*\s]+",
         System.Text.RegularExpressions.RegexOptions.Compiled);
     private static readonly string[] CoverOrBeatNoiseWords =
     {
@@ -971,9 +965,12 @@ public partial class PlayerWindow : Window
         public required TrackItem Track { get; init; }
         public required int OriginalIndex { get; init; }
         public required string CanonicalSongKey { get; init; }
+        public required string CensoredPatternTitle { get; init; }
+        public required string VariantTag { get; init; }
         public required string EffectiveArtistString { get; init; }
         public required List<string> EffectiveArtists { get; init; }
-        public required int ArtistTier { get; init; }
+        public required bool ArtistMatchesQuery { get; init; }
+        public required int QueryTier { get; init; }
         public required int TrackScore { get; init; }
         public required int PlatformPriority { get; init; }
     }
@@ -981,7 +978,8 @@ public partial class PlayerWindow : Window
     private sealed class SongCluster
     {
         public required string CanonicalSongKey { get; init; }
-        public required List<SearchTrackMeta> Items { get; init; }
+        public required string VariantTag { get; init; }
+        public required List<SearchTrackMeta> Items { get; set; }
         public int ClusterTier { get; set; }
         public int BestTrackScore { get; set; }
         public int MinOriginalIndex { get; set; }
@@ -1012,7 +1010,9 @@ public partial class PlayerWindow : Window
 
         if (deduped.Count <= 1) return deduped;
 
-        string normQuery = TrackMatcher.NormalizeKey(query);
+        string normQuery = TrackMatcher.NormalizeKey(SearchWordCleanRegex.Replace(TrackMatcher.NormalizeKey(query), " "));
+        string queryNoStars = TrackMatcher.BuildCanonicalSongKey(query);
+        string queryVariant = TrackMatcher.ExtractVariantTag(query);
         var queryWords = normQuery.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         bool queryWantsNoise = CoverOrBeatNoiseWords.Any(w => normQuery.Contains(w, StringComparison.Ordinal));
 
@@ -1020,101 +1020,182 @@ public partial class PlayerWindow : Window
         for (int i = 0; i < deduped.Count; i++)
         {
             var tr = deduped[i];
-            var strippedTitle = SearchNoiseSuffixRegex.Replace(tr.Title ?? "", "").Trim();
-            string? embeddedArtist = null;
-            string songTitlePart = strippedTitle;
+            string brand = (tr.BrandKey ?? "").ToLowerInvariant();
+            bool allowSplitFromTitle = brand != "yandex" && brand != "vk";
 
-            foreach (var sep in new[] { " — ", " – ", " - ", " | " })
-            {
-                int sepIdx = strippedTitle.IndexOf(sep, StringComparison.Ordinal);
-                if (sepIdx >= 2 && sepIdx <= 50 && sepIdx + sep.Length < strippedTitle.Length)
-                {
-                    embeddedArtist = strippedTitle[..sepIdx].Trim();
-                    songTitlePart = strippedTitle[(sepIdx + sep.Length)..].Trim();
-                    break;
-                }
-            }
+            var (cleanArtist, cleanTitle, effectiveArtistString) = TrackMatcher.NormalizeArtistAndTitle(
+                tr.Artist,
+                tr.Title,
+                publisherArtist: null,
+                allowSplitArtistFromTitle: allowSplitFromTitle,
+                stripDisplayVideoNoise: false);
 
-            var artistSources = new List<string>();
-            if (!string.IsNullOrWhiteSpace(tr.Artist) && !string.Equals(tr.Artist, tr.Source, StringComparison.OrdinalIgnoreCase))
-                artistSources.Add(tr.Artist);
-            if (!string.IsNullOrWhiteSpace(embeddedArtist))
-                artistSources.Add(embeddedArtist);
-            string effectiveArtistString = string.Join(", ", artistSources);
+            if (string.Equals(cleanArtist, tr.Source, StringComparison.OrdinalIgnoreCase))
+                cleanArtist = "";
+            if (string.Equals(effectiveArtistString, tr.Source, StringComparison.OrdinalIgnoreCase))
+                effectiveArtistString = "";
 
             var effectiveArtists = TrackMatcher.SplitArtists(effectiveArtistString);
-            string songNoFeat = FeatSuffixRegex.Replace(songTitlePart, "").Trim();
-            string cleanSongNorm = TrackMatcher.NormalizeKey(NonWordPunctRegex.Replace(songNoFeat, " "));
-            if (string.IsNullOrWhiteSpace(cleanSongNorm))
-                cleanSongNorm = TrackMatcher.NormalizeKey(NonWordPunctRegex.Replace(strippedTitle, " "));
+            string primaryArtistNorm = TrackMatcher.NormalizeKey(TrackMatcher.GetPrimaryArtist(effectiveArtistString));
+            string canonicalSongKey = TrackMatcher.BuildCanonicalSongKey(cleanTitle);
+            string censoredPattern = TrackMatcher.BuildCensoredPatternTitle(cleanTitle);
+            string variantTag = TrackMatcher.ExtractVariantTag(tr.Title);
 
-            int artistTier = 3;
+            int queryTier = 3;
+            int matchBonus = 0;
+            bool artistMatchesQuery = false;
+
             if (!string.IsNullOrEmpty(normQuery))
             {
-                bool exactArtist = false;
-                bool strongArtist = false;
+                bool fullArtistExact = false;
+                bool wordBoundaryArtist = false;
+                bool partialArtistWords = false;
+                bool queryContainsArtist = false;
+                bool isPrimaryExact = false;
+                string? matchedArtistInCombined = null;
 
                 foreach (var art in effectiveArtists)
                 {
                     if (string.IsNullOrWhiteSpace(art)) continue;
-                    if (art == normQuery ||
-                        IsWordBoundaryMatch(art, normQuery) ||
-                        (art.Length >= 2 && IsWordBoundaryMatch(normQuery, art)))
+                    string artClean = TrackMatcher.NormalizeKey(SearchWordCleanRegex.Replace(art, " "));
+                    if (string.IsNullOrWhiteSpace(artClean)) continue;
+
+                    if (artClean == normQuery)
                     {
-                        exactArtist = true;
-                        break;
+                        fullArtistExact = true;
+                        if (primaryArtistNorm == art || primaryArtistNorm == artClean)
+                            isPrimaryExact = true;
+                    }
+                    else if (IsWordBoundaryMatch(artClean, normQuery))
+                    {
+                        wordBoundaryArtist = true;
+                    }
+                    else if (queryWords.Length > 0 && queryWords.All(w => artClean.Contains(w, StringComparison.Ordinal)))
+                    {
+                        partialArtistWords = true;
                     }
 
-                    if (art.StartsWith(normQuery, StringComparison.Ordinal) ||
-                        (queryWords.Length > 0 && queryWords.All(w => art.Contains(w, StringComparison.Ordinal))))
+                    if (artClean.Length >= 2 && queryWords.Length >= 2 && IsWordBoundaryMatch(normQuery, artClean))
                     {
-                        strongArtist = true;
+                        queryContainsArtist = true;
+                        if (matchedArtistInCombined == null || artClean.Length > matchedArtistInCombined.Length)
+                            matchedArtistInCombined = artClean;
                     }
                 }
 
-                if (exactArtist)
-                    artistTier = 0;
-                else if (strongArtist)
-                    artistTier = 1;
-                else if (!string.IsNullOrEmpty(cleanSongNorm) &&
-                         (cleanSongNorm == normQuery || IsWordBoundaryMatch(cleanSongNorm, normQuery)))
-                    artistTier = 2;
+                bool fullSongExact = false;
+                if (!string.IsNullOrEmpty(queryNoStars) &&
+                    TrackMatcher.AreSameSongTitle(canonicalSongKey, censoredPattern, queryNoStars, normQuery, out bool songExact) &&
+                    songExact)
+                {
+                    fullSongExact = true;
+                }
+
+                bool wordBoundarySong = !string.IsNullOrEmpty(queryNoStars) && IsWordBoundaryMatch(canonicalSongKey, queryNoStars);
+
+                bool combinedArtistAndSongExact = false;
+                bool combinedArtistAndSongStrong = false;
+                if (matchedArtistInCombined != null)
+                {
+                    var artWordSet = matchedArtistInCombined.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    var remainingList = new List<string>(queryWords);
+                    foreach (var aw in artWordSet)
+                        remainingList.Remove(aw);
+
+                    string remQuery = string.Join(" ", remainingList);
+                    string remNoStars = remQuery.Replace("*", "", StringComparison.Ordinal).Trim();
+                    if (!string.IsNullOrWhiteSpace(remQuery))
+                    {
+                        if (TrackMatcher.AreSameSongTitle(canonicalSongKey, censoredPattern, remNoStars, remQuery, out bool remExact) &&
+                            remExact)
+                        {
+                            combinedArtistAndSongExact = true;
+                        }
+                        else if (remainingList.All(w =>
+                                     canonicalSongKey.Contains(w, StringComparison.Ordinal) ||
+                                     censoredPattern.Contains(w, StringComparison.Ordinal)))
+                        {
+                            combinedArtistAndSongStrong = true;
+                        }
+                    }
+                }
+
+                artistMatchesQuery = fullArtistExact || wordBoundaryArtist || partialArtistWords || queryContainsArtist;
+
+                if (combinedArtistAndSongExact)
+                {
+                    queryTier = 0;
+                    matchBonus = 420;
+                }
+                else if (combinedArtistAndSongStrong)
+                {
+                    queryTier = 0;
+                    matchBonus = 340;
+                }
+                else if (fullArtistExact)
+                {
+                    queryTier = 0;
+                    matchBonus = isPrimaryExact ? 300 : 210;
+                }
+                else if (fullSongExact)
+                {
+                    queryTier = 0;
+                    matchBonus = 240;
+                }
+                else if (wordBoundaryArtist || partialArtistWords || queryContainsArtist)
+                {
+                    queryTier = 1;
+                    matchBonus = wordBoundaryArtist ? 140 : 100;
+                }
+                else if (wordBoundarySong)
+                {
+                    queryTier = 1;
+                    matchBonus = 90;
+                }
+                else if (queryWords.Length > 0 &&
+                         queryWords.All(w =>
+                             canonicalSongKey.Contains(w, StringComparison.Ordinal) ||
+                             censoredPattern.Contains(w, StringComparison.Ordinal) ||
+                             effectiveArtistString.ToLowerInvariant().Replace('ё', 'е').Contains(w, StringComparison.Ordinal)))
+                {
+                    queryTier = 2;
+                    matchBonus = 60;
+                }
             }
 
-            string lowerTitle = (tr.Title ?? "").ToLowerInvariant();
+            string lowerTitle = (tr.Title ?? "").ToLowerInvariant().Replace('ё', 'е');
             bool hasNoisePenalty = !queryWantsNoise && CoverOrBeatNoiseWords.Any(w => lowerTitle.Contains(w, StringComparison.Ordinal));
-            int tier = hasNoisePenalty && artistTier < 3 ? Math.Min(3, artistTier + 2) : artistTier;
+            if (hasNoisePenalty)
+                queryTier = Math.Min(4, queryTier + 2);
 
-            int score = (3 - tier) * 1000;
-            if (tier == 0 && TrackMatcher.GetPrimaryArtist(effectiveArtistString).Equals(normQuery, StringComparison.OrdinalIgnoreCase))
-                score += 120;
-            if (queryWords.Length > 0 && queryWords.All(w => ($"{effectiveArtistString} {cleanSongNorm}").ToLowerInvariant().Contains(w, StringComparison.Ordinal)))
-                score += 40;
-            score += Math.Max(0, 30 - i);
+            if (!string.IsNullOrEmpty(variantTag) && variantTag != queryVariant)
+                matchBonus -= 40;
+
+            int score = (4 - queryTier) * 1000 + matchBonus + Math.Max(0, 30 - i);
 
             metas.Add(new SearchTrackMeta
             {
                 Track = tr,
                 OriginalIndex = i,
-                CanonicalSongKey = cleanSongNorm,
+                CanonicalSongKey = canonicalSongKey,
+                CensoredPatternTitle = censoredPattern,
+                VariantTag = variantTag,
                 EffectiveArtistString = effectiveArtistString,
                 EffectiveArtists = effectiveArtists,
-                ArtistTier = tier,
+                ArtistMatchesQuery = artistMatchesQuery,
+                QueryTier = queryTier,
                 TrackScore = score,
                 PlatformPriority = GetPlatformSearchPriority(tr.BrandKey)
             });
         }
 
         var clusters = new List<SongCluster>();
-        var clustersByKey = new Dictionary<string, List<SongCluster>>(StringComparer.Ordinal);
-
         foreach (var meta in metas)
         {
             SongCluster? targetCluster = null;
-            if (meta.CanonicalSongKey.Length >= 2 &&
-                clustersByKey.TryGetValue(meta.CanonicalSongKey, out var candidateClusters))
+            if (meta.CanonicalSongKey.Length >= 2 || meta.CensoredPatternTitle.Contains('*', StringComparison.Ordinal))
             {
-                foreach (var c in candidateClusters)
+                foreach (var c in clusters)
                 {
                     if (ClusterMatchesTrack(c, meta))
                     {
@@ -1129,28 +1210,19 @@ public partial class PlayerWindow : Window
                 targetCluster = new SongCluster
                 {
                     CanonicalSongKey = meta.CanonicalSongKey,
+                    VariantTag = meta.VariantTag,
                     Items = new List<SearchTrackMeta> { meta },
-                    ClusterTier = meta.ArtistTier,
+                    ClusterTier = meta.QueryTier,
                     BestTrackScore = meta.TrackScore,
                     MinOriginalIndex = meta.OriginalIndex
                 };
                 clusters.Add(targetCluster);
-
-                if (meta.CanonicalSongKey.Length >= 2)
-                {
-                    if (!clustersByKey.TryGetValue(meta.CanonicalSongKey, out var list))
-                    {
-                        list = new List<SongCluster>();
-                        clustersByKey[meta.CanonicalSongKey] = list;
-                    }
-                    list.Add(targetCluster);
-                }
             }
             else
             {
                 targetCluster.Items.Add(meta);
-                if (meta.ArtistTier < targetCluster.ClusterTier)
-                    targetCluster.ClusterTier = meta.ArtistTier;
+                if (meta.QueryTier < targetCluster.ClusterTier)
+                    targetCluster.ClusterTier = meta.QueryTier;
                 if (meta.TrackScore > targetCluster.BestTrackScore)
                     targetCluster.BestTrackScore = meta.TrackScore;
                 if (meta.OriginalIndex < targetCluster.MinOriginalIndex)
@@ -1168,7 +1240,35 @@ public partial class PlayerWindow : Window
                 if (s != 0) return s;
                 return a.OriginalIndex.CompareTo(b.OriginalIndex);
             });
-            int crossPlatformBonus = Math.Min(3, c.Items.Select(x => x.Track.BrandKey).Distinct(StringComparer.OrdinalIgnoreCase).Count() - 1) * 35;
+
+            // Оставляем по одному лучшему представителю с каждой площадки внутри одного кластера песни
+            // (повторные перезаливы на той же площадке с близкой длительностью убираем)
+            if (c.Items.Count > 1)
+            {
+                var uniqueByPlatform = new List<SearchTrackMeta>(c.Items.Count);
+                foreach (var item in c.Items)
+                {
+                    string b = item.Track.BrandKey ?? "";
+                    bool duplicateSamePlatform = uniqueByPlatform.Any(kept =>
+                        string.Equals(kept.Track.BrandKey, b, StringComparison.OrdinalIgnoreCase) &&
+                        (kept.Track.Duration <= TimeSpan.Zero ||
+                         item.Track.Duration <= TimeSpan.Zero ||
+                         Math.Abs((long)(kept.Track.Duration - item.Track.Duration).TotalMilliseconds) <= 5000));
+
+                    if (!duplicateSamePlatform)
+                        uniqueByPlatform.Add(item);
+                }
+                c.Items = uniqueByPlatform;
+                c.BestTrackScore = c.Items.Max(x => x.TrackScore);
+                c.ClusterTier = c.Items.Min(x => x.QueryTier);
+            }
+
+            int distinctPlatforms = c.Items
+                .Select(x => x.Track.BrandKey ?? "")
+                .Where(b => !string.IsNullOrEmpty(b))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Count();
+            int crossPlatformBonus = Math.Min(4, Math.Max(0, distinctPlatforms - 1)) * 45;
             c.BestTrackScore += crossPlatformBonus;
         }
 
@@ -1192,18 +1292,39 @@ public partial class PlayerWindow : Window
 
     private static bool ClusterMatchesTrack(SongCluster cluster, SearchTrackMeta meta)
     {
+        if (!string.Equals(cluster.VariantTag, meta.VariantTag, StringComparison.Ordinal))
+            return false;
+
         foreach (var existing in cluster.Items)
         {
-            if (TrackMatcher.ArtistsOverlap(existing.EffectiveArtistString, meta.EffectiveArtistString))
-                return true;
-            if (existing.ArtistTier <= 1 && meta.ArtistTier <= 1)
-                return true;
-            if (meta.CanonicalSongKey.Length >= 4 &&
-                existing.Track.Duration > TimeSpan.Zero &&
-                meta.Track.Duration > TimeSpan.Zero &&
-                Math.Abs((long)(existing.Track.Duration - meta.Track.Duration).TotalMilliseconds) <= 5000)
+            if (!TrackMatcher.AreSameSongTitle(
+                    existing.CanonicalSongKey,
+                    existing.CensoredPatternTitle,
+                    meta.CanonicalSongKey,
+                    meta.CensoredPatternTitle,
+                    out bool exactOrCensored))
             {
-                return true;
+                continue;
+            }
+
+            bool artistsOverlap = TrackMatcher.ArtistsOverlap(existing.EffectiveArtistString, meta.EffectiveArtistString);
+            bool bothMatchQueryArtist = existing.ArtistMatchesQuery && meta.ArtistMatchesQuery;
+            bool durationKnown = existing.Track.Duration > TimeSpan.Zero && meta.Track.Duration > TimeSpan.Zero;
+            long durationDiffMs = durationKnown
+                ? Math.Abs((long)(existing.Track.Duration - meta.Track.Duration).TotalMilliseconds)
+                : long.MaxValue;
+
+            if (exactOrCensored)
+            {
+                if (artistsOverlap || bothMatchQueryArtist)
+                    return true;
+                if (meta.CanonicalSongKey.Length >= 4 && durationKnown && durationDiffMs <= 5000)
+                    return true;
+            }
+            else
+            {
+                if (artistsOverlap && durationKnown && durationDiffMs <= 3500)
+                    return true;
             }
         }
         return false;
