@@ -633,6 +633,12 @@ public class AudioPlayerService : IDisposable
             _currentMedia = isLocalResolvedFile
                 ? new Media(_libVlc, streamUrl, FromType.FromPath)
                 : new Media(_libVlc, streamUrl, FromType.FromLocation);
+            if (!isLocalResolvedFile)
+            {
+                var vlcProxyOpt = ProxyService.TryGetLibVlcProxyOption(streamUrl);
+                if (!string.IsNullOrWhiteSpace(vlcProxyOpt))
+                    _currentMedia.AddOption(vlcProxyOpt);
+            }
             if (!isLocalResolvedFile &&
                 string.Equals(track.BrandKey, "vk", StringComparison.OrdinalIgnoreCase) &&
                 (streamUrl.Contains("vkuseraudio", StringComparison.OrdinalIgnoreCase) ||

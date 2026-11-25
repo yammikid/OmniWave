@@ -129,9 +129,11 @@ public partial class PlayerWindow : Window
             Directory.CreateDirectory(userDataFolder);
 
             PlayerWebView.DefaultBackgroundColor = System.Drawing.Color.Transparent;
+            var wvProxyArgs = ProxyService.GetWebView2ProxyArguments();
             PlayerWebView.CreationProperties = new CoreWebView2CreationProperties
             {
-                UserDataFolder = userDataFolder
+                UserDataFolder = userDataFolder,
+                AdditionalBrowserArguments = wvProxyArgs
             };
 
             await PlayerWebView.EnsureCoreWebView2Async();

@@ -270,7 +270,8 @@ public class DownloadService : IDisposable
     {
         var uniqueBase = $"{baseName}_{Math.Abs(track.UniqueKey.GetHashCode()):X}";
         var outTemplate = Path.Combine(folder, $"{uniqueBase}.%(ext)s");
-        var args = $"--newline -f \"bestaudio/best\" --no-playlist --no-warnings -o \"{outTemplate}\" \"{streamUrl}\"";
+        var proxyArg = ProxyService.GetYtDlpProxyArgument(streamUrl);
+        var args = $"{proxyArg}--newline -f \"bestaudio/best\" --no-playlist --no-warnings -o \"{outTemplate}\" \"{streamUrl}\"";
         var ytDlpExe = await YtDlpMusicProvider.EnsureYtDlpExecutableAsync(ct);
 
         var psi = new ProcessStartInfo

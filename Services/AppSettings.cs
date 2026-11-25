@@ -44,6 +44,14 @@ public class AppSettings
     public string IslandDockEdge { get; set; } = "None"; // "None", "Left", "Right", "Top", "Bottom"
     public double? IslandDockOffset { get; set; }
 
+    public bool ProxyEnabled { get; set; }
+    public string ProxyType { get; set; } = "http"; // "http", "https", "socks5", "socks4"
+    public string ProxyHost { get; set; } = "";
+    public int ProxyPort { get; set; } = 8080;
+    public string ProxyUsername { get; set; } = "";
+    public string ProxyPassword { get; set; } = "";
+    public bool ProxyBypassRuServices { get; set; } = true;
+
     public void Normalize()
     {
         if (AnchorCenterX.HasValue && (double.IsNaN(AnchorCenterX.Value) || double.IsInfinity(AnchorCenterX.Value)))
@@ -77,6 +85,12 @@ public class AppSettings
         PlaybackRate = Math.Clamp(float.IsNaN(PlaybackRate) ? 1.0f : PlaybackRate, 0.75f, 1.5f);
         if (string.IsNullOrWhiteSpace(DownloadFolder))
             DownloadFolder = DefaultDownloadFolder;
+
+        ProxyType = ProxyService.NormalizeType(ProxyType);
+        ProxyHost = (ProxyHost ?? "").Trim();
+        ProxyPort = ProxyService.NormalizePort(ProxyType, ProxyPort);
+        ProxyUsername = (ProxyUsername ?? "").Trim();
+        ProxyPassword ??= "";
     }
 }
 
@@ -101,6 +115,7 @@ public class SettingsService
         _settingsPath = Path.Combine(dir, "settings.json");
 
         Current = Load();
+        ProxyService.Apply(Current);
     }
 
     private AppSettings Load()
@@ -137,6 +152,7 @@ public class SettingsService
         lock (_lock)
         {
             Current.Normalize();
+            ProxyService.Apply(Current);
             try
             {
                 var json = JsonSerializer.Serialize(Current, JsonOptions);
@@ -155,6 +171,7 @@ public class SettingsService
         {
             mutate(Current);
             Current.Normalize();
+            ProxyService.Apply(Current);
             try
             {
                 var json = JsonSerializer.Serialize(Current, JsonOptions);

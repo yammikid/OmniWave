@@ -121,9 +121,11 @@ public partial class AuthBrowserWindow : Window
                 "WebView2Auth");
             Directory.CreateDirectory(userDataFolder);
 
+            var wvProxyArgs = ProxyService.GetWebView2ProxyArguments();
             AuthWebView.CreationProperties = new CoreWebView2CreationProperties
             {
-                UserDataFolder = userDataFolder
+                UserDataFolder = userDataFolder,
+                AdditionalBrowserArguments = wvProxyArgs
             };
             await AuthWebView.EnsureCoreWebView2Async();
 

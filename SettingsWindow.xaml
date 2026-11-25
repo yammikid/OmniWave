@@ -139,6 +139,161 @@
                 </StackPanel>
             </Border>
 
+            <!-- Секция: Прокси-сервер -->
+            <TextBlock Text="ПРОКСИ-СЕРВЕР" FontSize="11" FontWeight="Bold" Foreground="#FFCC00" Margin="0,0,0,10"/>
+
+            <Border Background="#0DFFFFFF" CornerRadius="14" Padding="14,12" Margin="0,0,0,14">
+                <StackPanel>
+                    <Grid Margin="0,0,0,12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Margin="0,0,12,0">
+                            <TextBlock Text="Использовать прокси" Style="{StaticResource SettingTitle}"/>
+                            <TextBlock Text="Маршрутизировать запросы, поиск, аудиопотоки, yt-dlp и обновления" Style="{StaticResource SettingSub}"/>
+                        </StackPanel>
+                        <CheckBox x:Name="ChkProxyEnabled" Grid.Column="1" Style="{StaticResource PillCheckBox}"
+                                  VerticalAlignment="Center" Checked="ProxyToggle_Changed" Unchecked="ProxyToggle_Changed"/>
+                    </Grid>
+
+                    <TextBlock Text="Протокол" FontSize="11.5" Foreground="#88899C" Margin="0,0,0,5"/>
+                    <UniformGrid Columns="4" Margin="0,0,0,10">
+                        <Button x:Name="BtnProxyTypeHttp" Content="HTTP" Margin="0,0,4,0" Padding="8,7"
+                                Style="{StaticResource SettingsActionBtn}" Click="ProxyTypeBtn_Click" Tag="http"/>
+                        <Button x:Name="BtnProxyTypeHttps" Content="HTTPS" Margin="2,0,2,0" Padding="8,7"
+                                Style="{StaticResource SettingsActionBtn}" Click="ProxyTypeBtn_Click" Tag="https"/>
+                        <Button x:Name="BtnProxyTypeSocks5" Content="SOCKS5" Margin="2,0,2,0" Padding="8,7"
+                                Style="{StaticResource SettingsActionBtn}" Click="ProxyTypeBtn_Click" Tag="socks5"/>
+                        <Button x:Name="BtnProxyTypeSocks4" Content="SOCKS4" Margin="4,0,0,0" Padding="8,7"
+                                Style="{StaticResource SettingsActionBtn}" Click="ProxyTypeBtn_Click" Tag="socks4"/>
+                    </UniformGrid>
+
+                    <Grid Margin="0,0,0,10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="8"/>
+                            <ColumnDefinition Width="96"/>
+                        </Grid.ColumnDefinitions>
+
+                        <StackPanel Grid.Column="0">
+                            <TextBlock Text="Адрес (хост, IP или ссылка)" FontSize="11.5" Foreground="#88899C" Margin="0,0,0,4"/>
+                            <Border Background="#16FFFFFF" CornerRadius="10" Padding="10,7">
+                                <Grid>
+                                    <TextBlock Text="127.0.0.1 или socks5://user:pass@host:port"
+                                               Foreground="#55FFFFFF" FontSize="12" IsHitTestVisible="False"
+                                               TextTrimming="CharacterEllipsis" VerticalAlignment="Center">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Text, ElementName=TxtProxyHost}" Value="">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                    <TextBox x:Name="TxtProxyHost"
+                                             Background="Transparent" BorderThickness="0"
+                                             Foreground="White" CaretBrush="#FFCC00" FontSize="12.5"
+                                             VerticalContentAlignment="Center"
+                                             LostFocus="TxtProxyHost_LostFocus"
+                                             KeyDown="TxtProxyHost_KeyDown"/>
+                                </Grid>
+                            </Border>
+                        </StackPanel>
+
+                        <StackPanel Grid.Column="2">
+                            <TextBlock Text="Порт" FontSize="11.5" Foreground="#88899C" Margin="0,0,0,4"/>
+                            <Border Background="#16FFFFFF" CornerRadius="10" Padding="10,7">
+                                <TextBox x:Name="TxtProxyPort"
+                                         Background="Transparent" BorderThickness="0"
+                                         Foreground="White" CaretBrush="#FFCC00" FontSize="12.5"
+                                         MaxLength="5" VerticalContentAlignment="Center"
+                                         KeyDown="TxtProxyField_KeyDown"/>
+                            </Border>
+                        </StackPanel>
+                    </Grid>
+
+                    <Grid Margin="0,0,0,12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="8"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <StackPanel Grid.Column="0">
+                            <TextBlock Text="Логин (необязательно)" FontSize="11.5" Foreground="#88899C" Margin="0,0,0,4"/>
+                            <Border Background="#16FFFFFF" CornerRadius="10" Padding="10,7">
+                                <TextBox x:Name="TxtProxyUser"
+                                         Background="Transparent" BorderThickness="0"
+                                         Foreground="White" CaretBrush="#FFCC00" FontSize="12.5"
+                                         VerticalContentAlignment="Center"
+                                         KeyDown="TxtProxyField_KeyDown"/>
+                            </Border>
+                        </StackPanel>
+
+                        <StackPanel Grid.Column="2">
+                            <TextBlock Text="Пароль (необязательно)" FontSize="11.5" Foreground="#88899C" Margin="0,0,0,4"/>
+                            <Border Background="#16FFFFFF" CornerRadius="10" Padding="10,7">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <PasswordBox x:Name="TxtProxyPass" Grid.Column="0"
+                                                 Background="Transparent" BorderThickness="0"
+                                                 Foreground="White" CaretBrush="#FFCC00" FontSize="12.5"
+                                                 VerticalContentAlignment="Center"
+                                                 PasswordChanged="TxtProxyPass_PasswordChanged"
+                                                 KeyDown="TxtProxyField_KeyDown"/>
+                                    <TextBox x:Name="TxtProxyPassVisible" Grid.Column="0"
+                                             Visibility="Collapsed"
+                                             Background="Transparent" BorderThickness="0"
+                                             Foreground="White" CaretBrush="#FFCC00" FontSize="12.5"
+                                             VerticalContentAlignment="Center"
+                                             TextChanged="TxtProxyPassVisible_TextChanged"
+                                             KeyDown="TxtProxyField_KeyDown"/>
+                                    <Button x:Name="BtnToggleProxyPass" Grid.Column="1"
+                                            Content="&#xE7B3;" FontFamily="Segoe MDL2 Assets" FontSize="12"
+                                            Background="Transparent" Foreground="#88899C" BorderThickness="0"
+                                            Padding="4,0,0,0" Cursor="Hand" ToolTip="Показать / скрыть пароль"
+                                            Click="ToggleProxyPassVisibility_Click"/>
+                                </Grid>
+                            </Border>
+                        </StackPanel>
+                    </Grid>
+
+                    <Grid Margin="0,0,0,10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Margin="0,0,12,0">
+                            <TextBlock Text="Обходить прокси для Яндекс и ВК" Style="{StaticResource SettingTitle}"/>
+                            <TextBlock Text="Подключаться к Яндекс Музыке и ВКонтакте напрямую без прокси" Style="{StaticResource SettingSub}"/>
+                        </StackPanel>
+                        <CheckBox x:Name="ChkProxyBypassRu" Grid.Column="1" Style="{StaticResource PillCheckBox}"
+                                  VerticalAlignment="Center" Checked="ProxyBypassRu_Changed" Unchecked="ProxyBypassRu_Changed"/>
+                    </Grid>
+
+                    <TextBlock x:Name="TxtProxyStatus" Text="Прокси выключен" Style="{StaticResource SettingSub}" Margin="0,0,0,10"/>
+
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="10"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Button x:Name="BtnTestProxy" Grid.Column="0" Content="Проверить"
+                                Style="{StaticResource SettingsActionBtn}" Click="TestProxy_Click"/>
+                        <Button x:Name="BtnApplyProxy" Grid.Column="2" Content="Применить"
+                                Style="{StaticResource SettingsActionBtn}" Click="ApplyProxy_Click"/>
+                    </Grid>
+                </StackPanel>
+            </Border>
+
             <!-- Секция: Dynamic Island -->
             <TextBlock Text="DYNAMIC ISLAND" FontSize="11" FontWeight="Bold" Foreground="#FFCC00" Margin="0,0,0,10"/>
 

@@ -250,10 +250,17 @@ public class YtDlpMusicProvider : IMusicProvider
     private static async Task<string?> RunYtDlpAsync(string arguments, CancellationToken ct)
     {
         var exe = await EnsureYtDlpExecutableAsync(ct);
+        var finalArgs = arguments;
+        if (!finalArgs.Contains("--proxy", StringComparison.OrdinalIgnoreCase))
+        {
+            var proxyArg = ProxyService.GetYtDlpProxyArgument(finalArgs);
+            if (!string.IsNullOrWhiteSpace(proxyArg))
+                finalArgs = proxyArg + finalArgs;
+        }
         var psi = new ProcessStartInfo
         {
             FileName = exe,
-            Arguments = arguments,
+            Arguments = finalArgs,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             StandardOutputEncoding = Encoding.UTF8,
