@@ -1,3 +1,4 @@
+using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
@@ -52,6 +53,19 @@ public sealed class YandexMusicProvider : IMusicProvider, IDisposable
     private readonly SettingsService _settings;
     private readonly List<IMusicProvider> _fallbackProviders;
     private readonly HttpClient _http;
+    private readonly string _waveHistoryPath;
+    private readonly object _waveLock = new();
+    private readonly List<string> _waveSeenOrder = new();
+    private readonly HashSet<string> _waveSeenIds = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<string> _cachedUserLikedSeedIds = new();
+    private string? _lastWaveCompositeId;
+    private const int MaxWaveHistorySize = 350;
+
+    private sealed class WaveHistoryState
+    {
+        public string? LastCompositeId { get; set; }
+        public List<string>? SeenTrackIds { get; set; }
+    }
 
     public string Name => "Яндекс";
     public string BrandKey => "yandex";
@@ -74,6 +88,13 @@ public sealed class YandexMusicProvider : IMusicProvider, IDisposable
         _http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(15) };
         _http.DefaultRequestHeaders.TryAddWithoutValidation("X-Yandex-Music-Client", ClientHeader);
         _http.DefaultRequestHeaders.TryAddWithoutValidation("Accept-Language", "ru");
+
+        var appDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "OmniWave");
+        Directory.CreateDirectory(appDir);
+        _waveHistoryPath = Path.Combine(appDir, "wave_history.json");
+        LoadWaveHistory();
     }
 
     public static string ExtractToken(string raw)
@@ -137,6 +158,15 @@ public sealed class YandexMusicProvider : IMusicProvider, IDisposable
 
     public void Disconnect()
     {
+        lock (_waveLock)
+        {
+            _waveSeenOrder.Clear();
+            _waveSeenIds.Clear();
+            _cachedUserLikedSeedIds.Clear();
+            _lastWaveCompositeId = null;
+            try { if (File.Exists(_waveHistoryPath)) File.Delete(_waveHistoryPath); } catch { }
+        }
+
         _settings.Update(s =>
         {
             s.YandexToken = null;
@@ -284,36 +314,340 @@ public sealed class YandexMusicProvider : IMusicProvider, IDisposable
 
     public async Task<List<TrackItem>> FetchMyWaveTracksAsync(string? lastTrackId = null, CancellationToken ct = default)
     {
-        var tracks = new List<TrackItem>();
-        if (!IsAuthenticated) return tracks;
+        var collected = new List<TrackItem>();
+        if (!IsAuthenticated) return collected;
 
+        const int TargetWaveBatchCount = 16;
         var token = _settings.Current.YandexToken!.Trim();
-        var url = "/rotor/station/user:onyourwave/tracks?settings2=true";
-        if (!string.IsNullOrWhiteSpace(lastTrackId))
+        var collectedIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var allReturnedFallback = new List<TrackItem>();
+
+        string? queueSeed = NormalizeWaveQueueSeed(lastTrackId);
+        bool isFreshStart = string.IsNullOrWhiteSpace(queueSeed);
+        if (isFreshStart)
         {
-            url += $"&queue={Uri.EscapeDataString(lastTrackId)}";
+            lock (_waveLock)
+            {
+                queueSeed = _lastWaveCompositeId;
+            }
+
+            _ = SendRotorFeedbackAsync("user:onyourwave", null, new
+            {
+                type = "radioStarted",
+                timestamp = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                from = "mobile-home-rup_main-user-onyourwave-default"
+            }, token, ct);
+        }
+
+        // 1. Делаем до 3 последовательных запросов в Rotor с обратной связью trackFinished,
+        // чтобы обойти ограничение в ~5 треков на ответ и продвинуть серверный курсор.
+        for (int round = 0; round < 3 && collected.Count < TargetWaveBatchCount; round++)
+        {
+            ct.ThrowIfCancellationRequested();
+            var url = "/rotor/station/user:onyourwave/tracks?settings2=true";
+            if (!string.IsNullOrWhiteSpace(queueSeed))
+                url += $"&queue={Uri.EscapeDataString(queueSeed)}";
+
+            try
+            {
+                using var doc = await GetJsonAsync(url, token, ct);
+                if (doc == null || !doc.RootElement.TryGetProperty("result", out var result))
+                    break;
+
+                string? batchId = ReadStringOrNumber(result, "batchId");
+                if (!result.TryGetProperty("sequence", out var seq) || seq.ValueKind != JsonValueKind.Array)
+                    break;
+
+                var batchTracks = ParseRotorSequence(seq);
+                if (batchTracks.Count == 0) break;
+
+                allReturnedFallback.AddRange(batchTracks);
+                AddUnseenWaveTracks(batchTracks, collected, collectedIds);
+
+                var tailTrack = batchTracks[^1];
+                string compLast = GetCompositeTrackId(tailTrack);
+                if (string.IsNullOrWhiteSpace(compLast) ||
+                    string.Equals(queueSeed, compLast, StringComparison.OrdinalIgnoreCase))
+                {
+                    break;
+                }
+
+                queueSeed = compLast;
+                lock (_waveLock)
+                {
+                    _lastWaveCompositeId = compLast;
+                }
+
+                double playSec = Math.Max(30.0, tailTrack.Duration.TotalSeconds);
+                await SendRotorFeedbackAsync("user:onyourwave", batchId, new
+                {
+                    type = "trackFinished",
+                    timestamp = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                    trackId = compLast,
+                    totalPlayedSeconds = Math.Round(playSec, 1)
+                }, token, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch { break; }
+        }
+
+        // 2. Если «Моя волна» отдала мало новых треков (повторы или дневной лимит ротора),
+        // расширяем поток через станции по любимым трекам пользователя и /similar.
+        if (collected.Count < 12)
+        {
+            await EnsureLikedSeedIdsAsync(token, ct);
+            var seedPool = BuildWaveSeedPool(allReturnedFallback);
+
+            for (int sIdx = 0; sIdx < seedPool.Count && sIdx < 2 && collected.Count < TargetWaveBatchCount; sIdx++)
+            {
+                ct.ThrowIfCancellationRequested();
+                string seedId = seedPool[sIdx];
+
+                try
+                {
+                    using var stDoc = await GetJsonAsync($"/rotor/station/track:{Uri.EscapeDataString(seedId)}/tracks?settings2=true", token, ct);
+                    if (stDoc != null && stDoc.RootElement.TryGetProperty("result", out var stRes) &&
+                        stRes.TryGetProperty("sequence", out var stSeq) && stSeq.ValueKind == JsonValueKind.Array)
+                    {
+                        var stTracks = ParseRotorSequence(stSeq);
+                        allReturnedFallback.AddRange(stTracks);
+                        AddUnseenWaveTracks(stTracks, collected, collectedIds);
+                    }
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                catch { }
+
+                if (collected.Count >= 12) continue;
+
+                try
+                {
+                    using var simDoc = await GetJsonAsync($"/tracks/{Uri.EscapeDataString(seedId)}/similar", token, ct);
+                    if (simDoc != null && simDoc.RootElement.TryGetProperty("result", out var simRes) &&
+                        simRes.TryGetProperty("similarTracks", out var simArr) && simArr.ValueKind == JsonValueKind.Array)
+                    {
+                        var simTracks = new List<TrackItem>();
+                        foreach (var el in simArr.EnumerateArray())
+                        {
+                            var parsed = ParseYandexTrack(el);
+                            if (parsed != null) simTracks.Add(parsed);
+                        }
+                        ShuffleInPlace(simTracks);
+                        allReturnedFallback.AddRange(simTracks);
+                        AddUnseenWaveTracks(simTracks, collected, collectedIds);
+                    }
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                catch { }
+            }
+        }
+
+        if (collected.Count == 0 && allReturnedFallback.Count > 0)
+        {
+            lock (_waveLock)
+            {
+                _waveSeenIds.Clear();
+                _waveSeenOrder.Clear();
+            }
+            AddUnseenWaveTracks(allReturnedFallback, collected, collectedIds);
+        }
+
+        if (collected.Count > TargetWaveBatchCount)
+            collected.RemoveRange(TargetWaveBatchCount, collected.Count - TargetWaveBatchCount);
+
+        lock (_waveLock)
+        {
+            SaveWaveHistoryUnlocked();
+        }
+
+        return collected;
+    }
+
+    private List<TrackItem> ParseRotorSequence(JsonElement seq)
+    {
+        var list = new List<TrackItem>();
+        foreach (var item in seq.EnumerateArray())
+        {
+            if (item.TryGetProperty("track", out var trackEl))
+            {
+                var parsed = ParseYandexTrack(trackEl);
+                if (parsed != null) list.Add(parsed);
+            }
+        }
+        return list;
+    }
+
+    private void AddUnseenWaveTracks(List<TrackItem> source, List<TrackItem> dest, HashSet<string> destIds)
+    {
+        lock (_waveLock)
+        {
+            foreach (var t in source)
+            {
+                if (string.IsNullOrWhiteSpace(t.Id)) continue;
+                if (_waveSeenIds.Contains(t.Id) || !destIds.Add(t.Id)) continue;
+                MarkWaveTrackSeenUnlocked(t.Id);
+                dest.Add(t);
+            }
+        }
+    }
+
+    private async Task EnsureLikedSeedIdsAsync(string token, CancellationToken ct)
+    {
+        lock (_waveLock)
+        {
+            if (_cachedUserLikedSeedIds.Count > 0) return;
         }
 
         try
         {
-            using var doc = await GetJsonAsync(url, token, ct);
-            if (doc != null && doc.RootElement.TryGetProperty("result", out var result) &&
-                result.TryGetProperty("sequence", out var seq) && seq.ValueKind == JsonValueKind.Array)
+            var uid = _settings.Current.YandexUserId;
+            using var likesDoc = await GetJsonAsync($"/users/{uid}/likes/tracks", token, ct);
+            if (likesDoc != null &&
+                likesDoc.RootElement.TryGetProperty("result", out var likesRes) &&
+                likesRes.TryGetProperty("library", out var lib) &&
+                lib.TryGetProperty("tracks", out var likeEntries) &&
+                likeEntries.ValueKind == JsonValueKind.Array)
             {
-                foreach (var item in seq.EnumerateArray())
+                var ids = new List<string>();
+                foreach (var entry in likeEntries.EnumerateArray())
                 {
-                    if (item.TryGetProperty("track", out var trackEl))
-                    {
-                        var parsed = ParseYandexTrack(trackEl);
-                        if (parsed != null) tracks.Add(parsed);
-                    }
+                    var tid = ReadStringOrNumber(entry, "id");
+                    if (!string.IsNullOrWhiteSpace(tid))
+                        ids.Add(tid);
+                    if (ids.Count >= 150) break;
+                }
+
+                lock (_waveLock)
+                {
+                    if (_cachedUserLikedSeedIds.Count == 0 && ids.Count > 0)
+                        _cachedUserLikedSeedIds.AddRange(ids);
                 }
             }
         }
-        catch (OperationCanceledException) { throw; }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch { }
+    }
 
-        return tracks;
+    private List<string> BuildWaveSeedPool(List<TrackItem> fallbackTracks)
+    {
+        var candidates = new List<string>();
+        lock (_waveLock)
+        {
+            candidates.AddRange(_cachedUserLikedSeedIds);
+            foreach (var t in fallbackTracks)
+            {
+                if (!string.IsNullOrWhiteSpace(t.Id))
+                    candidates.Add(t.Id);
+            }
+            if (candidates.Count == 0)
+                candidates.AddRange(_waveSeenOrder);
+        }
+
+        candidates = candidates.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        ShuffleInPlace(candidates);
+        return candidates;
+    }
+
+    private static void ShuffleInPlace<T>(IList<T> items)
+    {
+        for (int i = items.Count - 1; i > 0; i--)
+        {
+            int j = Random.Shared.Next(i + 1);
+            (items[i], items[j]) = (items[j], items[i]);
+        }
+    }
+
+    private string? NormalizeWaveQueueSeed(string? rawSeed)
+    {
+        if (string.IsNullOrWhiteSpace(rawSeed)) return null;
+        var trimmed = rawSeed.Trim();
+        var mBoth = AlbumAndTrackIdInUrlRegex.Match(trimmed);
+        if (mBoth.Success)
+            return $"{mBoth.Groups[2].Value}:{mBoth.Groups[1].Value}";
+        var mTrack = TrackIdInUrlRegex.Match(trimmed);
+        if (mTrack.Success)
+            return mTrack.Groups[1].Value;
+        return trimmed;
+    }
+
+    private static string GetCompositeTrackId(TrackItem track)
+    {
+        if (TryExtractYandexTrackAndAlbumId(track, out var tid, out var aid))
+            return !string.IsNullOrWhiteSpace(aid) ? $"{tid}:{aid}" : tid;
+        return track.Id ?? "";
+    }
+
+    private void LoadWaveHistory()
+    {
+        lock (_waveLock)
+        {
+            try
+            {
+                if (!File.Exists(_waveHistoryPath)) return;
+                var json = File.ReadAllText(_waveHistoryPath);
+                var data = JsonSerializer.Deserialize<WaveHistoryState>(json);
+                if (data == null) return;
+
+                _lastWaveCompositeId = string.IsNullOrWhiteSpace(data.LastCompositeId) ? null : data.LastCompositeId.Trim();
+                if (data.SeenTrackIds != null)
+                {
+                    foreach (var id in data.SeenTrackIds)
+                    {
+                        if (!string.IsNullOrWhiteSpace(id) && _waveSeenIds.Add(id))
+                            _waveSeenOrder.Add(id);
+                    }
+                    TrimWaveHistoryUnlocked();
+                }
+            }
+            catch { }
+        }
+    }
+
+    private void MarkWaveTrackSeenUnlocked(string trackId)
+    {
+        if (_waveSeenIds.Add(trackId))
+        {
+            _waveSeenOrder.Add(trackId);
+            TrimWaveHistoryUnlocked();
+        }
+    }
+
+    private void TrimWaveHistoryUnlocked()
+    {
+        if (_waveSeenOrder.Count <= MaxWaveHistorySize) return;
+        int removeCount = Math.Min(120, _waveSeenOrder.Count - (MaxWaveHistorySize - 120));
+        if (removeCount <= 0) return;
+
+        for (int i = 0; i < removeCount; i++)
+            _waveSeenIds.Remove(_waveSeenOrder[i]);
+        _waveSeenOrder.RemoveRange(0, removeCount);
+    }
+
+    private void SaveWaveHistoryUnlocked()
+    {
+        try
+        {
+            var data = new WaveHistoryState
+            {
+                LastCompositeId = _lastWaveCompositeId,
+                SeenTrackIds = _waveSeenOrder.ToList()
+            };
+            File.WriteAllText(_waveHistoryPath, JsonSerializer.Serialize(data));
+        }
+        catch { }
+    }
+
+    private async Task SendRotorFeedbackAsync(string stationId, string? batchId, object payload, string token, CancellationToken ct)
+    {
+        try
+        {
+            var rel = $"/rotor/station/{stationId}/feedback";
+            if (!string.IsNullOrWhiteSpace(batchId))
+                rel += $"?batch-id={Uri.EscapeDataString(batchId)}";
+            var json = JsonSerializer.Serialize(payload);
+            await PostJsonAsync(rel, json, token, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch { }
     }
 
     public async Task<string?> ResolveStreamUrlAsync(TrackItem track, CancellationToken ct = default)
@@ -711,6 +1045,20 @@ public sealed class YandexMusicProvider : IMusicProvider, IDisposable
         if (!resp.IsSuccessStatusCode) return null;
         var json = await resp.Content.ReadAsStringAsync(ct);
         return JsonDocument.Parse(json);
+    }
+
+    private async Task PostJsonAsync(string relativeUrl, string jsonBody, string token, CancellationToken ct)
+    {
+        if (!relativeUrl.StartsWith('/'))
+            relativeUrl = "/" + relativeUrl;
+
+        using var resp = await SendWithRetryAsync(() =>
+        {
+            var req = new HttpRequestMessage(HttpMethod.Post, ApiBase + relativeUrl);
+            req.Headers.TryAddWithoutValidation("Authorization", $"OAuth {token}");
+            req.Content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
+            return req;
+        }, ct);
     }
 
     private async Task<HttpResponseMessage> SendWithRetryAsync(Func<HttpRequestMessage> buildReq, CancellationToken ct)

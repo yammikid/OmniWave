@@ -691,6 +691,8 @@ public partial class PlayerWindow : Window
     private void PushQueueUpdate()
     {
         var (items, _) = _player.GetQueueSnapshot();
+        _library.SyncLikedFlags(items);
+        _downloads.SyncDownloadedFlags(items);
         RegisterTracks(items);
         PostToWeb("queueUpdate", new { items = items.Select(ToDto).ToList() });
     }
@@ -807,7 +809,7 @@ public partial class PlayerWindow : Window
                 isLoading = false
             });
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
         catch (Exception ex)
         {
             PostToWeb("searchResults", new
@@ -866,7 +868,7 @@ public partial class PlayerWindow : Window
                 isLoading = false
             });
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
         catch (Exception ex)
         {
             PostToWeb("searchResults", new
@@ -885,7 +887,19 @@ public partial class PlayerWindow : Window
         List<IMusicProvider> providers,
         CancellationToken ct)
     {
-        var tasks = providers.Select(p => p.SearchAsync(query, limitPerProvider, ct)).ToList();
+        var tasks = providers.Select(async p =>
+        {
+            using var providerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            providerCts.CancelAfter(TimeSpan.FromSeconds(8));
+            try
+            {
+                return await p.SearchAsync(query, limitPerProvider, providerCts.Token);
+            }
+            catch
+            {
+                return new List<TrackItem>();
+            }
+        }).ToList();
         var batches = await Task.WhenAll(tasks);
 
         var merged = new List<TrackItem>();

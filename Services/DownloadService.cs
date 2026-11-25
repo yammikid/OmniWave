@@ -140,7 +140,20 @@ public class DownloadService : IDisposable
             bool isLive = IsLiveStream(track, streamUrl);
             TimeSpan? liveCap = isLive ? (maxRecordDuration ?? DefaultLiveRecordDuration) : maxRecordDuration;
 
-            if (isHls)
+            if (File.Exists(streamUrl))
+            {
+                var ext = Path.GetExtension(streamUrl);
+                if (string.IsNullOrWhiteSpace(ext)) ext = ".m4a";
+                var destPath = EnsureUniqueTargetPath(folder, baseName, ext, track.UniqueKey);
+                var copyPart = Path.Combine(folder, $"{baseName}.{Guid.NewGuid():N}.part");
+                tempPartPath = copyPart;
+                File.Copy(streamUrl, copyPart, overwrite: true);
+                if (File.Exists(destPath)) File.Delete(destPath);
+                File.Move(copyPart, destPath);
+                savedPath = destPath;
+                track.DownloadProgress = 100;
+            }
+            else if (isHls)
             {
                 savedPath = await DownloadViaYtDlpAsync(streamUrl, folder, baseName, track, liveCap, ct);
             }

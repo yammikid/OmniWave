@@ -1410,8 +1410,20 @@ function renderFilters() {
       }
       st.filter = (st.filter === f.key && f.key !== 'all') ? 'all' : f.key;
       renderFilters();
-      const q = document.getElementById('searchInput').value.trim();
-      if (q || st.filter === 'radio') postCmd('search.run', { query: q, filter: st.filter });
+      const inp = document.getElementById('searchInput');
+      const activeMeta = FILTERS.find(x => x.key === st.filter);
+      inp.placeholder = (activeMeta && st.filter !== 'all')
+        ? `Поиск треков в ${activeMeta.label}...`
+        : 'Поиск треков или ссылка...';
+      const q = inp.value.trim();
+      if (q || st.filter === 'radio') {
+        postCmd('search.run', { query: q, filter: st.filter });
+      } else if (st.filter !== 'all' && activeMeta) {
+        document.getElementById('searchStatusText').textContent = `Введите запрос для поиска в ${activeMeta.label}`;
+        inp.focus();
+      } else {
+        document.getElementById('searchStatusText').textContent = 'Введите запрос или выберите «Радио»';
+      }
     };
     wrap.appendChild(b);
   });
@@ -1419,18 +1431,44 @@ function renderFilters() {
 
 const searchInput = document.getElementById('searchInput');
 const btnClearSearch = document.getElementById('btnClearSearch');
+let searchDebounceTimer = null;
+
+function triggerSearchNow() {
+  if (searchDebounceTimer) {
+    clearTimeout(searchDebounceTimer);
+    searchDebounceTimer = null;
+  }
+  postCmd('search.run', { query: searchInput.value.trim(), filter: st.filter });
+}
+
 searchInput.oninput = () => {
-  btnClearSearch.style.display = searchInput.value ? 'inline-flex' : 'none';
+  const val = searchInput.value;
+  btnClearSearch.style.display = val ? 'inline-flex' : 'none';
+  if (searchDebounceTimer) {
+    clearTimeout(searchDebounceTimer);
+    searchDebounceTimer = null;
+  }
+  const trimmed = val.trim();
+  if (trimmed.length >= 2) {
+    searchDebounceTimer = setTimeout(() => {
+      searchDebounceTimer = null;
+      postCmd('search.run', { query: searchInput.value.trim(), filter: st.filter });
+    }, 380);
+  }
 };
 searchInput.onkeydown = e => {
-  if (e.key === 'Enter') postCmd('search.run', { query: searchInput.value.trim(), filter: st.filter });
+  if (e.key === 'Enter') triggerSearchNow();
 };
 btnClearSearch.onclick = () => {
+  if (searchDebounceTimer) {
+    clearTimeout(searchDebounceTimer);
+    searchDebounceTimer = null;
+  }
   searchInput.value = '';
   btnClearSearch.style.display = 'none';
   searchInput.focus();
 };
-document.getElementById('btnSearchRun').onclick = () => postCmd('search.run', { query: searchInput.value.trim(), filter: st.filter });
+document.getElementById('btnSearchRun').onclick = triggerSearchNow;
 document.getElementById('btnLoadMore').onclick = () => postCmd('search.loadMore', { query: searchInput.value.trim(), filter: st.filter });
 document.getElementById('btnScrollUp').onclick = () => document.getElementById('resultsList').scrollBy({ top: -240, behavior: 'smooth' });
 document.getElementById('btnScrollDown').onclick = () => document.getElementById('resultsList').scrollBy({ top: 240, behavior: 'smooth' });

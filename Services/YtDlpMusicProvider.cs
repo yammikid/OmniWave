@@ -40,7 +40,13 @@ public class YtDlpMusicProvider : IMusicProvider
                 using var doc = JsonDocument.Parse(line);
                 var root = doc.RootElement;
 
-                string id = root.TryGetProperty("id", out var idEl) ? idEl.GetString() ?? "" : "";
+                string id = "";
+                if (root.TryGetProperty("id", out var idEl))
+                {
+                    id = idEl.ValueKind == JsonValueKind.String
+                        ? (idEl.GetString() ?? "")
+                        : (idEl.ValueKind == JsonValueKind.Number ? idEl.GetRawText() : "");
+                }
                 string title = root.TryGetProperty("title", out var tEl) ? tEl.GetString() ?? "Без названия" : "Без названия";
                 string artist = root.TryGetProperty("uploader", out var uEl) && !string.IsNullOrWhiteSpace(uEl.GetString())
                     ? uEl.GetString()!
@@ -64,9 +70,22 @@ public class YtDlpMusicProvider : IMusicProvider
                 else if (root.TryGetProperty("thumbnails", out var thArr) &&
                          thArr.ValueKind == JsonValueKind.Array && thArr.GetArrayLength() > 0)
                 {
-                    var last = thArr[thArr.GetArrayLength() - 1];
-                    if (last.TryGetProperty("url", out var tu)) cover = tu.GetString() ?? "";
+                    foreach (var th in thArr.EnumerateArray())
+                    {
+                        var thId = th.TryGetProperty("id", out var tidEl) ? tidEl.GetString() : null;
+                        var tuStr = th.TryGetProperty("url", out var tu) ? tu.GetString() : null;
+                        if (string.IsNullOrWhiteSpace(tuStr)) continue;
+                        if (string.Equals(thId, "original", StringComparison.OrdinalIgnoreCase)) continue;
+                        cover = tuStr;
+                    }
+                    if (string.IsNullOrWhiteSpace(cover))
+                    {
+                        var last = thArr[thArr.GetArrayLength() - 1];
+                        if (last.TryGetProperty("url", out var tu)) cover = tu.GetString() ?? "";
+                    }
                 }
+                if (!string.IsNullOrWhiteSpace(cover))
+                    cover = cover.Replace("-original.", "-t500x500.", StringComparison.OrdinalIgnoreCase);
 
                 double sec = root.TryGetProperty("duration", out var durEl) && durEl.ValueKind == JsonValueKind.Number
                     ? durEl.GetDouble()

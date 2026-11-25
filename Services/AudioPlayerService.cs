@@ -220,15 +220,18 @@ public class AudioPlayerService : IDisposable
         int remaining;
         string? lastId;
         HashSet<string> existingIds;
+        HashSet<string> existingKeys;
         lock (_queueLock)
         {
             if (_queue.Count == 0) return;
             remaining = (_queue.Count - 1) - Math.Max(0, _currentIndex);
-            lastId = _queue[^1].Id;
+            var tail = _queue[^1];
+            lastId = !string.IsNullOrWhiteSpace(tail.PageUrl) ? tail.PageUrl : tail.Id;
             existingIds = _queue.Select(t => t.Id).Where(id => !string.IsNullOrWhiteSpace(id)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            existingKeys = _queue.Select(t => t.UniqueKey).Where(k => !string.IsNullOrWhiteSpace(k)).ToHashSet(StringComparer.OrdinalIgnoreCase);
         }
 
-        if (remaining > 2) return;
+        if (remaining > 10) return;
         if (Interlocked.CompareExchange(ref _waveReplenishing, 1, 0) != 0) return;
 
         try
@@ -238,7 +241,9 @@ public class AudioPlayerService : IDisposable
                 : await _vkMixReplenishProvider!();
             if (batch != null && batch.Count > 0)
             {
-                var fresh = batch.Where(t => !string.IsNullOrWhiteSpace(t.Id) && !existingIds.Contains(t.Id)).ToList();
+                var fresh = batch.Where(t =>
+                    !existingKeys.Contains(t.UniqueKey) &&
+                    (string.IsNullOrWhiteSpace(t.Id) || !existingIds.Contains(t.Id))).ToList();
                 if (fresh.Count > 0)
                     AppendTracksToQueue(fresh);
             }
@@ -344,6 +349,7 @@ public class AudioPlayerService : IDisposable
         }
 
         QueueChanged?.Invoke();
+        _ = EnsureWaveReplenishedIfNeededAsync();
         if (target != null)
             await LoadAndPlayAsync(target);
     }
@@ -623,8 +629,12 @@ public class AudioPlayerService : IDisposable
             TrackChanged?.Invoke(track);
 
             _currentMedia?.Dispose();
-            _currentMedia = new Media(_libVlc, streamUrl, FromType.FromLocation);
-            if (string.Equals(track.BrandKey, "vk", StringComparison.OrdinalIgnoreCase) &&
+            bool isLocalResolvedFile = File.Exists(streamUrl);
+            _currentMedia = isLocalResolvedFile
+                ? new Media(_libVlc, streamUrl, FromType.FromPath)
+                : new Media(_libVlc, streamUrl, FromType.FromLocation);
+            if (!isLocalResolvedFile &&
+                string.Equals(track.BrandKey, "vk", StringComparison.OrdinalIgnoreCase) &&
                 (streamUrl.Contains("vkuseraudio", StringComparison.OrdinalIgnoreCase) ||
                  streamUrl.Contains("userapi.com", StringComparison.OrdinalIgnoreCase) ||
                  streamUrl.Contains("vk.com", StringComparison.OrdinalIgnoreCase) ||
