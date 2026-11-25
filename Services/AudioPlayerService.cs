@@ -109,9 +109,14 @@ public class AudioPlayerService : IDisposable
         _libVlc = new LibVLC("--no-video", "--quiet", "--aout=directsound");
         _player = new MediaPlayer(_libVlc) { Volume = _softwareVolume };
         ApplyAudioFxToPlayer();
+        ProxyService.ProxyChanged += () => _streamUrlCache.Clear();
 
         // Не вызываем методы/свойства MediaPlayer синхронно внутри нативных коллбэков LibVLC
-        _player.LengthChanged += (_, e) => _cachedLengthMs = e.Length;
+        _player.LengthChanged += (_, e) =>
+        {
+            if (e.Length > 0)
+                _cachedLengthMs = e.Length;
+        };
         _player.TimeChanged += (_, e) =>
         {
             _lastTimeMs = e.Time;
@@ -592,8 +597,8 @@ public class AudioPlayerService : IDisposable
         var ct = _loadCts.Token;
 
         _isLoadingTrack = true;
-        _pendingSeekMs = Math.Max(0, startPositionMs);
-        _lastTimeMs = _pendingSeekMs;
+        _pendingSeekMs = startPositionMs > 0 ? startPositionMs : -1;
+        _lastTimeMs = Math.Max(0, startPositionMs);
         _cachedLengthMs = (long)track.Duration.TotalMilliseconds;
         CurrentTrack = track;
         SaveCurrentBrandState();
@@ -621,7 +626,24 @@ public class AudioPlayerService : IDisposable
 
             if (string.IsNullOrWhiteSpace(streamUrl))
             {
-                StatusMessage?.Invoke($"Не удалось получить поток с {track.Source}");
+                if (string.Equals(track.BrandKey, "youtube", StringComparison.OrdinalIgnoreCase) &&
+                    _providers.TryGetValue("youtube", out var ytProv) &&
+                    ytProv is YouTubeFastProvider ytFast &&
+                    !string.IsNullOrWhiteSpace(ytFast.LastResolveError))
+                {
+                    StatusMessage?.Invoke(ytFast.LastResolveError);
+                }
+                else if (string.Equals(track.BrandKey, "spotify", StringComparison.OrdinalIgnoreCase) &&
+                         _providers.TryGetValue("spotify", out var spProv) &&
+                         spProv is SpotifyMusicProvider sp &&
+                         !string.IsNullOrWhiteSpace(sp.LastResolveError))
+                {
+                    StatusMessage?.Invoke(sp.LastResolveError);
+                }
+                else
+                {
+                    StatusMessage?.Invoke($"Не удалось получить поток с {track.Source}");
+                }
                 return;
             }
 
@@ -630,24 +652,39 @@ public class AudioPlayerService : IDisposable
 
             _currentMedia?.Dispose();
             bool isLocalResolvedFile = File.Exists(streamUrl);
-            _currentMedia = isLocalResolvedFile
-                ? new Media(_libVlc, streamUrl, FromType.FromPath)
-                : new Media(_libVlc, streamUrl, FromType.FromLocation);
-            if (!isLocalResolvedFile)
-            {
-                var vlcProxyOpt = ProxyService.TryGetLibVlcProxyOption(streamUrl);
-                if (!string.IsNullOrWhiteSpace(vlcProxyOpt))
-                    _currentMedia.AddOption(vlcProxyOpt);
-            }
-            if (!isLocalResolvedFile &&
+            bool isVkAudioHost = !isLocalResolvedFile &&
                 string.Equals(track.BrandKey, "vk", StringComparison.OrdinalIgnoreCase) &&
                 (streamUrl.Contains("vkuseraudio", StringComparison.OrdinalIgnoreCase) ||
                  streamUrl.Contains("userapi.com", StringComparison.OrdinalIgnoreCase) ||
                  streamUrl.Contains("vk.com", StringComparison.OrdinalIgnoreCase) ||
-                 streamUrl.Contains("vk.ru", StringComparison.OrdinalIgnoreCase)))
+                 streamUrl.Contains("vk.ru", StringComparison.OrdinalIgnoreCase));
+
+            bool needsRelay = !isLocalResolvedFile &&
+                (ProxyService.ShouldProxyUrl(streamUrl) || ProxyService.HasRegisteredStreamHeaders(streamUrl));
+
+            if (needsRelay)
             {
-                _currentMedia.AddOption($":http-user-agent={VkMusicProvider.KateMobileUserAgent}");
-                _currentMedia.AddOption(":http-referrer=https://vk.com/");
+                ProxyService.TryGetStreamHeaders(streamUrl, out var regUa, out var regReferer);
+                if (isVkAudioHost)
+                {
+                    regUa ??= VkMusicProvider.KateMobileUserAgent;
+                    regReferer ??= "https://vk.com/";
+                }
+
+                var relayUrl = ProxyService.CreateLocalMediaRelayUrl(streamUrl, regUa, regReferer);
+                _currentMedia = new Media(_libVlc, relayUrl, FromType.FromLocation);
+            }
+            else
+            {
+                _currentMedia = isLocalResolvedFile
+                    ? new Media(_libVlc, streamUrl, FromType.FromPath)
+                    : new Media(_libVlc, streamUrl, FromType.FromLocation);
+
+                if (isVkAudioHost)
+                {
+                    _currentMedia.AddOption($":http-user-agent={VkMusicProvider.KateMobileUserAgent}");
+                    _currentMedia.AddOption(":http-referrer=https://vk.com/");
+                }
             }
             _player.Play(_currentMedia);
             ApplyAudioFxToPlayer();
@@ -682,6 +719,40 @@ public class AudioPlayerService : IDisposable
             _providers.TryGetValue(track.BrandKey, out var provider))
         {
             url = await provider.ResolveStreamUrlAsync(track, ct);
+
+            // Если YouTube через IP прокси заблокировал прямой поток (LOGIN_REQUIRED / 403),
+            // аккуратно ищем строгий верифицированный аналог (±3 с и совпадение артистов) на других источниках
+            if (string.IsNullOrWhiteSpace(url) &&
+                string.Equals(track.BrandKey, "youtube", StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrWhiteSpace(track.Title) &&
+                track.Duration > TimeSpan.Zero)
+            {
+                var query = TrackMatcher.BuildSearchQuery(track.Artist, track.Title);
+                if (!string.IsNullOrWhiteSpace(query))
+                {
+                    foreach (var fallbackKey in new[] { "yandex", "vk", "soundcloud", "audius" })
+                    {
+                        if (ct.IsCancellationRequested) break;
+                        if (!_providers.TryGetValue(fallbackKey, out var fb)) continue;
+                        try
+                        {
+                            var candidates = await fb.SearchAsync(query, 6, ct);
+                            var best = TrackMatcher.PickBestMatch(track, candidates);
+                            if (best == null) continue;
+
+                            var fbUrl = await fb.ResolveStreamUrlAsync(best, ct);
+                            if (!string.IsNullOrWhiteSpace(fbUrl))
+                            {
+                                StatusMessage?.Invoke($"YouTube ограничил IP прокси • Запущено через {fb.Name}");
+                                url = fbUrl;
+                                break;
+                            }
+                        }
+                        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                        catch { }
+                    }
+                }
+            }
         }
         else
         {
@@ -699,10 +770,11 @@ public class AudioPlayerService : IDisposable
             foreach (var fallbackKey in order)
             {
                 if (!_providers.TryGetValue(fallbackKey, out var fb)) continue;
-                var candidates = await fb.SearchAsync(query, 5, ct);
+                var candidates = await fb.SearchAsync(query, 8, ct);
                 if (candidates.Count > 0)
                 {
-                    var best = TrackMatcher.PickBestMatch(track, candidates) ?? candidates[0];
+                    var best = TrackMatcher.PickBestMatch(track, candidates);
+                    if (best == null) continue;
                     if (string.IsNullOrWhiteSpace(track.CoverUrl) && !string.IsNullOrWhiteSpace(best.CoverUrl))
                         track.CoverUrl = best.CoverUrl;
                     url = await fb.ResolveStreamUrlAsync(best, ct);
@@ -782,12 +854,41 @@ public class AudioPlayerService : IDisposable
 
         long clamped = Math.Clamp(targetMs, 0, len);
         _lastTimeMs = clamped;
-        _pendingSeekMs = clamped;
 
-        if (_player.Length > 0)
+        bool appliedNow = false;
+        if (_player.Length > 0 && _player.IsSeekable)
         {
-            try { _player.Time = clamped; } catch { }
+            try
+            {
+                _player.Time = clamped;
+                appliedNow = true;
+            }
+            catch { }
         }
+
+        if (!appliedNow && _player.IsSeekable)
+        {
+            try
+            {
+                _player.Position = Math.Clamp((float)((double)clamped / len), 0f, 1f);
+                appliedNow = true;
+            }
+            catch { }
+        }
+
+        if (!appliedNow && _player.Length > 0)
+        {
+            try
+            {
+                _player.Time = clamped;
+                appliedNow = true;
+            }
+            catch { }
+        }
+
+        // Оставляем отложенный seek только если поток ещё не начал играть или на паузе;
+        // при активном воспроизведении очищаем _pendingSeekMs, чтобы Pause -> Play не откатил позицию назад.
+        _pendingSeekMs = (!appliedNow || !_player.IsPlaying) ? clamped : -1;
 
         PositionChanged?.Invoke(clamped, len);
     }

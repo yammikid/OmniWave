@@ -133,7 +133,7 @@
                                   VerticalAlignment="Center" Checked="ToggleSetting_Changed" Unchecked="ToggleSetting_Changed"/>
                     </Grid>
 
-                    <Button Content="Аккаунты (Яндекс Музыка / ВК)"
+                    <Button Content="Аккаунты (Яндекс Музыка / ВК / Spotify)"
                             Style="{StaticResource SettingsActionBtn}"
                             Click="OpenAccounts_Click"/>
                 </StackPanel>

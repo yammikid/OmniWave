@@ -40,6 +40,7 @@ public partial class MainWindow : Window
     private readonly LyricsService _lyrics = new();
     private readonly YandexMusicProvider _yandex;
     private readonly VkMusicProvider _vk;
+    private readonly SpotifyMusicProvider _spotify;
     private readonly List<IMusicProvider> _providers;
     private readonly DownloadService _downloads;
     private readonly AudioPlayerService _audioPlayer;
@@ -125,8 +126,10 @@ public partial class MainWindow : Window
         var radio = new RadioBrowserProvider();
         var web = new WebMusicProvider();
         _vk = new VkMusicProvider(_settings);
+        _spotify = new SpotifyMusicProvider(_settings);
         _yandex = new YandexMusicProvider(_settings, new IMusicProvider[] { soundCloud, youTube, audius, _vk });
         _vk.SetFallbackProviders(new IMusicProvider[] { soundCloud, youTube, audius, _yandex });
+        _spotify.SetFallbackProviders(new IMusicProvider[] { _yandex, _vk, soundCloud, youTube, audius });
 
         _providers = new List<IMusicProvider>
         {
@@ -138,7 +141,8 @@ public partial class MainWindow : Window
             radio,
             web,
             _yandex,
-            _vk
+            _vk,
+            _spotify
         };
 
         _downloads = new DownloadService(_providers, _settings);
@@ -196,7 +200,7 @@ public partial class MainWindow : Window
             if (!_settings.Current.StartMinimizedToIsland)
                 OpenPlayerWindow();
 
-            if (_yandex.IsAuthenticated || _vk.IsAuthenticated)
+            if (_yandex.IsAuthenticated || _vk.IsAuthenticated || _spotify.IsAuthenticated)
                 _ = Task.Run(SyncExternalAccountsAsync);
 
             if (!_startupUpdateChecked)
@@ -286,6 +290,7 @@ public partial class MainWindow : Window
                 _downloads,
                 _yandex,
                 _vk,
+                _spotify,
                 OpenSettingsWindow,
                 OpenAccountsWindow,
                 SyncExternalAccountsAsync);
@@ -327,7 +332,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        _accountWindow = new AccountWindow(_settings, _yandex, _vk, _library, SyncExternalAccountsAsync);
+        _accountWindow = new AccountWindow(_settings, _yandex, _vk, _spotify, _library, SyncExternalAccountsAsync);
         _accountWindow.Closed += (_, _) => _accountWindow = null;
         _accountWindow.Show();
         _accountWindow.Activate();
@@ -368,9 +373,23 @@ public partial class MainWindow : Window
                 }
             }
 
+            if (_spotify.IsAuthenticated)
+            {
+                try
+                {
+                    var spPls = await _spotify.FetchUserPlaylistsAsync();
+                    _library.ReplaceExternalPlaylists("spotify", spPls);
+                    parts.Add($"Spotify: {spPls.Count}");
+                }
+                catch
+                {
+                    parts.Add("Spotify: ошибка");
+                }
+            }
+
             return parts.Count > 0
                 ? $"Синхронизировано плейлистов — {string.Join(", ", parts)}"
-                : "Подключите Яндекс Музыку или ВК";
+                : "Подключите Яндекс Музыку, ВК или Spotify";
         }
         finally
         {

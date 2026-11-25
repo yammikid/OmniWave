@@ -917,16 +917,14 @@ public sealed class VkMusicProvider : IMusicProvider, IDisposable
         if (activeFallbacks.Count == 0) return null;
 
         var query = TrackMatcher.BuildSearchQuery(track.Artist, track.Title);
-        var (winner, provider, firstPlayable) = await SearchAndMatchAcrossFallbacksAsync(track, query, activeFallbacks, ct);
+        var (winner, provider) = await SearchAndMatchAcrossFallbacksAsync(track, query, activeFallbacks, ct);
 
         if (winner == null && TrackMatcher.HasMultipleArtists(track.Artist))
         {
             var shortQuery = TrackMatcher.BuildSearchQuery(TrackMatcher.GetPrimaryArtist(track.Artist), track.Title);
             if (!string.Equals(shortQuery, query, StringComparison.OrdinalIgnoreCase))
             {
-                (winner, provider, var secondFirst) = await SearchAndMatchAcrossFallbacksAsync(track, shortQuery, activeFallbacks, ct);
-                if (firstPlayable.Track == null)
-                    firstPlayable = secondFirst;
+                (winner, provider) = await SearchAndMatchAcrossFallbacksAsync(track, shortQuery, activeFallbacks, ct);
             }
         }
 
@@ -936,16 +934,10 @@ public sealed class VkMusicProvider : IMusicProvider, IDisposable
             if (!string.IsNullOrWhiteSpace(url)) return url;
         }
 
-        if (firstPlayable.Track != null && firstPlayable.Provider != null)
-        {
-            var url = await firstPlayable.Provider.ResolveStreamUrlAsync(firstPlayable.Track, ct);
-            if (!string.IsNullOrWhiteSpace(url)) return url;
-        }
-
         return null;
     }
 
-    private async Task<(TrackItem? Winner, IMusicProvider? Provider, (TrackItem? Track, IMusicProvider? Provider) FirstPlayable)>
+    private async Task<(TrackItem? Winner, IMusicProvider? Provider)>
         SearchAndMatchAcrossFallbacksAsync(
             TrackItem target,
             string query,
@@ -953,13 +945,13 @@ public sealed class VkMusicProvider : IMusicProvider, IDisposable
             CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(query))
-            return (null, null, (null, null));
+            return (null, null);
 
         var tasks = providers.Select(async p =>
         {
             try
             {
-                var items = await p.SearchAsync(query, 6, ct);
+                var items = await p.SearchAsync(query, 8, ct);
                 return (Provider: p, Items: items);
             }
             catch
@@ -972,14 +964,11 @@ public sealed class VkMusicProvider : IMusicProvider, IDisposable
 
         var candidateToProvider = new Dictionary<TrackItem, IMusicProvider>();
         var allCandidates = new List<TrackItem>();
-        (TrackItem? Track, IMusicProvider? Provider) firstPlayable = (null, null);
 
         foreach (var (prov, items) in batches)
         {
             foreach (var item in items)
             {
-                firstPlayable.Track ??= item;
-                if (firstPlayable.Provider == null) firstPlayable.Provider = prov;
                 candidateToProvider[item] = prov;
                 allCandidates.Add(item);
             }
@@ -987,9 +976,9 @@ public sealed class VkMusicProvider : IMusicProvider, IDisposable
 
         var winner = TrackMatcher.PickBestMatch(target, allCandidates);
         if (winner != null && candidateToProvider.TryGetValue(winner, out var winProv))
-            return (winner, winProv, firstPlayable);
+            return (winner, winProv);
 
-        return (null, null, firstPlayable);
+        return (null, null);
     }
 
     private async Task<JsonDocument?> CallVkApiAsync(

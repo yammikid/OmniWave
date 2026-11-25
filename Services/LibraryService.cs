@@ -10,7 +10,7 @@ public class UserPlaylist
     public string Name { get; set; } = "Новый плейлист";
     public bool IsPinned { get; set; }
     public bool IsExternal { get; set; }
-    public string PlatformBrand { get; set; } = "local"; // "local", "yandex", "vk"
+    public string PlatformBrand { get; set; } = "local"; // "local", "yandex", "vk", "spotify"
     public string ExternalId { get; set; } = "";
     public string CoverUrl { get; set; } = "";
     public List<TrackItem> Tracks { get; set; } = new();
@@ -24,13 +24,15 @@ public class UserPlaylist
     [JsonIgnore]
     public bool ShowPlatformBadge => IsExternal &&
         (string.Equals(PlatformBrand, "yandex", StringComparison.OrdinalIgnoreCase) ||
-         string.Equals(PlatformBrand, "vk", StringComparison.OrdinalIgnoreCase));
+         string.Equals(PlatformBrand, "vk", StringComparison.OrdinalIgnoreCase) ||
+         string.Equals(PlatformBrand, "spotify", StringComparison.OrdinalIgnoreCase));
 
     [JsonIgnore]
     public string PlatformBadgeText => PlatformBrand?.ToLowerInvariant() switch
     {
         "yandex" => "Яндекс",
         "vk" => "ВК",
+        "spotify" => "Spotify",
         _ => ""
     };
 
@@ -39,6 +41,7 @@ public class UserPlaylist
     {
         "yandex" => "#FFCC00",
         "vk" => "#0077FF",
+        "spotify" => "#1DB954",
         _ => "Transparent"
     };
 
@@ -47,6 +50,7 @@ public class UserPlaylist
     {
         "yandex" => "#111116",
         "vk" => "#FFFFFF",
+        "spotify" => "#0B0B0E",
         _ => "#FFFFFF"
     };
 
@@ -101,22 +105,11 @@ public class LibraryService
                     data.Playlists ??= new List<UserPlaylist>();
                     foreach (var fav in data.Favorites)
                         fav.IsLiked = true;
-                    int pruned = data.Playlists.RemoveAll(p =>
-                        p.IsExternal &&
-                        string.Equals(p.PlatformBrand, "spotify", StringComparison.OrdinalIgnoreCase));
                     var pinned = data.Playlists.Where(p => p.IsPinned).ToList();
                     var unpinned = data.Playlists.Where(p => !p.IsPinned).ToList();
                     data.Playlists.Clear();
                     data.Playlists.AddRange(pinned);
                     data.Playlists.AddRange(unpinned);
-                    if (pruned > 0)
-                    {
-                        try
-                        {
-                            File.WriteAllText(_libraryPath, JsonSerializer.Serialize(data, JsonOptions));
-                        }
-                        catch { }
-                    }
                     return data;
                 }
             }

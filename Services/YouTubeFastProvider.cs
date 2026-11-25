@@ -11,6 +11,8 @@ public class YouTubeFastProvider : IMusicProvider, IDisposable
     private const string BrandColorHex = "#FF0033";
     private const string SearchApiUrl = "https://www.youtube.com/youtubei/v1/search?prettyPrint=false";
     private const string PlayerApiUrl = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
+    private const string ChromeUserAgent =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
     private static readonly Regex VideoIdRegex = new(
         @"(?:v=|youtu\.be/|youtube\.com/(?:shorts|embed)/)([a-zA-Z0-9_-]{11})",
@@ -21,12 +23,12 @@ public class YouTubeFastProvider : IMusicProvider, IDisposable
 
     public string Name => "YouTube";
     public string BrandKey => "youtube";
+    public string? LastResolveError { get; private set; }
 
     public YouTubeFastProvider()
     {
-        _http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
-        _http.DefaultRequestHeaders.UserAgent.ParseAdd(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+        _http = new HttpClient { Timeout = TimeSpan.FromSeconds(18) };
+        _http.DefaultRequestHeaders.UserAgent.ParseAdd(ChromeUserAgent);
 
         _fallback = new YtDlpMusicProvider(Name, BrandKey, "ytsearch", BrandColorHex);
     }
@@ -50,6 +52,7 @@ public class YouTubeFastProvider : IMusicProvider, IDisposable
 
             for (int page = 0; page < 3 && results.Count < limit; page++)
             {
+                string gl = ProxyService.IsActive ? "US" : "RU";
                 var payload = page == 0
                     ? (object)new
                     {
@@ -60,7 +63,7 @@ public class YouTubeFastProvider : IMusicProvider, IDisposable
                                 clientName = "WEB",
                                 clientVersion = "2.20261101.00.00",
                                 hl = "ru",
-                                gl = "RU"
+                                gl
                             }
                         },
                         query = query.Trim()
@@ -74,7 +77,7 @@ public class YouTubeFastProvider : IMusicProvider, IDisposable
                                 clientName = "WEB",
                                 clientVersion = "2.20261101.00.00",
                                 hl = "ru",
-                                gl = "RU"
+                                gl
                             }
                         },
                         continuation
@@ -107,6 +110,7 @@ public class YouTubeFastProvider : IMusicProvider, IDisposable
 
     public async Task<string?> ResolveStreamUrlAsync(TrackItem track, CancellationToken ct = default)
     {
+        LastResolveError = null;
         var videoId = !string.IsNullOrWhiteSpace(track.Id)
             ? track.Id
             : ExtractVideoId(track.PageUrl);
@@ -118,13 +122,39 @@ public class YouTubeFastProvider : IMusicProvider, IDisposable
                 var url = await TryPlayerEndpointAsync(videoId, track, useAndroidVr: true, ct)
                           ?? await TryPlayerEndpointAsync(videoId, track, useAndroidVr: false, ct);
                 if (!string.IsNullOrWhiteSpace(url))
+                {
+                    LastResolveError = null;
                     return url;
+                }
             }
             catch (OperationCanceledException) { throw; }
             catch { }
         }
 
-        return await _fallback.ResolveStreamUrlAsync(track, ct);
+        var fallbackUrl = await _fallback.ResolveStreamUrlAsync(track, ct);
+        if (!string.IsNullOrWhiteSpace(fallbackUrl))
+        {
+            LastResolveError = null;
+            ProxyService.RegisterStreamHeaders(fallbackUrl, ChromeUserAgent, "https://www.youtube.com/");
+            return fallbackUrl;
+        }
+
+        var ytErr = YtDlpMusicProvider.LastError;
+        if (!string.IsNullOrWhiteSpace(ytErr))
+        {
+            if (ytErr.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase) ||
+                ytErr.Contains("not a bot", StringComparison.OrdinalIgnoreCase) ||
+                ytErr.Contains("LOGIN_REQUIRED", StringComparison.OrdinalIgnoreCase))
+            {
+                LastResolveError = "YouTube запросил подтверждение входа для IP этого прокси (войдите в YouTube в «Аккаунтах» или смените прокси).";
+            }
+            else if (string.IsNullOrWhiteSpace(LastResolveError))
+            {
+                LastResolveError = ytErr;
+            }
+        }
+
+        return null;
     }
 
     private async Task<string?> TryPlayerEndpointAsync(
@@ -133,6 +163,7 @@ public class YouTubeFastProvider : IMusicProvider, IDisposable
         bool useAndroidVr,
         CancellationToken ct)
     {
+        string gl = ProxyService.IsActive ? "US" : "RU";
         object payload = useAndroidVr
             ? new
             {
@@ -142,12 +173,12 @@ public class YouTubeFastProvider : IMusicProvider, IDisposable
                     client = new
                     {
                         clientName = "ANDROID_VR",
-                        clientVersion = "1.60.19",
+                        clientVersion = "1.65.10",
                         androidSdkVersion = 32,
                         deviceMake = "Oculus",
                         deviceModel = "Quest 3",
                         hl = "ru",
-                        gl = "RU"
+                        gl
                     }
                 }
             }
@@ -159,26 +190,27 @@ public class YouTubeFastProvider : IMusicProvider, IDisposable
                     client = new
                     {
                         clientName = "IOS",
-                        clientVersion = "19.29.1",
+                        clientVersion = "20.10.4",
                         deviceMake = "Apple",
                         deviceModel = "iPhone16,2",
                         osName = "iPhone",
-                        osVersion = "17.5.1.21F90",
+                        osVersion = "18.3.2.22D82",
                         hl = "ru",
-                        gl = "RU"
+                        gl
                     }
                 }
             };
 
         var jsonBody = JsonSerializer.Serialize(payload);
+        string endpointUa = useAndroidVr
+            ? "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; Quest 3 Build/SQ3A.220605.009.A1) gzip"
+            : "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)";
+
         using var req = new HttpRequestMessage(HttpMethod.Post, PlayerApiUrl)
         {
             Content = new StringContent(jsonBody, Encoding.UTF8, "application/json")
         };
-        req.Headers.TryAddWithoutValidation("User-Agent",
-            useAndroidVr
-                ? "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; Quest 3 Build/SQ3A.220605.009.A1) gzip"
-                : "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)");
+        req.Headers.TryAddWithoutValidation("User-Agent", endpointUa);
 
         using var resp = await _http.SendAsync(req, ct);
         if (!resp.IsSuccessStatusCode) return null;
@@ -217,6 +249,12 @@ public class YouTubeFastProvider : IMusicProvider, IDisposable
             ps.TryGetProperty("status", out var stEl) &&
             !string.Equals(stEl.GetString(), "OK", StringComparison.OrdinalIgnoreCase))
         {
+            var status = stEl.GetString() ?? "";
+            var reason = ps.TryGetProperty("reason", out var rEl) ? (rEl.GetString() ?? "") : "";
+            if (string.Equals(status, "LOGIN_REQUIRED", StringComparison.OrdinalIgnoreCase))
+                LastResolveError = "YouTube запросил подтверждение входа для IP этого прокси (войдите в YouTube в «Аккаунтах» или смените прокси).";
+            else if (!string.IsNullOrWhiteSpace(reason))
+                LastResolveError = $"YouTube: {reason}";
             return null;
         }
 
@@ -261,25 +299,65 @@ public class YouTubeFastProvider : IMusicProvider, IDisposable
             }
         }
 
+        string? selectedUrl = null;
         if (!string.IsNullOrWhiteSpace(bestWebmUrl) && !string.IsNullOrWhiteSpace(bestMp4Url))
-            return bestWebmBitrate > bestMp4Bitrate ? bestWebmUrl : bestMp4Url;
+            selectedUrl = bestWebmBitrate > bestMp4Bitrate ? bestWebmUrl : bestMp4Url;
+        else if (!string.IsNullOrWhiteSpace(bestWebmUrl))
+            selectedUrl = bestWebmUrl;
+        else if (!string.IsNullOrWhiteSpace(bestMp4Url))
+            selectedUrl = bestMp4Url;
 
-        if (!string.IsNullOrWhiteSpace(bestWebmUrl)) return bestWebmUrl;
-        if (!string.IsNullOrWhiteSpace(bestMp4Url)) return bestMp4Url;
-
-        if (sd.TryGetProperty("formats", out var formats) && formats.ValueKind == JsonValueKind.Array)
+        if (string.IsNullOrWhiteSpace(selectedUrl) &&
+            sd.TryGetProperty("formats", out var formats) &&
+            formats.ValueKind == JsonValueKind.Array)
         {
             foreach (var fmt in formats.EnumerateArray())
             {
                 if (fmt.TryGetProperty("url", out var urlEl) && urlEl.ValueKind == JsonValueKind.String)
                 {
                     var url = urlEl.GetString();
-                    if (!string.IsNullOrWhiteSpace(url)) return url;
+                    if (!string.IsNullOrWhiteSpace(url))
+                    {
+                        selectedUrl = url;
+                        break;
+                    }
                 }
             }
         }
 
-        return null;
+        if (string.IsNullOrWhiteSpace(selectedUrl))
+            return null;
+
+        if (!await VerifyStreamReadableAsync(selectedUrl, endpointUa, ct))
+            return null;
+
+        ProxyService.RegisterStreamHeaders(selectedUrl, endpointUa, "https://www.youtube.com/");
+        return selectedUrl;
+    }
+
+    private async Task<bool> VerifyStreamReadableAsync(string streamUrl, string userAgent, CancellationToken ct)
+    {
+        try
+        {
+            using var checkCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            checkCts.CancelAfter(TimeSpan.FromSeconds(5));
+            using var req = new HttpRequestMessage(HttpMethod.Get, streamUrl);
+            req.Headers.TryAddWithoutValidation("User-Agent", userAgent);
+            req.Headers.TryAddWithoutValidation("Referer", "https://www.youtube.com/");
+            req.Headers.TryAddWithoutValidation("Range", "bytes=0-1");
+
+            using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, checkCts.Token);
+            int code = (int)resp.StatusCode;
+            return resp.IsSuccessStatusCode || code == 206;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private void CollectVideoRenderers(

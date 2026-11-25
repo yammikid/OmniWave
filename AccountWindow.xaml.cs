@@ -12,16 +12,19 @@ public partial class AccountWindow : Window
     private readonly SettingsService _settings;
     private readonly YandexMusicProvider _yandex;
     private readonly VkMusicProvider _vk;
+    private readonly SpotifyMusicProvider _spotify;
     private readonly LibraryService _library;
     private readonly Func<Task<string>> _syncAccountsAsync;
 
     private bool _yandexClearedSession;
     private bool _vkClearedSession;
+    private bool _spotifyClearedSession;
 
     public AccountWindow(
         SettingsService settings,
         YandexMusicProvider yandex,
         VkMusicProvider vk,
+        SpotifyMusicProvider spotify,
         LibraryService library,
         Func<Task<string>> syncAccountsAsync)
     {
@@ -29,6 +32,7 @@ public partial class AccountWindow : Window
         _settings = settings;
         _yandex = yandex;
         _vk = vk;
+        _spotify = spotify;
         _library = library;
         _syncAccountsAsync = syncAccountsAsync;
 
@@ -42,6 +46,13 @@ public partial class AccountWindow : Window
         VkManualCookieBox.TextChanged += (_, _) =>
         {
             VkManualCookiePlaceholder.Visibility = string.IsNullOrEmpty(VkManualCookieBox.Text)
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+        };
+
+        SpotifyManualTokenBox.TextChanged += (_, _) =>
+        {
+            SpotifyManualTokenPlaceholder.Visibility = string.IsNullOrEmpty(SpotifyManualTokenBox.Text)
                 ? Visibility.Visible
                 : Visibility.Collapsed;
         };
@@ -81,6 +92,34 @@ public partial class AccountWindow : Window
             VkStatusText.Foreground = new SolidColorBrush(Color.FromRgb(136, 137, 156));
             BtnSyncVk.Visibility = Visibility.Collapsed;
             BtnDisconnectVk.Visibility = Visibility.Collapsed;
+        }
+
+        if (_spotify.IsAuthenticated)
+        {
+            SpotifyStatusText.Text = $"Подключён: {(!string.IsNullOrWhiteSpace(s.SpotifyUserName) ? s.SpotifyUserName : s.SpotifyUserId)}";
+            SpotifyStatusText.Foreground = new SolidColorBrush(Color.FromRgb(29, 185, 84));
+            BtnSyncSpotify.Visibility = Visibility.Visible;
+            BtnDisconnectSpotify.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            SpotifyStatusText.Text = "Не подключён";
+            SpotifyStatusText.Foreground = new SolidColorBrush(Color.FromRgb(136, 137, 156));
+            BtnSyncSpotify.Visibility = Visibility.Collapsed;
+            BtnDisconnectSpotify.Visibility = Visibility.Collapsed;
+        }
+
+        if (YtDlpMusicProvider.HasYouTubeCookies)
+        {
+            YouTubeStatusText.Text = "Cookies YouTube подключены";
+            YouTubeStatusText.Foreground = new SolidColorBrush(Color.FromRgb(255, 77, 106));
+            BtnClearYouTube.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            YouTubeStatusText.Text = "Не подключён (опционально)";
+            YouTubeStatusText.Foreground = new SolidColorBrush(Color.FromRgb(136, 137, 156));
+            BtnClearYouTube.Visibility = Visibility.Collapsed;
         }
     }
 
@@ -337,6 +376,193 @@ public partial class AccountWindow : Window
         _library.RemoveExternalPlaylists("vk");
         RefreshConnectionState();
         TxtStatus.Text = "Вы вышли из аккаунта ВКонтакте.";
+    }
+
+    #endregion
+
+    #region Spotify
+
+    private async void LoginSpotify_Click(object sender, RoutedEventArgs e)
+    {
+        BtnLoginSpotify.IsEnabled = false;
+        BtnConnectSpotifyManual.IsEnabled = false;
+        TxtStatus.Text = "Выполните вход в открывшемся окне Spotify...";
+
+        try
+        {
+            var (token, spDc, expMs, userName, userId, clientToken) = await AuthBrowserWindow.ShowSpotifyAuthAsync(this, _spotifyClearedSession);
+            if (string.IsNullOrWhiteSpace(token) && string.IsNullOrWhiteSpace(spDc))
+            {
+                TxtStatus.Text = "Авторизация Spotify отменена.";
+                return;
+            }
+
+            TxtStatus.Text = "Проверка профиля Spotify и загрузка медиатеки...";
+            var (ok, message) = await _spotify.VerifyAndSaveSessionAsync(token, spDc, expMs, userName, userId, clientToken);
+            await ApplySpotifyAuthResultAsync(ok, message);
+        }
+        finally
+        {
+            BtnLoginSpotify.IsEnabled = true;
+            BtnConnectSpotifyManual.IsEnabled = true;
+        }
+    }
+
+    private void ToggleSpotifyManual_Click(object sender, RoutedEventArgs e)
+    {
+        SpotifyManualPanel.Visibility = SpotifyManualPanel.Visibility == Visibility.Visible
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+    }
+
+    private async void ConnectSpotifyManual_Click(object sender, RoutedEventArgs e)
+    {
+        var raw = SpotifyManualTokenBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            TxtStatus.Text = "Вставьте cookie sp_dc=... или Bearer-токен (BQ...).";
+            return;
+        }
+
+        BtnLoginSpotify.IsEnabled = false;
+        BtnConnectSpotifyManual.IsEnabled = false;
+        TxtStatus.Text = "Проверка токена и сессии Spotify...";
+
+        try
+        {
+            var (ok, message) = await _spotify.VerifyAndSaveSessionAsync(raw, null, 0, null);
+            if (await ApplySpotifyAuthResultAsync(ok, message))
+            {
+                SpotifyManualTokenBox.Text = "";
+                SpotifyManualPanel.Visibility = Visibility.Collapsed;
+            }
+        }
+        finally
+        {
+            BtnLoginSpotify.IsEnabled = true;
+            BtnConnectSpotifyManual.IsEnabled = true;
+        }
+    }
+
+    private async Task<bool> ApplySpotifyAuthResultAsync(bool ok, string message)
+    {
+        if (!ok)
+        {
+            TxtStatus.Text = message;
+            return false;
+        }
+
+        _spotifyClearedSession = false;
+        RefreshConnectionState();
+        TxtStatus.Text = $"{message}. Загрузка «Любимых треков» и плейлистов...";
+        var playlists = await _spotify.FetchUserPlaylistsAsync();
+        _library.ReplaceExternalPlaylists("spotify", playlists);
+        TxtStatus.Text = $"{message} • Плейлистов: {playlists.Count}, треков: {playlists.Sum(p => p.Tracks.Count)}";
+        return true;
+    }
+
+    private async void SyncSpotify_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_spotify.IsAuthenticated) return;
+        BtnSyncSpotify.IsEnabled = false;
+        TxtStatus.Text = "Обновление плейлистов Spotify...";
+        try
+        {
+            var pls = await _spotify.FetchUserPlaylistsAsync();
+            _library.ReplaceExternalPlaylists("spotify", pls);
+            TxtStatus.Text = $"Spotify: плейлистов {pls.Count}, треков {pls.Sum(p => p.Tracks.Count)}";
+        }
+        catch (Exception ex)
+        {
+            TxtStatus.Text = $"Ошибка синхронизации Spotify: {ex.Message}";
+        }
+        finally
+        {
+            BtnSyncSpotify.IsEnabled = true;
+        }
+    }
+
+    private void DisconnectSpotify_Click(object sender, RoutedEventArgs e)
+    {
+        _spotifyClearedSession = true;
+        _spotify.Disconnect();
+        _library.RemoveExternalPlaylists("spotify");
+        RefreshConnectionState();
+        TxtStatus.Text = "Вы вышли из аккаунта Spotify.";
+    }
+
+    #endregion
+
+    #region YouTube
+
+    private bool _ytClearedSession;
+
+    private async void LoginYouTube_Click(object sender, RoutedEventArgs e)
+    {
+        BtnLoginYouTube.IsEnabled = false;
+        BtnImportYouTubeCookies.IsEnabled = false;
+        TxtStatus.Text = "Выполните вход в открывшемся окне YouTube...";
+
+        try
+        {
+            bool saved = await AuthBrowserWindow.ShowYouTubeAuthAsync(this, _ytClearedSession);
+            if (saved)
+            {
+                _ytClearedSession = false;
+                RefreshConnectionState();
+                TxtStatus.Text = "YouTube cookies сохранены для работы через прокси.";
+            }
+            else
+            {
+                TxtStatus.Text = "Вход в YouTube отменён.";
+            }
+        }
+        finally
+        {
+            BtnLoginYouTube.IsEnabled = true;
+            BtnImportYouTubeCookies.IsEnabled = true;
+        }
+    }
+
+    private void ImportYouTubeCookies_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new OpenFileDialog
+        {
+            Title = "Импорт Netscape cookies.txt для YouTube",
+            Filter = "Cookies файлы (*.txt)|*.txt|Все файлы (*.*)|*.*"
+        };
+
+        if (dlg.ShowDialog(this) != true) return;
+
+        try
+        {
+            var content = File.ReadAllText(dlg.FileName);
+            if (!content.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) &&
+                !content.Contains(".google.com", StringComparison.OrdinalIgnoreCase))
+            {
+                TxtStatus.Text = "Выбранный файл не содержит cookies YouTube / Google.";
+                return;
+            }
+
+            var dir = Path.GetDirectoryName(YtDlpMusicProvider.YouTubeCookiesPath)!;
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(YtDlpMusicProvider.YouTubeCookiesPath, content, new System.Text.UTF8Encoding(false));
+            _ytClearedSession = false;
+            RefreshConnectionState();
+            TxtStatus.Text = "Файл cookies.txt для YouTube успешно подключён.";
+        }
+        catch (Exception ex)
+        {
+            TxtStatus.Text = $"Ошибка импорта cookies.txt: {ex.Message}";
+        }
+    }
+
+    private void ClearYouTube_Click(object sender, RoutedEventArgs e)
+    {
+        _ytClearedSession = true;
+        YtDlpMusicProvider.ClearYouTubeCookies();
+        RefreshConnectionState();
+        TxtStatus.Text = "YouTube cookies удалены.";
     }
 
     #endregion

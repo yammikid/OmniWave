@@ -24,6 +24,7 @@ public partial class PlayerWindow : Window
     private readonly DownloadService _downloads;
     private readonly YandexMusicProvider _yandex;
     private readonly VkMusicProvider _vk;
+    private readonly SpotifyMusicProvider _spotify;
     private readonly Action _openSettingsAction;
     private readonly Action _openAccountsAction;
     private readonly Func<Task<string>> _syncAccountsAction;
@@ -62,6 +63,7 @@ public partial class PlayerWindow : Window
         DownloadService downloads,
         YandexMusicProvider yandex,
         VkMusicProvider vk,
+        SpotifyMusicProvider spotify,
         Action openSettingsAction,
         Action openAccountsAction,
         Func<Task<string>> syncAccountsAction)
@@ -76,6 +78,7 @@ public partial class PlayerWindow : Window
         _downloads = downloads;
         _yandex = yandex;
         _vk = vk;
+        _spotify = spotify;
         _openSettingsAction = openSettingsAction;
         _openAccountsAction = openAccountsAction;
         _syncAccountsAction = syncAccountsAction;
@@ -658,6 +661,8 @@ public partial class PlayerWindow : Window
             yandexUserName = s.YandexUserName ?? "",
             vkConnected = _vk.IsAuthenticated,
             vkUserName = s.VkUserName ?? "",
+            spotifyConnected = _spotify.IsAuthenticated,
+            spotifyUserName = s.SpotifyUserName ?? "",
             favorites = _favorites.Select(ToDto).ToList(),
             playlists = playlists.Select(ToPlaylistDto).ToList(),
             queue = queueItems.Select(ToDto).ToList(),
@@ -724,7 +729,9 @@ public partial class PlayerWindow : Window
             yandexConnected = _yandex.IsAuthenticated,
             yandexUserName = s.YandexUserName ?? "",
             vkConnected = _vk.IsAuthenticated,
-            vkUserName = s.VkUserName ?? ""
+            vkUserName = s.VkUserName ?? "",
+            spotifyConnected = _spotify.IsAuthenticated,
+            spotifyUserName = s.SpotifyUserName ?? ""
         });
     }
 
@@ -770,6 +777,7 @@ public partial class PlayerWindow : Window
         var allAvailable = new List<IMusicProvider>();
         if (_yandex.IsAuthenticated) allAvailable.Add(_yandex);
         if (_vk.IsAuthenticated) allAvailable.Add(_vk);
+        allAvailable.Add(_spotify);
         allAvailable.AddRange(_providers.Where(p => p.BrandKey is "soundcloud" or "youtube" or "audius" or "bandcamp" or "open_catalog" or "radio"));
 
         if (_activeSearchFilter == "all")
@@ -783,6 +791,46 @@ public partial class PlayerWindow : Window
     private async Task PerformSearchAsync(string query)
     {
         if (string.IsNullOrEmpty(query) && _activeSearchFilter != "radio") return;
+
+        if (SpotifyMusicProvider.IsSpotifyUrl(query))
+        {
+            _searchCts?.Cancel();
+            _searchCts = new CancellationTokenSource();
+            var linkCt = _searchCts.Token;
+
+            PostToWeb("searchResults", new
+            {
+                items = new List<object>(),
+                status = "Загрузка ссылки Spotify...",
+                canLoadMore = false,
+                isLoading = true
+            });
+
+            var resolved = await _spotify.TryResolvePublicLinkAsync(query, linkCt);
+            if (linkCt.IsCancellationRequested) return;
+            if (resolved.Ok && resolved.Tracks.Count > 0)
+            {
+                _library.SyncLikedFlags(resolved.Tracks);
+                _downloads.SyncDownloadedFlags(resolved.Tracks);
+                RegisterTracks(resolved.Tracks);
+                _currentResults = resolved.Tracks;
+
+                bool isCollection = resolved.Kind is "playlist" or "album" || resolved.Tracks.Count > 1;
+                PostToWeb("searchResults", new
+                {
+                    items = _currentResults.Select(ToDto).ToList(),
+                    status = isCollection
+                        ? $"Spotify • {resolved.CollectionName ?? "Плейлист"} ({resolved.Tracks.Count} треков)"
+                        : "Прямая ссылка • Spotify",
+                    canLoadMore = false,
+                    isLoading = false
+                });
+
+                if (!isCollection)
+                    await _player.PlayFromQueueAsync(_currentResults, 0);
+                return;
+            }
+        }
 
         if (TryBuildDirectUrlTrack(query, out var directTrack))
         {
@@ -926,10 +974,21 @@ public partial class PlayerWindow : Window
         List<IMusicProvider> providers,
         CancellationToken ct)
     {
+        int baseTimeoutSec = ProxyService.IsActive ? 14 : 8;
+        bool singleProviderMode = providers.Count == 1;
         var tasks = providers.Select(async p =>
         {
+            int sec = baseTimeoutSec;
+            if (string.Equals(p.BrandKey, "spotify", StringComparison.OrdinalIgnoreCase))
+            {
+                if (singleProviderMode || ProxyService.IsActive || (p is SpotifyMusicProvider sp && sp.IsAuthenticated))
+                    sec = Math.Max(baseTimeoutSec, 16);
+                else
+                    sec = Math.Max(baseTimeoutSec, 10);
+            }
+
             using var providerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            providerCts.CancelAfter(TimeSpan.FromSeconds(8));
+            providerCts.CancelAfter(TimeSpan.FromSeconds(sec));
             try
             {
                 return await p.SearchAsync(query, limitPerProvider, providerCts.Token);
@@ -991,13 +1050,14 @@ public partial class PlayerWindow : Window
     {
         "yandex" => 0,
         "vk" => 1,
-        "soundcloud" => 2,
-        "youtube" => 3,
-        "audius" => 4,
-        "bandcamp" => 5,
-        "open_catalog" => 6,
-        "radio" => 7,
-        _ => 8
+        "spotify" => 2,
+        "soundcloud" => 3,
+        "youtube" => 4,
+        "audius" => 5,
+        "bandcamp" => 6,
+        "open_catalog" => 7,
+        "radio" => 8,
+        _ => 9
     };
 
     private static List<TrackItem> StructureAndRankSearchResults(string query, IEnumerable<TrackItem> rawItems)
@@ -1023,7 +1083,7 @@ public partial class PlayerWindow : Window
         {
             var tr = deduped[i];
             string brand = (tr.BrandKey ?? "").ToLowerInvariant();
-            bool allowSplitFromTitle = brand != "yandex" && brand != "vk";
+            bool allowSplitFromTitle = brand != "yandex" && brand != "vk" && brand != "spotify";
 
             var (cleanArtist, cleanTitle, effectiveArtistString) = TrackMatcher.NormalizeArtistAndTitle(
                 tr.Artist,
@@ -1399,6 +1459,10 @@ public partial class PlayerWindow : Window
             brandKey = "vk"; source = "ВК"; brandColor = VkMusicProvider.BrandColorHex;
             var m = System.Text.RegularExpressions.Regex.Match(input, @"audio(-?\d+_\d+)");
             if (m.Success) id = m.Groups[1].Value;
+        }
+        else if (host.Contains("open.spotify.com"))
+        {
+            brandKey = "spotify"; source = "Spotify"; brandColor = SpotifyMusicProvider.BrandColorHex;
         }
         else if (host.Contains("soundcloud.com") || host.Contains("sndcdn.com"))
         {

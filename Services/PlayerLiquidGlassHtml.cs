@@ -209,6 +209,7 @@ public static class PlayerLiquidGlassHtml
   }
   .acc-dot.yandex.on { background: #FFCC00; box-shadow: 0 0 8px #FFCC00; }
   .acc-dot.vk.on { background: #0077FF; box-shadow: 0 0 8px #0077FF; }
+  .acc-dot.spotify.on { background: #1DB954; box-shadow: 0 0 8px #1DB954; }
 
   /* 3-tab Liquid Glass capsule with sliding indicator */
   .tab-capsule {
@@ -969,10 +970,11 @@ public static class PlayerLiquidGlassHtml
           <span>OmniWave</span>
         </div>
         <div style="display:flex;align-items:center;gap:5px;">
-          <button id="btnAccounts" class="acc-pill glass-glare" title="Аккаунты Яндекс Музыки и ВК">
+          <button id="btnAccounts" class="acc-pill glass-glare" title="Аккаунты Яндекс Музыки, ВК и Spotify">
             <span id="dotYandex" class="acc-dot yandex"></span>
             <span id="dotVk" class="acc-dot vk"></span>
-            <span id="accPillLabel">Яндекс • ВК</span>
+            <span id="dotSpotify" class="acc-dot spotify"></span>
+            <span id="accPillLabel">Аккаунты</span>
           </button>
           <button id="btnSettings" class="top-win-btn glass-glare" style="width:26px;height:26px;" title="Настройки OmniWave">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1334,6 +1336,7 @@ const FILTERS = [
   { key: 'vk_mix', label: '🔥 VK Микс', color: '#0077FF', fg: '#FFFFFF', auth: 'vk' },
   { key: 'yandex', label: 'Яндекс', color: '#FFCC00', fg: '#111111', auth: 'yandex' },
   { key: 'vk', label: 'ВК', color: '#0077FF', fg: '#FFFFFF', auth: 'vk' },
+  { key: 'spotify', label: 'Spotify', color: '#1DB954', fg: '#0B0B0E' },
   { key: 'soundcloud', label: 'SoundCloud', color: '#FF5500', fg: '#FFFFFF' },
   { key: 'youtube', label: 'YouTube', color: '#FF0033', fg: '#FFFFFF' },
   { key: 'audius', label: 'Audius', color: '#CC0FF0', fg: '#FFFFFF' },
@@ -1353,6 +1356,7 @@ const st = {
   filter: 'all',
   yandexConnected: false,
   vkConnected: false,
+  spotifyConnected: false,
   results: [],
   favorites: [],
   favoritesQuery: '',
@@ -1437,14 +1441,16 @@ document.getElementById('btnToggleSidebar').onclick = () => setSidebarCollapsed(
 function renderFilters() {
   const wrap = document.getElementById('filterPillsWrap');
   wrap.innerHTML = '';
-  if ((st.filter === 'yandex' && !st.yandexConnected) || (st.filter === 'vk' && !st.vkConnected)) {
+  if ((st.filter === 'yandex' && !st.yandexConnected) ||
+      (st.filter === 'vk' && !st.vkConnected)) {
     st.filter = 'all';
   }
   FILTERS.forEach(f => {
     const b = document.createElement('button');
     b.className = 'filter-pill';
     b.textContent = f.label;
-    const disabled = (f.auth === 'yandex' && !st.yandexConnected) || (f.auth === 'vk' && !st.vkConnected);
+    const disabled = (f.auth === 'yandex' && !st.yandexConnected) ||
+                     (f.auth === 'vk' && !st.vkConnected);
     b.disabled = disabled;
     if (disabled) b.title = `Доступно после входа в ${f.label}`;
     if (st.filter === f.key) {
@@ -2663,8 +2669,10 @@ window.chrome?.webview?.addEventListener('message', event => {
     case 'initState':
       st.yandexConnected = !!m.yandexConnected;
       st.vkConnected = !!m.vkConnected;
+      st.spotifyConnected = !!m.spotifyConnected;
       document.getElementById('dotYandex').classList.toggle('on', st.yandexConnected);
       document.getElementById('dotVk').classList.toggle('on', st.vkConnected);
+      document.getElementById('dotSpotify').classList.toggle('on', st.spotifyConnected);
       setSidebarCollapsed(m.sidebarCollapsed, false);
       st.favorites = m.favorites || [];
       st.playlists = m.playlists || [];
@@ -2706,8 +2714,10 @@ window.chrome?.webview?.addEventListener('message', event => {
     case 'accountsUpdate':
       st.yandexConnected = !!m.yandexConnected;
       st.vkConnected = !!m.vkConnected;
+      st.spotifyConnected = !!m.spotifyConnected;
       document.getElementById('dotYandex').classList.toggle('on', st.yandexConnected);
       document.getElementById('dotVk').classList.toggle('on', st.vkConnected);
+      document.getElementById('dotSpotify').classList.toggle('on', st.spotifyConnected);
       renderFilters();
       break;
 

@@ -129,6 +129,36 @@ public class DownloadService : IDisposable
                 return null;
 
             var streamUrl = await provider.ResolveStreamUrlAsync(track, ct);
+            if (string.IsNullOrWhiteSpace(streamUrl) &&
+                string.Equals(track.BrandKey, "youtube", StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrWhiteSpace(track.Title) &&
+                track.Duration > TimeSpan.Zero)
+            {
+                var query = TrackMatcher.BuildSearchQuery(track.Artist, track.Title);
+                if (!string.IsNullOrWhiteSpace(query))
+                {
+                    foreach (var fbKey in new[] { "yandex", "vk", "soundcloud", "audius" })
+                    {
+                        if (ct.IsCancellationRequested) break;
+                        if (!_providers.TryGetValue(fbKey, out var fb)) continue;
+                        try
+                        {
+                            var candidates = await fb.SearchAsync(query, 6, ct);
+                            var best = TrackMatcher.PickBestMatch(track, candidates);
+                            if (best == null) continue;
+                            var fbStream = await fb.ResolveStreamUrlAsync(best, ct);
+                            if (!string.IsNullOrWhiteSpace(fbStream))
+                            {
+                                streamUrl = fbStream;
+                                break;
+                            }
+                        }
+                        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                        catch { }
+                    }
+                }
+            }
+
             if (string.IsNullOrWhiteSpace(streamUrl))
                 return null;
 
@@ -159,7 +189,33 @@ public class DownloadService : IDisposable
             }
             else
             {
-                (savedPath, tempPartPath) = await DownloadDirectHttpAsync(streamUrl, folder, baseName, track, liveCap, ct);
+                try
+                {
+                    (savedPath, tempPartPath) = await DownloadDirectHttpAsync(streamUrl, folder, baseName, track, liveCap, ct);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch
+                {
+                    if (!string.IsNullOrWhiteSpace(tempPartPath) && File.Exists(tempPartPath))
+                    {
+                        try { File.Delete(tempPartPath); } catch { }
+                        tempPartPath = null;
+                    }
+
+                    if (track.BrandKey is "youtube" or "soundcloud" &&
+                        !string.IsNullOrWhiteSpace(track.PageUrl) &&
+                        track.PageUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+                    {
+                        savedPath = await DownloadViaYtDlpAsync(track.PageUrl, folder, baseName, track, liveCap, ct);
+                    }
+                    else
+                    {
+                        throw;
+                    }
+                }
             }
 
             if (!string.IsNullOrWhiteSpace(savedPath) && File.Exists(savedPath))
@@ -206,7 +262,19 @@ public class DownloadService : IDisposable
         CancellationToken ct)
     {
         var partPath = Path.Combine(folder, $"{baseName}.{Guid.NewGuid():N}.part");
-        using var resp = await _http.GetAsync(streamUrl, HttpCompletionOption.ResponseHeadersRead, ct);
+        using var req = new HttpRequestMessage(HttpMethod.Get, streamUrl);
+        if (ProxyService.TryGetStreamHeaders(streamUrl, out var regUa, out var regRef))
+        {
+            if (!string.IsNullOrWhiteSpace(regUa))
+            {
+                req.Headers.UserAgent.Clear();
+                req.Headers.TryAddWithoutValidation("User-Agent", regUa);
+            }
+            if (!string.IsNullOrWhiteSpace(regRef))
+                req.Headers.TryAddWithoutValidation("Referer", regRef);
+        }
+
+        using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
         resp.EnsureSuccessStatusCode();
 
         var ext = ResolveExtension(streamUrl, resp.Content.Headers.ContentType?.MediaType);
@@ -271,7 +339,8 @@ public class DownloadService : IDisposable
         var uniqueBase = $"{baseName}_{Math.Abs(track.UniqueKey.GetHashCode()):X}";
         var outTemplate = Path.Combine(folder, $"{uniqueBase}.%(ext)s");
         var proxyArg = ProxyService.GetYtDlpProxyArgument(streamUrl);
-        var args = $"{proxyArg}--newline -f \"bestaudio/best\" --no-playlist --no-warnings -o \"{outTemplate}\" \"{streamUrl}\"";
+        var cookiesArg = YtDlpMusicProvider.GetYouTubeCookiesArgument(streamUrl);
+        var args = $"{cookiesArg}{proxyArg}--newline -f \"bestaudio/best\" --no-playlist --no-warnings -o \"{outTemplate}\" \"{streamUrl}\"";
         var ytDlpExe = await YtDlpMusicProvider.EnsureYtDlpExecutableAsync(ct);
 
         var psi = new ProcessStartInfo

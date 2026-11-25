@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
@@ -45,9 +46,14 @@ public static class ProxyService
     private static readonly IWebProxy SystemFallbackProxy;
     private static readonly DynamicWebProxy Router = new();
     private static readonly object BridgeInitLock = new();
+    private static readonly ConcurrentDictionary<string, StreamHeaderEntry> StreamHeaders = new(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<string, RelayTarget> RelayEntries = new(StringComparer.Ordinal);
+    private static readonly HttpClient RelayHttpClient;
 
     private static volatile ProxySnapshot _current = ProxySnapshot.Disabled;
     private static LocalProxyBridge? _bridge;
+
+    public static event Action? ProxyChanged;
 
     // Внутренний переключатель для unit/integration-тестов с локальными mock-серверами.
     internal static bool BypassLoopbackInBridge { get; set; } = true;
@@ -56,53 +62,153 @@ public static class ProxyService
     {
         SystemFallbackProxy = HttpClient.DefaultProxy;
         HttpClient.DefaultProxy = Router;
+
+        var relayHandler = new SocketsHttpHandler
+        {
+            UseProxy = true,
+            Proxy = Router,
+            AutomaticDecompression = DecompressionMethods.None,
+            AllowAutoRedirect = true,
+            ConnectTimeout = TimeSpan.FromSeconds(15),
+            PooledConnectionLifetime = TimeSpan.FromMinutes(2)
+        };
+        RelayHttpClient = new HttpClient(relayHandler)
+        {
+            Timeout = TimeSpan.FromMinutes(20)
+        };
     }
 
     public static void Apply(AppSettings settings)
     {
+        var previous = _current;
+        ProxySnapshot next;
+
         if (settings == null)
         {
-            _current = ProxySnapshot.Disabled;
-            return;
+            next = ProxySnapshot.Disabled;
         }
-
-        string type = NormalizeType(settings.ProxyType);
-        string host = (settings.ProxyHost ?? "").Trim();
-        int port = NormalizePort(type, settings.ProxyPort);
-        string user = (settings.ProxyUsername ?? "").Trim();
-        string pass = settings.ProxyPassword ?? "";
-        bool enabled = settings.ProxyEnabled && !string.IsNullOrWhiteSpace(host);
-
-        if (!enabled)
+        else
         {
-            _current = ProxySnapshot.Disabled;
-            return;
+            string type = NormalizeType(settings.ProxyType);
+            string host = (settings.ProxyHost ?? "").Trim();
+            int port = NormalizePort(type, settings.ProxyPort);
+            string user = (settings.ProxyUsername ?? "").Trim();
+            string pass = settings.ProxyPassword ?? "";
+            bool enabled = settings.ProxyEnabled && !string.IsNullOrWhiteSpace(host);
+
+            Uri? proxyUri = enabled ? BuildUri(type, host, port) : null;
+            if (!enabled || proxyUri == null)
+            {
+                next = ProxySnapshot.Disabled;
+            }
+            else
+            {
+                ICredentials? creds = (!string.IsNullOrEmpty(user) || !string.IsNullOrEmpty(pass))
+                    ? new NetworkCredential(user, pass)
+                    : null;
+
+                next = new ProxySnapshot(
+                    Enabled: true,
+                    Type: type,
+                    Host: host,
+                    Port: port,
+                    Username: user,
+                    Password: pass,
+                    BypassRuServices: settings.ProxyBypassRuServices,
+                    ProxyUri: proxyUri,
+                    Credentials: creds);
+
+                // Запускаем локальный мост заранее, если прокси активен
+                _ = EnsureBridgePort();
+            }
         }
 
-        Uri? proxyUri = BuildUri(type, host, port);
-        if (proxyUri == null)
+        _current = next;
+        bool changed = previous.Enabled != next.Enabled ||
+                       !string.Equals(previous.Type, next.Type, StringComparison.Ordinal) ||
+                       !string.Equals(previous.Host, next.Host, StringComparison.OrdinalIgnoreCase) ||
+                       previous.Port != next.Port ||
+                       !string.Equals(previous.Username, next.Username, StringComparison.Ordinal) ||
+                       !string.Equals(previous.Password, next.Password, StringComparison.Ordinal) ||
+                       previous.BypassRuServices != next.BypassRuServices;
+
+        if (changed)
         {
-            _current = ProxySnapshot.Disabled;
-            return;
+            try { ProxyChanged?.Invoke(); } catch { }
+        }
+    }
+
+    public static void RegisterStreamHeaders(string? url, string? userAgent, string? referer = null)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return;
+        if (string.IsNullOrWhiteSpace(userAgent) && string.IsNullOrWhiteSpace(referer)) return;
+
+        if (StreamHeaders.Count > 200)
+        {
+            var now = DateTime.UtcNow;
+            foreach (var kv in StreamHeaders)
+            {
+                if (kv.Value.ExpiresUtc <= now || StreamHeaders.Count > 120)
+                    StreamHeaders.TryRemove(kv.Key, out _);
+            }
         }
 
-        ICredentials? creds = (!string.IsNullOrEmpty(user) || !string.IsNullOrEmpty(pass))
-            ? new NetworkCredential(user, pass)
-            : null;
+        StreamHeaders[url] = new StreamHeaderEntry(
+            UserAgent: string.IsNullOrWhiteSpace(userAgent) ? null : userAgent,
+            Referer: string.IsNullOrWhiteSpace(referer) ? null : referer,
+            ExpiresUtc: DateTime.UtcNow.AddHours(6));
+    }
 
-        _current = new ProxySnapshot(
-            Enabled: true,
-            Type: type,
-            Host: host,
-            Port: port,
-            Username: user,
-            Password: pass,
-            BypassRuServices: settings.ProxyBypassRuServices,
-            ProxyUri: proxyUri,
-            Credentials: creds);
+    public static bool HasRegisteredStreamHeaders(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        if (StreamHeaders.TryGetValue(url, out var entry))
+        {
+            if (entry.ExpiresUtc > DateTime.UtcNow)
+                return true;
+            StreamHeaders.TryRemove(url, out _);
+        }
+        return false;
+    }
 
-        // Запускаем локальный мост заранее, если прокси активен
-        _ = EnsureBridgePort();
+    public static bool TryGetStreamHeaders(string? url, out string? userAgent, out string? referer)
+    {
+        userAgent = null;
+        referer = null;
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        if (StreamHeaders.TryGetValue(url, out var entry))
+        {
+            if (entry.ExpiresUtc > DateTime.UtcNow)
+            {
+                userAgent = entry.UserAgent;
+                referer = entry.Referer;
+                return true;
+            }
+            StreamHeaders.TryRemove(url, out _);
+        }
+        return false;
+    }
+
+    public static string CreateLocalMediaRelayUrl(string targetUrl, string? userAgent = null, string? referer = null)
+    {
+        int port = EnsureBridgePort();
+        var now = DateTime.UtcNow;
+        if (RelayEntries.Count > 120)
+        {
+            foreach (var kv in RelayEntries)
+            {
+                if (kv.Value.ExpiresUtc <= now || RelayEntries.Count > 80)
+                    RelayEntries.TryRemove(kv.Key, out _);
+            }
+        }
+
+        string id = Guid.NewGuid().ToString("N")[..16];
+        RelayEntries[id] = new RelayTarget(
+            TargetUrl: targetUrl,
+            UserAgent: string.IsNullOrWhiteSpace(userAgent) ? null : userAgent,
+            Referer: string.IsNullOrWhiteSpace(referer) ? null : referer,
+            ExpiresUtc: now.AddHours(6));
+        return $"http://127.0.0.1:{port}/__omniwave_relay/{id}";
     }
 
     public static void Shutdown()
@@ -552,6 +658,10 @@ public static class ProxyService
         return s.Length > 90 ? s[..87] + "..." : s;
     }
 
+    private sealed record StreamHeaderEntry(string? UserAgent, string? Referer, DateTime ExpiresUtc);
+
+    private sealed record RelayTarget(string TargetUrl, string? UserAgent, string? Referer, DateTime ExpiresUtc);
+
     private sealed record ProxySnapshot(
         bool Enabled,
         string Type,
@@ -693,6 +803,20 @@ public static class ProxyService
                         return;
                     }
 
+                    const string relayPrefix = "/__omniwave_relay/";
+                    string? relayId = null;
+                    if (target.StartsWith(relayPrefix, StringComparison.Ordinal))
+                        relayId = target[relayPrefix.Length..];
+                    else if (Uri.TryCreate(target, UriKind.Absolute, out var absRelayUri) &&
+                             absRelayUri.AbsolutePath.StartsWith(relayPrefix, StringComparison.Ordinal))
+                        relayId = absRelayUri.AbsolutePath[relayPrefix.Length..];
+
+                    if (!string.IsNullOrWhiteSpace(relayId) && (method == "GET" || method == "HEAD"))
+                    {
+                        await HandleMediaRelayRequestAsync(clientStream, method, relayId, lines, ct);
+                        return;
+                    }
+
                     if (!Uri.TryCreate(target, UriKind.Absolute, out var reqUri) || string.IsNullOrWhiteSpace(reqUri.Host))
                     {
                         await WriteSimpleErrorAsync(clientStream, "400 Bad Request", ct);
@@ -765,6 +889,81 @@ public static class ProxyService
                     await RelayBidirectionalAsync(clientStream, overflow, httpTunnel.Stream, ct);
                 }
                 catch { }
+            }
+        }
+
+        private static async Task HandleMediaRelayRequestAsync(
+            Stream clientStream,
+            string method,
+            string relayId,
+            string[] requestLines,
+            CancellationToken ct)
+        {
+            int qIdx = relayId.IndexOfAny(new[] { '?', '#' });
+            if (qIdx >= 0)
+                relayId = relayId[..qIdx];
+
+            if (!RelayEntries.TryGetValue(relayId, out var entry) || entry.ExpiresUtc <= DateTime.UtcNow)
+            {
+                await WriteSimpleErrorAsync(clientStream, "404 Not Found", ct);
+                return;
+            }
+
+            try
+            {
+                using var req = new HttpRequestMessage(method == "HEAD" ? HttpMethod.Head : HttpMethod.Get, entry.TargetUrl);
+
+                foreach (var line in requestLines.Skip(1))
+                {
+                    if (string.IsNullOrWhiteSpace(line)) continue;
+                    int colon = line.IndexOf(':');
+                    if (colon <= 0) continue;
+                    string hName = line[..colon].Trim();
+                    string hVal = line[(colon + 1)..].Trim();
+
+                    if (hName.Equals("Range", StringComparison.OrdinalIgnoreCase) ||
+                        hName.Equals("If-Range", StringComparison.OrdinalIgnoreCase))
+                    {
+                        req.Headers.TryAddWithoutValidation(hName, hVal);
+                    }
+                }
+
+                string ua = !string.IsNullOrWhiteSpace(entry.UserAgent)
+                    ? entry.UserAgent!
+                    : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+                req.Headers.TryAddWithoutValidation("User-Agent", ua);
+                if (!string.IsNullOrWhiteSpace(entry.Referer))
+                    req.Headers.TryAddWithoutValidation("Referer", entry.Referer);
+
+                using var resp = await RelayHttpClient.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
+
+                var sb = new StringBuilder();
+                int code = (int)resp.StatusCode;
+                string reason = string.IsNullOrWhiteSpace(resp.ReasonPhrase) ? "OK" : resp.ReasonPhrase;
+                sb.Append($"HTTP/1.1 {code} {reason}\r\n");
+
+                if (resp.Content.Headers.ContentType != null)
+                    sb.Append($"Content-Type: {resp.Content.Headers.ContentType}\r\n");
+                if (resp.Content.Headers.ContentLength.HasValue)
+                    sb.Append($"Content-Length: {resp.Content.Headers.ContentLength.Value}\r\n");
+                if (resp.Content.Headers.ContentRange != null)
+                    sb.Append($"Content-Range: {resp.Content.Headers.ContentRange}\r\n");
+                sb.Append("Accept-Ranges: bytes\r\n");
+                sb.Append("Connection: close\r\n\r\n");
+
+                await clientStream.WriteAsync(Encoding.ASCII.GetBytes(sb.ToString()), ct);
+                await clientStream.FlushAsync(ct);
+
+                if (method != "HEAD")
+                {
+                    await using var bodyStream = await resp.Content.ReadAsStreamAsync(ct);
+                    await bodyStream.CopyToAsync(clientStream, 32768, ct);
+                    await clientStream.FlushAsync(ct);
+                }
+            }
+            catch
+            {
+                await WriteSimpleErrorAsync(clientStream, "502 Bad Gateway", ct);
             }
         }
 

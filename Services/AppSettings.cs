@@ -41,6 +41,13 @@ public class AppSettings
     public long YandexUserId { get; set; }
     public string? YandexUserName { get; set; }
 
+    public string? SpotifyAccessToken { get; set; }
+    public string? SpotifyClientToken { get; set; }
+    public string? SpotifySpDcCookie { get; set; }
+    public long SpotifyTokenExpiresUnixMs { get; set; }
+    public string? SpotifyUserId { get; set; }
+    public string? SpotifyUserName { get; set; }
+
     public string IslandDockEdge { get; set; } = "None"; // "None", "Left", "Right", "Top", "Bottom"
     public double? IslandDockOffset { get; set; }
 
@@ -64,6 +71,7 @@ public class AppSettings
         IslandDockEdge = IslandDockEdge is "Left" or "Right" or "Top" or "Bottom" ? IslandDockEdge : "None";
         VkUserId = Math.Max(0, VkUserId);
         YandexUserId = Math.Max(0, YandexUserId);
+        SpotifyTokenExpiresUnixMs = Math.Max(0, SpotifyTokenExpiresUnixMs);
 
         IslandScale = Math.Clamp(double.IsNaN(IslandScale) ? 1.0 : IslandScale, 0.85, 1.30);
         IslandOpacity = Math.Clamp(double.IsNaN(IslandOpacity) ? 0.94 : IslandOpacity, 0.50, 1.0);

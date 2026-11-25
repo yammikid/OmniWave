@@ -114,7 +114,7 @@ public class SoundCloudFastProvider : IMusicProvider, IDisposable
 
     public async Task<string?> ResolveStreamUrlAsync(TrackItem track, CancellationToken ct = default)
     {
-        var cachedLocal = TryGetCachedScM4a(track);
+        var cachedLocal = TryGetCachedScAudio(track);
         if (cachedLocal != null)
             return cachedLocal;
 
@@ -391,23 +391,26 @@ public class SoundCloudFastProvider : IMusicProvider, IDisposable
         return new CachedScMedia(trackAuth, list);
     }
 
-    private string BuildCacheFilePath(TrackItem track)
+    private string BuildCacheFilePath(TrackItem track, string ext = ".m4a")
     {
         var rawKey = !string.IsNullOrWhiteSpace(track.Id)
             ? track.Id
             : Math.Abs(track.UniqueKey.GetHashCode()).ToString("X");
         var safe = new string(rawKey.Where(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_').ToArray());
         if (string.IsNullOrWhiteSpace(safe)) safe = "track";
-        return Path.Combine(_scCacheDir, $"sc_{safe}.m4a");
+        return Path.Combine(_scCacheDir, $"sc_v2_{safe}{ext}");
     }
 
-    private string? TryGetCachedScM4a(TrackItem track)
+    private string? TryGetCachedScAudio(TrackItem track)
     {
         try
         {
-            var path = BuildCacheFilePath(track);
-            if (File.Exists(path) && new FileInfo(path).Length > 10_000)
-                return path;
+            foreach (var ext in new[] { ".m4a", ".mp3" })
+            {
+                var path = BuildCacheFilePath(track, ext);
+                if (File.Exists(path) && new FileInfo(path).Length > 10_000)
+                    return path;
+            }
         }
         catch { }
         return null;
@@ -421,8 +424,12 @@ public class SoundCloudFastProvider : IMusicProvider, IDisposable
             {
                 try
                 {
-                    if (DateTime.UtcNow - File.GetLastWriteTimeUtc(f) > TimeSpan.FromHours(2))
+                    var name = Path.GetFileName(f);
+                    if (!name.StartsWith("sc_v2_", StringComparison.OrdinalIgnoreCase) ||
+                        DateTime.UtcNow - File.GetLastWriteTimeUtc(f) > TimeSpan.FromHours(2))
+                    {
                         File.Delete(f);
+                    }
                 }
                 catch { }
             }
@@ -436,15 +443,15 @@ public class SoundCloudFastProvider : IMusicProvider, IDisposable
         try
         {
             var m3u8Text = await _http.GetStringAsync(m3u8Url, ct);
-            var mapMatch = HlsMapRegex.Match(m3u8Text);
-            if (!mapMatch.Success)
+            if (m3u8Text.Contains("#EXT-X-KEY", StringComparison.OrdinalIgnoreCase))
                 return null;
 
             var baseUri = new Uri(m3u8Url);
-            var chunkUrls = new List<string>
-            {
-                new Uri(baseUri, mapMatch.Groups[1].Value).AbsoluteUri
-            };
+            var mapMatch = HlsMapRegex.Match(m3u8Text);
+            bool hasInitMap = mapMatch.Success;
+            var chunkUrls = new List<string>();
+            if (hasInitMap)
+                chunkUrls.Add(new Uri(baseUri, mapMatch.Groups[1].Value).AbsoluteUri);
 
             foreach (var rawLine in m3u8Text.Split('\n'))
             {
@@ -453,10 +460,16 @@ public class SoundCloudFastProvider : IMusicProvider, IDisposable
                 chunkUrls.Add(new Uri(baseUri, line).AbsoluteUri);
             }
 
-            if (chunkUrls.Count <= 1) return null;
+            bool isMp3Hls = !hasInitMap &&
+                chunkUrls.Count > 0 &&
+                chunkUrls.Any(u => u.Contains(".mp3", StringComparison.OrdinalIgnoreCase) ||
+                                   u.Contains("/mp3/", StringComparison.OrdinalIgnoreCase));
+
+            if (hasInitMap && chunkUrls.Count <= 1) return null;
+            if (!hasInitMap && !isMp3Hls) return null;
 
             PruneOldScCache();
-            var destPath = BuildCacheFilePath(track);
+            var destPath = BuildCacheFilePath(track, isMp3Hls ? ".mp3" : ".m4a");
             partPath = $"{destPath}.{Guid.NewGuid():N}.part";
 
             var results = new byte[chunkUrls.Count][];
@@ -476,18 +489,30 @@ public class SoundCloudFastProvider : IMusicProvider, IDisposable
 
             await Task.WhenAll(tasks);
 
-            await using (var fs = new FileStream(partPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, useAsync: true))
+            for (int i = 0; i < results.Length; i++)
             {
-                for (int i = 0; i < results.Length; i++)
-                {
-                    var bytes = results[i];
-                    if (bytes == null || bytes.Length == 0)
-                        return null;
-                    await fs.WriteAsync(bytes, ct);
-                }
+                if (results[i] == null || results[i].Length == 0)
+                    return null;
             }
 
-            if (new FileInfo(partPath).Length <= 10_000)
+            if (hasInitMap)
+            {
+                // Переупаковываем фрагментированный fMP4 в стандартный перематываемый .m4a (ftyp + moov + mdat)
+                if (!Mp4FragmentRepacker.TryRepackToStandardM4a(results, partPath))
+                {
+                    await using var fs = new FileStream(partPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, useAsync: true);
+                    for (int i = 0; i < results.Length; i++)
+                        await fs.WriteAsync(results[i], ct);
+                }
+            }
+            else
+            {
+                await using var fs = new FileStream(partPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, useAsync: true);
+                for (int i = 0; i < results.Length; i++)
+                    await fs.WriteAsync(results[i], ct);
+            }
+
+            if (!File.Exists(partPath) || new FileInfo(partPath).Length <= 10_000)
                 return null;
 
             if (File.Exists(destPath)) File.Delete(destPath);

@@ -112,7 +112,7 @@ public class YtDlpMusicProvider : IMusicProvider
 
     public async Task<string?> ResolveStreamUrlAsync(TrackItem track, CancellationToken ct = default)
     {
-        var args = $"-f \"bestaudio/best\" --no-playlist --no-warnings -g \"{track.PageUrl}\"";
+        var args = $"-f \"bestaudio[ext=m4a]/bestaudio/best\" --socket-timeout 15 --no-playlist --no-warnings -g \"{track.PageUrl}\"";
         var output = await RunYtDlpAsync(args, ct);
         return output?.Split('\n', StringSplitOptions.RemoveEmptyEntries)
             .Select(l => l.Trim())
@@ -148,6 +148,80 @@ public class YtDlpMusicProvider : IMusicProvider
 
     private const string YtDlpLatestReleaseUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
     private static readonly SemaphoreSlim YtDlpDownloadGate = new(1, 1);
+    private static volatile string? _lastError;
+
+    public static string? LastError => _lastError;
+
+    public static string YouTubeCookiesPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "OmniWave",
+        "yt_cookies.txt");
+
+    public static bool HasYouTubeCookies
+    {
+        get
+        {
+            try
+            {
+                return File.Exists(YouTubeCookiesPath) && new FileInfo(YouTubeCookiesPath).Length > 32;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+    }
+
+    public static string GetYouTubeCookiesArgument(string? urlOrArgs)
+    {
+        if (!HasYouTubeCookies || string.IsNullOrWhiteSpace(urlOrArgs))
+            return "";
+        if (urlOrArgs.Contains("--cookies", StringComparison.OrdinalIgnoreCase))
+            return "";
+
+        bool isYouTubeArg = urlOrArgs.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) ||
+                            urlOrArgs.Contains("youtu.be", StringComparison.OrdinalIgnoreCase) ||
+                            urlOrArgs.Contains("ytsearch", StringComparison.OrdinalIgnoreCase);
+        if (!isYouTubeArg)
+            return "";
+
+        var escaped = YouTubeCookiesPath.Replace("\"", "\\\"", StringComparison.Ordinal);
+        return $"--cookies \"{escaped}\" ";
+    }
+
+    public static void SaveNetscapeCookies(
+        IEnumerable<(string Domain, bool IncludeSubdomains, string Path, bool Secure, long Expiry, string Name, string Value)> cookies)
+    {
+        var dir = Path.GetDirectoryName(YouTubeCookiesPath)!;
+        Directory.CreateDirectory(dir);
+
+        var sb = new StringBuilder();
+        sb.AppendLine("# Netscape HTTP Cookie File");
+        sb.AppendLine("# Exported by OmniWave");
+        foreach (var c in cookies)
+        {
+            if (string.IsNullOrWhiteSpace(c.Domain) || string.IsNullOrWhiteSpace(c.Name))
+                continue;
+            string dom = c.Domain.Trim();
+            string sub = (c.IncludeSubdomains || dom.StartsWith('.')) ? "TRUE" : "FALSE";
+            string path = string.IsNullOrWhiteSpace(c.Path) ? "/" : c.Path;
+            string sec = c.Secure ? "TRUE" : "FALSE";
+            string cleanVal = (c.Value ?? "").Replace("\r", "").Replace("\n", "").Replace("\t", " ");
+            sb.AppendLine($"{dom}\t{sub}\t{path}\t{sec}\t{c.Expiry}\t{c.Name}\t{cleanVal}");
+        }
+
+        File.WriteAllText(YouTubeCookiesPath, sb.ToString(), new UTF8Encoding(false));
+    }
+
+    public static void ClearYouTubeCookies()
+    {
+        try
+        {
+            if (File.Exists(YouTubeCookiesPath))
+                File.Delete(YouTubeCookiesPath);
+        }
+        catch { }
+    }
 
     private static string AppDataYtDlpPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -251,6 +325,10 @@ public class YtDlpMusicProvider : IMusicProvider
     {
         var exe = await EnsureYtDlpExecutableAsync(ct);
         var finalArgs = arguments;
+        var cookiesArg = GetYouTubeCookiesArgument(finalArgs);
+        if (!string.IsNullOrWhiteSpace(cookiesArg))
+            finalArgs = cookiesArg + finalArgs;
+
         if (!finalArgs.Contains("--proxy", StringComparison.OrdinalIgnoreCase))
         {
             var proxyArg = ProxyService.GetYtDlpProxyArgument(finalArgs);
@@ -292,8 +370,24 @@ public class YtDlpMusicProvider : IMusicProvider
             var stdoutTask = proc.StandardOutput.ReadToEndAsync(ct);
             var stderrTask = proc.StandardError.ReadToEndAsync(ct);
             await proc.WaitForExitAsync(ct);
-            _ = await stderrTask;
-            return await stdoutTask;
+            var stderr = await stderrTask;
+            var stdout = await stdoutTask;
+
+            if (proc.ExitCode == 0 && !string.IsNullOrWhiteSpace(stdout))
+            {
+                _lastError = null;
+            }
+            else if (!string.IsNullOrWhiteSpace(stderr))
+            {
+                var errLine = stderr
+                    .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                    .LastOrDefault(l => l.Contains("ERROR:", StringComparison.OrdinalIgnoreCase))
+                    ?? stderr.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
+                if (!string.IsNullOrWhiteSpace(errLine))
+                    _lastError = errLine.Trim();
+            }
+
+            return stdout;
         }
     }
 }
