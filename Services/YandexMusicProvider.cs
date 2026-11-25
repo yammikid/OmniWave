@@ -182,32 +182,123 @@ public sealed class YandexMusicProvider : IMusicProvider, IDisposable
             return results;
 
         var token = _settings.Current.YandexToken!;
+        int targetCount = Math.Max(limit, 14);
+        var seenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        void AddTrackUnique(TrackItem? tr)
+        {
+            if (tr == null || string.IsNullOrWhiteSpace(tr.Id)) return;
+            if (seenIds.Add(tr.Id))
+                results.Add(tr);
+        }
+
         try
         {
-            var path = $"/search?type=track&text={Uri.EscapeDataString(query.Trim())}&page=0&nocorrect=false";
+            var path = $"/search?type=all&text={Uri.EscapeDataString(query.Trim())}&page=0&nocorrect=false";
             using var doc = await GetJsonAsync(path, token, ct);
-            if (doc == null) return results;
-
-            if (doc.RootElement.TryGetProperty("result", out var res) &&
-                res.TryGetProperty("tracks", out var tracksObj) &&
-                tracksObj.TryGetProperty("results", out var arr) &&
-                arr.ValueKind == JsonValueKind.Array)
+            if (doc != null && doc.RootElement.TryGetProperty("result", out var res))
             {
-                foreach (var itemEl in arr.EnumerateArray())
+                string? matchedArtistId = FindMatchingArtistIdInSearch(res, query);
+                if (!string.IsNullOrWhiteSpace(matchedArtistId))
                 {
-                    var tr = ParseYandexTrack(itemEl);
-                    if (tr != null)
+                    try
                     {
-                        results.Add(tr);
+                        int pageSize = Math.Clamp(Math.Max(limit, 15), 10, 30);
+                        using var artistDoc = await GetJsonAsync($"/artists/{Uri.EscapeDataString(matchedArtistId)}/tracks?page=0&page-size={pageSize}", token, ct);
+                        if (artistDoc != null &&
+                            artistDoc.RootElement.TryGetProperty("result", out var aRes) &&
+                            aRes.TryGetProperty("tracks", out var aTracks) &&
+                            aTracks.ValueKind == JsonValueKind.Array)
+                        {
+                            foreach (var tEl in aTracks.EnumerateArray())
+                            {
+                                AddTrackUnique(ParseYandexTrack(tEl));
+                                if (results.Count >= targetCount) break;
+                            }
+                        }
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                    catch { }
+                }
+
+                if (results.Count < targetCount &&
+                    res.TryGetProperty("tracks", out var tracksObj) &&
+                    tracksObj.TryGetProperty("results", out var arr) &&
+                    arr.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var itemEl in arr.EnumerateArray())
+                    {
+                        AddTrackUnique(ParseYandexTrack(itemEl));
+                        if (results.Count >= targetCount) break;
+                    }
+                }
+            }
+
+            if (results.Count == 0)
+            {
+                var fallbackPath = $"/search?type=track&text={Uri.EscapeDataString(query.Trim())}&page=0&nocorrect=false";
+                using var fbDoc = await GetJsonAsync(fallbackPath, token, ct);
+                if (fbDoc != null &&
+                    fbDoc.RootElement.TryGetProperty("result", out var fbRes) &&
+                    fbRes.TryGetProperty("tracks", out var fbTracksObj) &&
+                    fbTracksObj.TryGetProperty("results", out var fbArr) &&
+                    fbArr.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var itemEl in fbArr.EnumerateArray())
+                    {
+                        AddTrackUnique(ParseYandexTrack(itemEl));
                         if (results.Count >= limit) break;
                     }
                 }
             }
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch { }
 
         return results;
+    }
+
+    private static string? FindMatchingArtistIdInSearch(JsonElement resultEl, string query)
+    {
+        var normQuery = TrackMatcher.NormalizeKey(query);
+        if (normQuery.Length < 2) return null;
+
+        bool IsArtistNameMatch(string? name)
+        {
+            var normName = TrackMatcher.NormalizeKey(name);
+            if (string.IsNullOrWhiteSpace(normName)) return false;
+            if (normName == normQuery) return true;
+            if (normName.Contains(normQuery, StringComparison.Ordinal) ||
+                normQuery.Contains(normName, StringComparison.Ordinal))
+            {
+                return true;
+            }
+            return false;
+        }
+
+        if (resultEl.TryGetProperty("best", out var bestEl) &&
+            bestEl.ValueKind == JsonValueKind.Object &&
+            string.Equals(ReadStringOrNumber(bestEl, "type"), "artist", StringComparison.OrdinalIgnoreCase) &&
+            bestEl.TryGetProperty("result", out var bestArt) &&
+            bestArt.ValueKind == JsonValueKind.Object)
+        {
+            if (IsArtistNameMatch(ReadStringOrNumber(bestArt, "name")))
+                return ReadStringOrNumber(bestArt, "id");
+        }
+
+        if (resultEl.TryGetProperty("artists", out var artistsObj) &&
+            artistsObj.TryGetProperty("results", out var artArr) &&
+            artArr.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var art in artArr.EnumerateArray())
+            {
+                if (IsArtistNameMatch(ReadStringOrNumber(art, "name")))
+                    return ReadStringOrNumber(art, "id");
+                break;
+            }
+        }
+
+        return null;
     }
 
     public async Task<List<UserPlaylist>> FetchUserPlaylistsAsync(CancellationToken ct = default)

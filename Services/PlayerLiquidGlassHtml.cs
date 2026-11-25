@@ -328,6 +328,57 @@ public static class PlayerLiquidGlassHtml
     border-color: rgba(var(--accent-rgb), 0.45);
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), 0 6px 20px rgba(var(--accent-rgb), 0.14);
   }
+  .track-card.drag-over {
+    border-color: #FFCC00;
+    box-shadow: 0 0 14px rgba(255, 204, 0, 0.28);
+  }
+
+  @keyframes marqueeSlide {
+    0%, 14% { transform: translateX(0); }
+    46%, 60% { transform: translateX(var(--marquee-shift, 0px)); }
+    92%, 100% { transform: translateX(0); }
+  }
+  .hero-title-viewport {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    margin: 0 14px;
+    position: relative;
+    z-index: 2;
+    text-align: center;
+  }
+  .hero-title-viewport.is-overflowing {
+    text-align: left;
+    mask-image: linear-gradient(90deg, transparent 0%, #000 5%, #000 95%, transparent 100%);
+    -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 5%, #000 95%, transparent 100%);
+  }
+  .marquee-inner {
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    will-change: transform;
+  }
+  .hero-title-viewport.is-overflowing .marquee-inner.is-scrolling,
+  .card-marquee-viewport.scrolling .marquee-inner.is-scrolling {
+    display: inline-block;
+    max-width: none;
+    overflow: visible;
+    text-overflow: clip;
+    animation: marqueeSlide var(--marquee-dur, 6s) ease-in-out infinite;
+  }
+  .card-marquee-viewport {
+    width: 100%;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .card-marquee-viewport.scrolling {
+    mask-image: linear-gradient(90deg, #000 0%, #000 94%, transparent 100%);
+    -webkit-mask-image: linear-gradient(90deg, #000 0%, #000 94%, transparent 100%);
+  }
 
   .cover-mini-eq {
     position: absolute;
@@ -1117,9 +1168,11 @@ public static class PlayerLiquidGlassHtml
             <div id="heroHoverFill" class="glass-hover-fill"></div>
             <div id="heroProgressFill" class="glass-progress-fill"></div>
             <span id="heroCurTime" style="position:relative;z-index:2;font-size:12px;font-weight:700;color:rgba(255,255,255,0.92);font-variant-numeric:tabular-nums;flex-shrink:0;">0:00</span>
-            <span id="heroTrackTitle" style="position:relative;z-index:2;font-size:14px;font-weight:800;color:#fff;letter-spacing:0.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:0 14px;text-shadow:0 2px 10px rgba(0,0,0,0.45);">
-              Выберите трек слева
-            </span>
+            <div id="heroTitleViewport" class="hero-title-viewport">
+              <span id="heroTrackTitle" class="marquee-inner" style="font-size:14px;font-weight:800;color:#fff;letter-spacing:0.02em;text-shadow:0 2px 10px rgba(0,0,0,0.45);">
+                Выберите трек слева
+              </span>
+            </div>
             <span id="heroTotTime" style="position:relative;z-index:2;font-size:12px;font-weight:600;color:rgba(255,255,255,0.78);font-variant-numeric:tabular-nums;flex-shrink:0;">0:00</span>
             <div class="glass-progress-rail">
               <div id="heroProgressRailFill" class="glass-progress-rail-fill"></div>
@@ -1364,6 +1417,7 @@ function setSidebarCollapsed(collapsed, notify = true) {
   document.getElementById('leftSidebar').classList.toggle('collapsed', st.sidebarCollapsed);
   document.getElementById('btnToggleSidebar').textContent = st.sidebarCollapsed ? '☰ Показать панель' : '☰ Скрыть панель';
   if (notify) postCmd('sidebar.setCollapsed', { collapsed: st.sidebarCollapsed });
+  setTimeout(updateHeroMarquee, 340);
 }
 
 function selectLeftTab(idx) {
@@ -1473,12 +1527,68 @@ document.getElementById('btnLoadMore').onclick = () => postCmd('search.loadMore'
 document.getElementById('btnScrollUp').onclick = () => document.getElementById('resultsList').scrollBy({ top: -240, behavior: 'smooth' });
 document.getElementById('btnScrollDown').onclick = () => document.getElementById('resultsList').scrollBy({ top: 240, behavior: 'smooth' });
 
+// ==================== MARQUEE ANIMATION HELPERS ====================
+function updateHeroMarquee() {
+  const vp = document.getElementById('heroTitleViewport');
+  const titleEl = document.getElementById('heroTrackTitle');
+  if (!vp || !titleEl) return;
+
+  vp.classList.remove('is-overflowing');
+  titleEl.classList.remove('is-scrolling');
+  titleEl.style.removeProperty('--marquee-shift');
+  titleEl.style.removeProperty('--marquee-dur');
+
+  const overflow = titleEl.scrollWidth - vp.clientWidth;
+  if (overflow > 2 && vp.clientWidth > 20) {
+    const shift = overflow + 10;
+    const dur = Math.max(4.0, Math.min(16, shift / 24 + 2.2)).toFixed(2);
+    titleEl.style.setProperty('--marquee-shift', `-${shift}px`);
+    titleEl.style.setProperty('--marquee-dur', `${dur}s`);
+    vp.classList.add('is-overflowing');
+    titleEl.classList.add('is-scrolling');
+  }
+}
+
+function stopCardMarquees(rowEl) {
+  rowEl.querySelectorAll('.card-marquee-viewport.scrolling').forEach(vp => vp.classList.remove('scrolling'));
+  rowEl.querySelectorAll('.marquee-inner.is-scrolling').forEach(inner => {
+    inner.classList.remove('is-scrolling');
+    inner.style.removeProperty('--marquee-shift');
+    inner.style.removeProperty('--marquee-dur');
+  });
+}
+
+function attachHoverMarquee(rowEl) {
+  rowEl.addEventListener('mouseenter', () => {
+    rowEl.querySelectorAll('.card-marquee-viewport').forEach(vp => {
+      const inner = vp.querySelector('.marquee-inner');
+      if (!inner) return;
+      const overflow = inner.scrollWidth - vp.clientWidth;
+      if (overflow > 2 && vp.clientWidth > 16) {
+        const shift = overflow + 8;
+        const dur = Math.max(3.2, Math.min(12, shift / 26 + 1.8)).toFixed(2);
+        inner.style.setProperty('--marquee-shift', `-${shift}px`);
+        inner.style.setProperty('--marquee-dur', `${dur}s`);
+        vp.classList.add('scrolling');
+        inner.classList.add('is-scrolling');
+      }
+    });
+  });
+  rowEl.addEventListener('mouseleave', () => stopCardMarquees(rowEl));
+}
+
+window.addEventListener('resize', () => requestAnimationFrame(updateHeroMarquee));
+
 // ==================== TRACK CARD RENDERER ====================
+let draggedTrack = null;
+
 function createTrackCard(tr, index, listKind, playlistId = null, playlistLabel = null) {
   const isCur = st.currentTrack && st.currentTrack.uniqueKey === tr.uniqueKey;
   const card = document.createElement('div');
   card.className = `track-card ${isCur ? 'active' : ''}`;
   card.dataset.key = tr.uniqueKey;
+  const canDrag = !playlistLabel;
+  card.draggable = canDrag;
 
   const dlHtml = tr.isDownloading
     ? `<span style="font-size:9px;color:#FFCC00;">${tr.downloadProgress}%</span>`
@@ -1491,10 +1601,14 @@ function createTrackCard(tr, index, listKind, playlistId = null, playlistLabel =
       ${isCur ? '<div class="cover-mini-eq"><span></span><span></span><span></span><span></span></div>' : ''}
     </div>
     <div style="flex:1;min-width:0;">
-      <div style="font-size:12.5px;font-weight:700;color:${isCur ? 'var(--accent)' : '#fff'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(tr.title)}</div>
+      <div class="card-marquee-viewport">
+        <span class="marquee-inner" style="font-size:12.5px;font-weight:700;color:${isCur ? 'var(--accent)' : '#fff'};">${esc(tr.title)}</span>
+      </div>
       <div style="display:flex;align-items:center;gap:5px;margin-top:2px;min-width:0;">
         <span style="padding:1px 5px;border-radius:4px;font-size:9.5px;font-weight:800;background:${esc(tr.brandColor)};color:#fff;flex-shrink:0;">${esc(tr.source)}</span>
-        <span style="font-size:11px;color:rgba(255,255,255,0.62);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(tr.artist)}</span>
+        <div class="card-marquee-viewport" style="flex:1;width:auto;">
+          <span class="marquee-inner" style="font-size:11px;color:rgba(255,255,255,0.62);">${esc(tr.artist)}</span>
+        </div>
         ${tr.durationText ? `<span style="font-size:10px;color:rgba(255,255,255,0.44);flex-shrink:0;">${esc(tr.durationText)}</span>` : ''}
       </div>
       ${playlistLabel ? `<div style="font-size:10px;color:#FFCC00;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">📁 ${esc(playlistLabel)}</div>` : ''}
@@ -1506,6 +1620,63 @@ function createTrackCard(tr, index, listKind, playlistId = null, playlistLabel =
       <button class="card-icon-btn" data-act="more" title="Ещё">＋</button>
     </div>
   `;
+
+  attachHoverMarquee(card);
+
+  if (canDrag) {
+    const scopePlaylistId = playlistId || '';
+    card.ondragstart = e => {
+      stopCardMarquees(card);
+      draggedTrack = { listKind, playlistId: scopePlaylistId, key: tr.uniqueKey };
+      card.style.opacity = '0.5';
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', tr.uniqueKey);
+      }
+    };
+    card.ondragover = e => {
+      if (!draggedTrack ||
+          draggedTrack.listKind !== listKind ||
+          draggedTrack.playlistId !== scopePlaylistId ||
+          draggedTrack.key === tr.uniqueKey) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+      card.classList.add('drag-over');
+    };
+    card.ondragleave = () => card.classList.remove('drag-over');
+    card.ondrop = e => {
+      e.preventDefault();
+      card.classList.remove('drag-over');
+      if (!draggedTrack ||
+          draggedTrack.listKind !== listKind ||
+          draggedTrack.playlistId !== scopePlaylistId ||
+          draggedTrack.key === tr.uniqueKey) return;
+
+      const srcKey = draggedTrack.key;
+      const dstKey = tr.uniqueKey;
+      draggedTrack = null;
+
+      if (listKind === 'search') {
+        const sIdx = st.results.findIndex(x => x.uniqueKey === srcKey);
+        const dIdx = st.results.findIndex(x => x.uniqueKey === dstKey);
+        if (sIdx >= 0 && dIdx >= 0 && sIdx !== dIdx) {
+          const [moved] = st.results.splice(sIdx, 1);
+          st.results.splice(dIdx, 0, moved);
+          renderTrackList('resultsList', st.results, 'search', '');
+          postCmd('search.reorder', { sourceKey: srcKey, targetKey: dstKey });
+        }
+      } else if (listKind === 'favorites') {
+        postCmd('favorites.reorder', { sourceKey: srcKey, targetKey: dstKey });
+      } else if (listKind === 'playlist' && scopePlaylistId) {
+        postCmd('playlists.reorderTrack', { playlistId: scopePlaylistId, sourceKey: srcKey, targetKey: dstKey });
+      }
+    };
+    card.ondragend = () => {
+      draggedTrack = null;
+      card.style.opacity = '1';
+      document.querySelectorAll('.track-card.drag-over').forEach(el => el.classList.remove('drag-over'));
+    };
+  }
 
   card.ondblclick = () => postCmd('search.playTrack', { list: listKind, playlistId, trackKey: tr.uniqueKey, index });
   card.onclick = e => {
@@ -1665,14 +1836,19 @@ function renderPlaylists() {
     matchingPlaylists.forEach(pl => {
       const row = document.createElement('div');
       row.className = `playlist-row ${pl.isPinned ? 'pinned' : ''}`;
-      row.draggable = true;
-      row.title = 'Перетащите для изменения порядка';
+      row.draggable = !pl.isPinned;
+      row.style.cursor = pl.isPinned ? 'pointer' : 'grab';
+      row.title = pl.isPinned
+        ? 'Закреплено (нажмите 📌, чтобы открепить)'
+        : 'Перетащите для изменения порядка';
       row.innerHTML = `
         <div style="width:42px;height:42px;border-radius:10px;overflow:hidden;flex-shrink:0;background:rgba(255,255,255,0.12);display:flex;align-items:center;justify-content:center;">
           ${pl.coverUrl ? `<img src="${esc(pl.coverUrl)}" style="width:100%;height:100%;object-fit:cover;" onerror="this.style.display='none'"/>` : '<span style="opacity:0.45;">♫</span>'}
         </div>
         <div style="flex:1;min-width:0;">
-          <div style="font-size:12.5px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(pl.name)}</div>
+          <div class="card-marquee-viewport">
+            <span class="marquee-inner" style="font-size:12.5px;font-weight:700;color:#fff;">${esc(pl.name)}</span>
+          </div>
           <div style="display:flex;align-items:center;gap:6px;margin-top:3px;">
             ${pl.showPlatformBadge ? `<span style="padding:1px 6px;border-radius:4px;font-size:9.5px;font-weight:800;background:${esc(pl.platformBadgeColor)};color:${esc(pl.platformBadgeForeground)};">${esc(pl.platformBadgeText)}</span>` : ''}
             <span style="font-size:11px;color:rgba(255,255,255,0.58);">${esc(pl.countText)}</span>
@@ -1680,45 +1856,47 @@ function renderPlaylists() {
         </div>
         <div style="display:flex;align-items:center;gap:2px;flex-shrink:0;">
           <button class="card-icon-btn" data-pact="pin" style="width:22px;height:22px;font-size:11px;color:${pl.isPinned ? '#FFCC00' : ''};opacity:${pl.isPinned ? '1' : '0.48'};" title="${pl.isPinned ? 'Открепить плейлист' : 'Закрепить плейлист'}">📌</button>
-          <button class="card-icon-btn" data-pact="up" style="width:22px;height:22px;font-size:11px;" title="Переместить выше">↑</button>
-          <button class="card-icon-btn" data-pact="down" style="width:22px;height:22px;font-size:11px;" title="Переместить ниже">↓</button>
           <button class="card-icon-btn" data-pact="play" style="width:22px;height:22px;font-size:11px;" title="Играть">▶</button>
           ${pl.isExternal ? '' : '<button class="card-icon-btn" data-pact="del" style="width:22px;height:22px;font-size:11px;" title="Удалить">✕</button>'}
         </div>
       `;
-      row.ondragstart = e => {
-        draggedPlaylistId = pl.id;
-        row.style.opacity = '0.5';
-        if (e.dataTransfer) {
-          e.dataTransfer.effectAllowed = 'move';
-          e.dataTransfer.setData('text/plain', pl.id);
-        }
-      };
-      row.ondragover = e => {
-        if (!draggedPlaylistId || draggedPlaylistId === pl.id) return;
-        e.preventDefault();
-        if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-        row.classList.add('drag-over');
-      };
-      row.ondragleave = () => row.classList.remove('drag-over');
-      row.ondrop = e => {
-        e.preventDefault();
-        row.classList.remove('drag-over');
-        const srcId = draggedPlaylistId || (e.dataTransfer ? e.dataTransfer.getData('text/plain') : '');
-        draggedPlaylistId = null;
-        if (srcId && srcId !== pl.id)
-          postCmd('playlists.reorder', { sourceId: srcId, targetId: pl.id });
-      };
-      row.ondragend = () => {
-        draggedPlaylistId = null;
-        row.style.opacity = '1';
-        wrap.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
-      };
+      attachHoverMarquee(row);
+
+      if (!pl.isPinned) {
+        row.ondragstart = e => {
+          stopCardMarquees(row);
+          draggedPlaylistId = pl.id;
+          row.style.opacity = '0.5';
+          if (e.dataTransfer) {
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/plain', pl.id);
+          }
+        };
+        row.ondragover = e => {
+          if (!draggedPlaylistId || draggedPlaylistId === pl.id) return;
+          e.preventDefault();
+          if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+          row.classList.add('drag-over');
+        };
+        row.ondragleave = () => row.classList.remove('drag-over');
+        row.ondrop = e => {
+          e.preventDefault();
+          row.classList.remove('drag-over');
+          const srcId = draggedPlaylistId || (e.dataTransfer ? e.dataTransfer.getData('text/plain') : '');
+          draggedPlaylistId = null;
+          if (srcId && srcId !== pl.id)
+            postCmd('playlists.reorder', { sourceId: srcId, targetId: pl.id });
+        };
+        row.ondragend = () => {
+          draggedPlaylistId = null;
+          row.style.opacity = '1';
+          wrap.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+        };
+      }
+
       row.onclick = e => {
         const pact = e.target.closest('[data-pact]')?.dataset.pact;
         if (pact === 'pin') { e.stopPropagation(); postCmd('playlists.togglePin', { id: pl.id }); return; }
-        if (pact === 'up') { e.stopPropagation(); postCmd('playlists.move', { id: pl.id, delta: -1 }); return; }
-        if (pact === 'down') { e.stopPropagation(); postCmd('playlists.move', { id: pl.id, delta: 1 }); return; }
         if (pact === 'play') { e.stopPropagation(); postCmd('playlists.play', { id: pl.id }); return; }
         if (pact === 'del') { e.stopPropagation(); postCmd('playlists.delete', { id: pl.id }); return; }
         st.openedPlaylistId = pl.id;
@@ -1797,6 +1975,7 @@ function openDrawer(tab) {
   }
   document.getElementById('rightDrawer').classList.toggle('open', st.drawerOpen);
   syncDrawerViewUi();
+  setTimeout(updateHeroMarquee, 340);
 }
 
 function showDrawerTab(tab) {
@@ -1804,6 +1983,7 @@ function showDrawerTab(tab) {
   st.drawerTab = tab;
   document.getElementById('rightDrawer').classList.add('open');
   syncDrawerViewUi();
+  setTimeout(updateHeroMarquee, 340);
 }
 
 document.querySelectorAll('[data-drawer]').forEach(b => {
@@ -1813,7 +1993,10 @@ document.getElementById('btnCloseDrawer').onclick = () => {
   st.drawerOpen = false;
   document.getElementById('rightDrawer').classList.remove('open');
   document.querySelectorAll('[data-drawer]').forEach(b => b.classList.remove('active'));
+  setTimeout(updateHeroMarquee, 340);
 };
+
+let draggedQueueIndex = null;
 
 function renderQueue() {
   document.getElementById('queueSummaryText').textContent = `${st.queue.length} треков в очереди`;
@@ -1828,28 +2011,62 @@ function renderQueue() {
     const row = document.createElement('div');
     row.className = `track-card ${isCur ? 'active' : ''}`;
     row.style.padding = '6px 8px';
+    row.style.cursor = 'grab';
+    row.draggable = true;
+    row.title = 'Перетащите для изменения порядка в очереди';
     row.innerHTML = `
       <div style="width:34px;height:34px;border-radius:8px;overflow:hidden;flex-shrink:0;background:rgba(255,255,255,0.12);display:flex;align-items:center;justify-content:center;">
         ${tr.coverUrl ? `<img src="${esc(tr.coverUrl)}" style="width:100%;height:100%;object-fit:cover;" onerror="this.style.display='none'"/>` : '<span style="opacity:0.45;">♫</span>'}
       </div>
       <div style="flex:1;min-width:0;">
-        <div style="font-size:12px;font-weight:700;color:${isCur ? 'var(--accent)' : '#fff'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(tr.title)}</div>
-        <div style="font-size:10.5px;color:rgba(255,255,255,0.58);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(tr.artist)}</div>
+        <div class="card-marquee-viewport">
+          <span class="marquee-inner" style="font-size:12px;font-weight:700;color:${isCur ? 'var(--accent)' : '#fff'};">${esc(tr.title)}</span>
+        </div>
+        <div class="card-marquee-viewport">
+          <span class="marquee-inner" style="font-size:10.5px;color:rgba(255,255,255,0.58);">${esc(tr.artist)}</span>
+        </div>
       </div>
       <div style="display:flex;gap:2px;flex-shrink:0;">
-        <button class="card-icon-btn" data-q="up" style="width:21px;height:21px;" title="Вверх">↑</button>
-        <button class="card-icon-btn" data-q="dn" style="width:21px;height:21px;" title="Вниз">↓</button>
         <button class="card-icon-btn" data-q="rm" style="width:21px;height:21px;" title="Удалить">✕</button>
       </div>
     `;
+    attachHoverMarquee(row);
+    row.ondragstart = e => {
+      stopCardMarquees(row);
+      draggedQueueIndex = i;
+      row.style.opacity = '0.5';
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', String(i));
+      }
+    };
+    row.ondragover = e => {
+      if (draggedQueueIndex === null || draggedQueueIndex === i) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+      row.classList.add('drag-over');
+    };
+    row.ondragleave = () => row.classList.remove('drag-over');
+    row.ondrop = e => {
+      e.preventDefault();
+      row.classList.remove('drag-over');
+      const srcIdx = draggedQueueIndex;
+      draggedQueueIndex = null;
+      if (srcIdx !== null && srcIdx !== i)
+        postCmd('queue.move', { from: srcIdx, to: i });
+    };
+    row.ondragend = () => {
+      draggedQueueIndex = null;
+      row.style.opacity = '1';
+      wrap.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+    };
     row.ondblclick = () => postCmd('queue.playIndex', { index: i });
     row.onclick = e => {
       const q = e.target.closest('[data-q]')?.dataset.q;
-      if (!q) return;
-      e.stopPropagation();
-      if (q === 'up' && i > 0) postCmd('queue.move', { from: i, to: i - 1 });
-      else if (q === 'dn' && i < st.queue.length - 1) postCmd('queue.move', { from: i, to: i + 1 });
-      else if (q === 'rm') postCmd('queue.remove', { index: i });
+      if (q === 'rm') {
+        e.stopPropagation();
+        postCmd('queue.remove', { index: i });
+      }
     };
     wrap.appendChild(row);
   });
@@ -2433,6 +2650,7 @@ function applyTrackVisuals(msg) {
     }
   }
   renderStage();
+  requestAnimationFrame(updateHeroMarquee);
   renderTrackList('resultsList', st.results, 'search', '');
   renderFavorites();
   renderPlaylists();

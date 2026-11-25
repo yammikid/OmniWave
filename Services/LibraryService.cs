@@ -430,13 +430,56 @@ public class LibraryService
             {
                 var src = _data.Playlists[srcIdx];
                 var dst = _data.Playlists[dstIdx];
-                src.IsPinned = dst.IsPinned;
+                if (src.IsPinned || dst.IsPinned) return;
                 _data.Playlists.RemoveAt(srcIdx);
                 int insertIdx = Math.Clamp(dstIdx, 0, _data.Playlists.Count);
                 _data.Playlists.Insert(insertIdx, src);
                 SortPlaylistsUnlocked();
                 SaveUnlocked();
                 changed = true;
+            }
+        }
+
+        if (changed)
+            LibraryChanged?.Invoke();
+    }
+
+    private static bool ReorderTracksByKey(List<TrackItem> list, string sourceKey, string targetKey)
+    {
+        if (string.Equals(sourceKey, targetKey, StringComparison.OrdinalIgnoreCase)) return false;
+        int srcIdx = list.FindIndex(t => string.Equals(t.UniqueKey, sourceKey, StringComparison.OrdinalIgnoreCase));
+        int dstIdx = list.FindIndex(t => string.Equals(t.UniqueKey, targetKey, StringComparison.OrdinalIgnoreCase));
+        if (srcIdx < 0 || dstIdx < 0 || srcIdx == dstIdx) return false;
+
+        var src = list[srcIdx];
+        list.RemoveAt(srcIdx);
+        list.Insert(Math.Clamp(dstIdx, 0, list.Count), src);
+        return true;
+    }
+
+    public void ReorderFavoriteTrack(string sourceKey, string targetKey)
+    {
+        bool changed;
+        lock (_lock)
+        {
+            changed = ReorderTracksByKey(_data.Favorites, sourceKey, targetKey);
+            if (changed) SaveUnlocked();
+        }
+
+        if (changed)
+            LibraryChanged?.Invoke();
+    }
+
+    public void ReorderPlaylistTrack(string playlistId, string sourceKey, string targetKey)
+    {
+        bool changed = false;
+        lock (_lock)
+        {
+            var pl = _data.Playlists.FirstOrDefault(p => p.Id == playlistId);
+            if (pl != null)
+            {
+                changed = ReorderTracksByKey(pl.Tracks, sourceKey, targetKey);
+                if (changed) SaveUnlocked();
             }
         }
 
