@@ -329,12 +329,6 @@ public class YtDlpMusicProvider : IMusicProvider
         if (!string.IsNullOrWhiteSpace(cookiesArg))
             finalArgs = cookiesArg + finalArgs;
 
-        if (!finalArgs.Contains("--proxy", StringComparison.OrdinalIgnoreCase))
-        {
-            var proxyArg = ProxyService.GetYtDlpProxyArgument(finalArgs);
-            if (!string.IsNullOrWhiteSpace(proxyArg))
-                finalArgs = proxyArg + finalArgs;
-        }
         var psi = new ProcessStartInfo
         {
             FileName = exe,

@@ -24,6 +24,7 @@ public sealed record VoiceAssistantStatus(
     bool VoskReady,
     bool WhisperReady,
     bool WhisperRunning,
+    bool NeuralTtsReady,
     bool DownloadBusy,
     int DownloadPercent,
     string DownloadStage,
@@ -170,6 +171,7 @@ public sealed class VoiceAssistantService : IDisposable
         _mic.Stop();
         _whisper.Stop();
         _vosk.Dispose();
+        _feedback.UnloadNeuralModels();
 
         bool ok = _models.DeleteAllModels();
         await RefreshEngineStateAsync(restartMic: false);
@@ -327,6 +329,8 @@ public sealed class VoiceAssistantService : IDisposable
         string variant;
         bool wakeOn;
         int devIdx;
+        bool ttsOn;
+        string ttsVoice;
         lock (_syncLock)
         {
             if (_models.CurrentProgress.Busy || _state == VoiceAssistantState.Downloading)
@@ -334,7 +338,12 @@ public sealed class VoiceAssistantService : IDisposable
             variant = _whisperModel;
             wakeOn = _wakeWordEnabled;
             devIdx = _inputDeviceIndex;
+            ttsOn = _ttsEnabled;
+            ttsVoice = _ttsVoiceName;
         }
+
+        if (ttsOn && _models.IsNeuralTtsReady())
+            _ = Task.Run(() => _feedback.WarmUpNeuralAsync(ttsVoice));
 
         if (voskReady && !_vosk.IsReady)
         {
@@ -811,21 +820,27 @@ public sealed class VoiceAssistantService : IDisposable
     {
         bool v = _models.IsVoskReady();
         bool w = _models.IsWhisperReady(_whisperModel);
-        if (v && w && _whisperEnabled) return "Готов (Гибрид Vosk + Whisper · Alt+V)";
-        if (v) return "Готов (Vosk RU · Alt+V)";
-        if (w) return "Готов (Whisper RU+EN · Alt+V)";
-        return "Установите модели распознавания";
+        bool tts = _models.IsNeuralTtsReady();
+
+        if (v && w && _whisperEnabled) return tts ? "Готов (Гибрид + Нейро-голос · Alt+V)" : "Готов (Гибрид Vosk + Whisper · Alt+V)";
+        if (v) return tts ? "Готов (Vosk RU + Нейро-голос · Alt+V)" : "Готов (Vosk RU · Alt+V)";
+        if (w) return tts ? "Готов (Whisper RU+EN + Нейро-голос · Alt+V)" : "Готов (Whisper RU+EN · Alt+V)";
+        return tts ? "Нейро-голос готов · установите Vosk / Whisper" : "Установите модели распознавания";
     }
 
     private VoiceAssistantStatus BuildStatusLocked()
     {
         bool v = _models.IsVoskReady();
         bool w = _models.IsWhisperReady(_whisperModel);
+        bool tts = _models.IsNeuralTtsReady();
         var dl = _models.CurrentProgress;
 
-        string engineLabel = (v && w && _whisperEnabled)
+        string baseEngine = (v && w && _whisperEnabled)
             ? "Гибрид: Vosk + Whisper"
-            : (v ? "Vosk RU (потоковый)" : (w ? "Whisper RU+EN" : "Модели не установлены"));
+            : (v ? "Vosk RU (потоковый)" : (w ? "Whisper RU+EN" : ""));
+        string engineLabel = string.IsNullOrEmpty(baseEngine)
+            ? (tts ? "Нейро-голос (нет STT)" : "Модели не установлены")
+            : (tts ? $"{baseEngine} + Нейро" : baseEngine);
 
         string stateKey = _state switch
         {
@@ -849,6 +864,7 @@ public sealed class VoiceAssistantService : IDisposable
             v,
             w,
             _whisper.IsRunning,
+            tts,
             dl.Busy,
             dl.Percent,
             dl.Stage,

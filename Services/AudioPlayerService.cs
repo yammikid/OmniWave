@@ -45,7 +45,6 @@ public class AudioPlayerService : IDisposable
     private Media? _currentMedia;
     private CancellationTokenSource? _loadCts;
     private CancellationTokenSource? _preResolveCts;
-    private Action? _onProxyChanged;
     private Func<string?, Task<List<TrackItem>>>? _waveReplenishProvider;
     private Func<Task<List<TrackItem>>>? _vkMixReplenishProvider;
     private int _waveReplenishing;
@@ -123,8 +122,6 @@ public class AudioPlayerService : IDisposable
             "--aout=directsound");
         _player = new MediaPlayer(_libVlc) { Volume = _softwareVolume };
         ApplyAudioFxToPlayer();
-        _onProxyChanged = () => _streamUrlCache.Clear();
-        ProxyService.ProxyChanged += _onProxyChanged;
 
         // Не вызываем методы/свойства MediaPlayer синхронно внутри нативных коллбэков LibVLC
         _player.LengthChanged += (_, e) =>
@@ -887,18 +884,18 @@ public class AudioPlayerService : IDisposable
                  streamUrl.Contains("vk.ru", StringComparison.OrdinalIgnoreCase));
 
             bool needsRelay = !isLocalResolvedFile &&
-                (ProxyService.ShouldProxyUrl(streamUrl) || ProxyService.HasRegisteredStreamHeaders(streamUrl));
+                MediaStreamRelayService.HasRegisteredStreamHeaders(streamUrl);
 
             if (needsRelay)
             {
-                ProxyService.TryGetStreamHeaders(streamUrl, out var regUa, out var regReferer);
+                MediaStreamRelayService.TryGetStreamHeaders(streamUrl, out var regUa, out var regReferer);
                 if (isVkAudioHost)
                 {
                     regUa ??= VkMusicProvider.KateMobileUserAgent;
                     regReferer ??= "https://vk.com/";
                 }
 
-                var relayUrl = ProxyService.CreateLocalMediaRelayUrl(streamUrl, regUa, regReferer);
+                var relayUrl = MediaStreamRelayService.CreateLocalMediaRelayUrl(streamUrl, regUa, regReferer);
                 _currentMedia = new Media(_libVlc, relayUrl, FromType.FromLocation);
             }
             else
@@ -1255,9 +1252,6 @@ public class AudioPlayerService : IDisposable
 
     public void Dispose()
     {
-        if (_onProxyChanged != null)
-            ProxyService.ProxyChanged -= _onProxyChanged;
-
         var lc = Interlocked.Exchange(ref _loadCts, null);
         if (lc != null) { try { lc.Cancel(); } catch { } try { lc.Dispose(); } catch { } }
         var pc = Interlocked.Exchange(ref _preResolveCts, null);

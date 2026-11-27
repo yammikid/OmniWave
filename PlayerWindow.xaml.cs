@@ -61,17 +61,15 @@ public partial class PlayerWindow : Window
     private readonly DispatcherTimer _clipboardWatchTimer;
     private readonly AppTelemetryService _telemetry = new();
     private readonly VoiceModelManager _voiceModels = new();
-    private readonly VoiceFeedbackService _voiceFeedback = new();
+    private readonly VoiceFeedbackService _voiceFeedback;
 
     private HwndSource? _hwndSource;
     private VkAuthWindow? _activeAuthWindow;
-    private AliceHttpServer? _aliceServer;
     private VoiceAssistantService _voiceAssistant = null!;
     private DispatcherTimer? _sleepTimer;
     private DateTime _sleepTimerEndsUtc;
     private int _sleepTimerMinutes;
     private CancellationTokenSource? _searchCts;
-    private CancellationTokenSource? _proxyTestCts;
     private CancellationTokenSource? _authFlowCts;
     private CancellationTokenSource? _voiceCts;
     private List<SearchTrackGroup> _currentSearchGroups = new();
@@ -183,9 +181,7 @@ public partial class PlayerWindow : Window
         _clipboardWatchTimer.Tick += async (_, _) => await OnClipboardWatchTickAsync();
 
         RestoreSavedGeometry();
-        _aliceServer = new AliceHttpServer(HandleAliceHttpRequestAsync);
-        ConfigureAliceServer();
-
+        _voiceFeedback = new VoiceFeedbackService(_voiceModels);
         _voiceAssistant = new VoiceAssistantService(_voiceModels, _voiceFeedback, ExecuteAliceCommandAsync);
         _voiceAssistant.DuckingRequested += ducked => _player.SetDucking(ducked);
         _voiceAssistant.StatusChanged += status => Dispatcher.BeginInvoke(() => PostVoiceStateUpdate(status));
@@ -274,7 +270,6 @@ public partial class PlayerWindow : Window
     private void OnSettingsChanged(AppSettings _) => Dispatcher.BeginInvoke(() =>
     {
         ApplyWindowSettingsFromConfig();
-        ConfigureAliceServer();
         _voiceAssistant?.ApplySettings(_settings.Current);
         if (!_isUiSuspended)
         {
@@ -402,10 +397,8 @@ public partial class PlayerWindow : Window
         try { _voiceCts?.Cancel(); _voiceCts?.Dispose(); } catch { }
         try { _voiceAssistant?.Dispose(); } catch { }
         try { _voiceFeedback.Dispose(); } catch { }
-        try { _aliceServer?.Dispose(); _aliceServer = null; } catch { }
         try { _activeAuthWindow?.Close(); _activeAuthWindow = null; } catch { }
         try { _searchCts?.Cancel(); _searchCts?.Dispose(); } catch { }
-        try { _proxyTestCts?.Cancel(); _proxyTestCts?.Dispose(); } catch { }
         try { _telemetry.Dispose(); } catch { }
         try { PlayerWebView?.Dispose(); } catch { }
         base.OnClosing(e);
@@ -1587,13 +1580,11 @@ public partial class PlayerWindow : Window
 
             PlayerWebView.DefaultBackgroundColor = System.Drawing.Color.FromArgb(255, 17, 18, 22);
             const string perfArgs = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,Translate --disable-component-update --disable-domain-reliability --disable-background-networking";
-            var wvProxyArgs = ProxyService.GetWebView2ProxyArguments();
-            string combinedArgs = string.IsNullOrWhiteSpace(wvProxyArgs) ? perfArgs : $"{perfArgs} {wvProxyArgs}";
 
             PlayerWebView.CreationProperties = new CoreWebView2CreationProperties
             {
                 UserDataFolder = userDataFolder,
-                AdditionalBrowserArguments = combinedArgs
+                AdditionalBrowserArguments = perfArgs
             };
 
             await PlayerWebView.EnsureCoreWebView2Async();
@@ -1829,7 +1820,7 @@ public partial class PlayerWindow : Window
                 break;
 
             case "window.openSettings":
-                ShowSettingsSection("proxy");
+                ShowSettingsSection("settings");
                 break;
 
             case "window.openAccounts":
@@ -2192,14 +2183,6 @@ public partial class PlayerWindow : Window
                 }
                 break;
 
-            case "settings.saveProxy":
-                SaveProxyFromWeb(root);
-                break;
-
-            case "settings.testProxy":
-                await TestProxyFromWebAsync(root);
-                break;
-
             case "settings.setDownloadFolder":
             {
                 var path = ReadStr(root, "path")?.Trim() ?? "";
@@ -2332,70 +2315,6 @@ public partial class PlayerWindow : Window
                 StopVoiceListening();
                 break;
 
-            case "alice.saveSettings":
-            {
-                bool enabled = !root.TryGetProperty("enabled", out var enEl) || enEl.ValueKind != JsonValueKind.False;
-                int port = ReadInt(root, "port", _settings.Current.AliceApiPort);
-                if (port < 1024 || port > 65535) port = _settings.Current.AliceApiPort;
-                _isSettingsApplying = true;
-                try
-                {
-                    _settings.Update(s =>
-                    {
-                        s.AliceApiEnabled = enabled;
-                        s.AliceApiPort = port;
-                    }, notify: false);
-                }
-                finally
-                {
-                    _isSettingsApplying = false;
-                }
-                ConfigureAliceServer();
-                PushAliceStateUpdate();
-                PostToWeb("status", new { message = _aliceServer?.StatusText ?? "Настройки Алисы сохранены" });
-                break;
-            }
-
-            case "alice.regenerateToken":
-            {
-                var newTok = AppSettings.GenerateAliceToken();
-                _isSettingsApplying = true;
-                try
-                {
-                    _settings.Update(s => s.AliceApiToken = newTok, notify: false);
-                }
-                finally
-                {
-                    _isSettingsApplying = false;
-                }
-                ConfigureAliceServer();
-                PushAliceStateUpdate();
-                PostToWeb("status", new { message = "Секретный токен Алисы обновлён" });
-                break;
-            }
-
-            case "alice.copyUrl":
-            {
-                var kind = ReadStr(root, "kind") ?? "webhook";
-                var s = _settings.Current;
-                string baseUrl = _aliceServer?.BaseUrl ?? $"http://127.0.0.1:{s.AliceApiPort}";
-                string toCopy = kind switch
-                {
-                    "token" => s.AliceApiToken,
-                    "quick" => $"{baseUrl}/alice?token={Uri.EscapeDataString(s.AliceApiToken)}&q=",
-                    _ => $"{baseUrl}/alice?token={Uri.EscapeDataString(s.AliceApiToken)}"
-                };
-                SafeSetClipboardText(toCopy);
-                string label = kind switch
-                {
-                    "token" => "Токен Алисы скопирован",
-                    "quick" => "GET-шаблон для Алисы скопирован",
-                    _ => "Webhook URL для Алисы скопирован"
-                };
-                PostToWeb("status", new { message = label });
-                break;
-            }
-
             case "voice.toggle":
                 await StartVoiceListeningAsync();
                 break;
@@ -2453,164 +2372,6 @@ public partial class PlayerWindow : Window
             zeroBlurMode = s.ZeroBlurMode,
             downloadFolder = s.DownloadFolder
         };
-    }
-
-    private object BuildProxyDto(AppSettings s)
-    {
-        string text;
-        string kind;
-        if (!s.ProxyEnabled)
-        {
-            if (!string.IsNullOrWhiteSpace(s.ProxyHost))
-            {
-                text = $"Сохранено ({s.ProxyType.ToUpperInvariant()} {s.ProxyHost}:{s.ProxyPort}), но прокси выключен.";
-                kind = "warn";
-            }
-            else
-            {
-                text = "Прокси выключен — используется системное подключение.";
-                kind = "off";
-            }
-        }
-        else if (string.IsNullOrWhiteSpace(s.ProxyHost))
-        {
-            text = "Укажите адрес прокси-сервера и нажмите «Применить».";
-            kind = "warn";
-        }
-        else
-        {
-            string ruNote = s.ProxyBypassRuServices ? " • Яндекс и ВК напрямую" : " • весь трафик";
-            text = $"Активен: {s.ProxyType.ToUpperInvariant()} {s.ProxyHost}:{s.ProxyPort}{ruNote}";
-            kind = "ok";
-        }
-
-        return new
-        {
-            enabled = s.ProxyEnabled,
-            type = s.ProxyType,
-            host = s.ProxyHost,
-            port = s.ProxyPort,
-            username = s.ProxyUsername,
-            password = s.ProxyPassword,
-            bypassRu = s.ProxyBypassRuServices,
-            text,
-            kind
-        };
-    }
-
-    private void SaveProxyFromWeb(JsonElement root)
-    {
-        bool enabled = root.TryGetProperty("enabled", out var enEl) && enEl.ValueKind == JsonValueKind.True;
-        bool bypassRu = !root.TryGetProperty("bypassRu", out var brEl) || brEl.ValueKind == JsonValueKind.True;
-        string rawType = ReadStr(root, "proxyType") ?? "http";
-        string rawHost = (ReadStr(root, "host") ?? "").Trim();
-        string rawPort = root.TryGetProperty("port", out var pEl)
-            ? (pEl.ValueKind == JsonValueKind.Number ? pEl.GetInt32().ToString() : (pEl.GetString() ?? ""))
-            : "";
-        string rawUser = (ReadStr(root, "username") ?? "").Trim();
-        string rawPass = ReadStr(root, "password") ?? "";
-
-        if (!string.IsNullOrWhiteSpace(rawHost) &&
-            (rawHost.Contains("://", StringComparison.Ordinal) ||
-             rawHost.Contains('@', StringComparison.Ordinal) ||
-             (rawHost.Contains(':', StringComparison.Ordinal) && !rawHost.Contains("::", StringComparison.Ordinal))) &&
-            ProxyService.TryParseProxyInput(rawHost, out var parsed) &&
-            !string.IsNullOrWhiteSpace(parsed.Host))
-        {
-            if (!string.IsNullOrWhiteSpace(parsed.Type)) rawType = parsed.Type;
-            rawHost = parsed.Host;
-            if (parsed.Port.HasValue) rawPort = parsed.Port.Value.ToString();
-            if (parsed.Username != null) rawUser = parsed.Username;
-            if (parsed.Password != null) rawPass = parsed.Password;
-        }
-
-        string type = ProxyService.NormalizeType(rawType);
-        int port;
-        if (string.IsNullOrWhiteSpace(rawPort))
-        {
-            port = ProxyService.NormalizePort(type, 0);
-        }
-        else if (!int.TryParse(rawPort.Trim(), out port) || port < 1 || port > 65535)
-        {
-            PostToWeb("proxyStatus", new { text = "Ошибка: порт должен быть числом от 1 до 65535.", kind = "error" });
-            return;
-        }
-
-        if (enabled && string.IsNullOrWhiteSpace(rawHost))
-        {
-            PostToWeb("proxyStatus", new { text = "Введите адрес прокси-сервера перед применением.", kind = "error" });
-            return;
-        }
-
-        _settings.Update(s =>
-        {
-            s.ProxyEnabled = enabled;
-            s.ProxyType = type;
-            s.ProxyHost = rawHost;
-            s.ProxyPort = port;
-            s.ProxyUsername = rawUser;
-            s.ProxyPassword = rawPass;
-            s.ProxyBypassRuServices = bypassRu;
-        }, notify: true);
-
-        PostToWeb("proxyStatus", BuildProxyDto(_settings.Current));
-        PushAccountsUpdate();
-        PostToWeb("status", new { message = enabled ? $"Прокси применён: {type.ToUpperInvariant()} {rawHost}:{port}" : "Прокси отключён" });
-    }
-
-    private async Task TestProxyFromWebAsync(JsonElement root)
-    {
-        string rawType = ReadStr(root, "proxyType") ?? "http";
-        string rawHost = (ReadStr(root, "host") ?? "").Trim();
-        string rawPort = root.TryGetProperty("port", out var pEl)
-            ? (pEl.ValueKind == JsonValueKind.Number ? pEl.GetInt32().ToString() : (pEl.GetString() ?? ""))
-            : "";
-        string rawUser = (ReadStr(root, "username") ?? "").Trim();
-        string rawPass = ReadStr(root, "password") ?? "";
-
-        if (!string.IsNullOrWhiteSpace(rawHost) &&
-            (rawHost.Contains("://", StringComparison.Ordinal) ||
-             rawHost.Contains('@', StringComparison.Ordinal) ||
-             (rawHost.Contains(':', StringComparison.Ordinal) && !rawHost.Contains("::", StringComparison.Ordinal))) &&
-            ProxyService.TryParseProxyInput(rawHost, out var parsed) &&
-            !string.IsNullOrWhiteSpace(parsed.Host))
-        {
-            if (!string.IsNullOrWhiteSpace(parsed.Type)) rawType = parsed.Type;
-            rawHost = parsed.Host;
-            if (parsed.Port.HasValue) rawPort = parsed.Port.Value.ToString();
-            if (parsed.Username != null) rawUser = parsed.Username;
-            if (parsed.Password != null) rawPass = parsed.Password;
-        }
-
-        string type = ProxyService.NormalizeType(rawType);
-        int port = string.IsNullOrWhiteSpace(rawPort)
-            ? ProxyService.NormalizePort(type, 0)
-            : (int.TryParse(rawPort.Trim(), out int p) && p >= 1 && p <= 65535 ? p : 0);
-
-        if (port == 0)
-        {
-            PostToWeb("proxyStatus", new { text = "Укажите корректный порт (от 1 до 65535).", kind = "error" });
-            return;
-        }
-        if (string.IsNullOrWhiteSpace(rawHost))
-        {
-            PostToWeb("proxyStatus", new { text = "Введите адрес прокси-сервера.", kind = "error" });
-            return;
-        }
-
-        var nextCts = new CancellationTokenSource();
-        var prev = Interlocked.Exchange(ref _proxyTestCts, nextCts);
-        if (prev != null) { try { prev.Cancel(); } catch { } try { prev.Dispose(); } catch { } }
-        var ct = nextCts.Token;
-
-        PostToWeb("proxyStatus", new { text = $"Проверка {type.ToUpperInvariant()} {rawHost}:{port}...", kind = "busy", testing = true });
-        try
-        {
-            var (ok, message) = await ProxyService.TestProxyAsync(type, rawHost, port, rawUser, rawPass, ct);
-            if (!ct.IsCancellationRequested)
-                PostToWeb("proxyStatus", new { text = message, kind = ok ? "ok" : "error", testing = false });
-        }
-        catch (OperationCanceledException) { }
     }
 
     private async Task CheckYtDlpForWebAsync()
@@ -2850,10 +2611,8 @@ public partial class PlayerWindow : Window
             windowSettings = BuildWindowSettingsDto(),
             alice = BuildAliceStateDto(),
             voice = BuildVoiceStateDto(),
-            proxy = BuildProxyDto(_settings.Current),
             youtubeCookiesConnected = YtDlpMusicProvider.HasYouTubeCookies,
-            externalSource = !_controller.IsLocalActive ? _controller.CurrentMediaState?.ActiveBrand : null,
-            proxyActive = ProxyService.IsActive
+            externalSource = !_controller.IsLocalActive ? _controller.CurrentMediaState?.ActiveBrand : null
         });
     }
 
@@ -2905,10 +2664,8 @@ public partial class PlayerWindow : Window
             windowSettings = BuildWindowSettingsDto(),
             alice = BuildAliceStateDto(),
             voice = BuildVoiceStateDto(),
-            proxy = BuildProxyDto(s),
             telemetry = SampleTelemetryDto(),
             externalSource = !_controller.IsLocalActive ? _controller.CurrentMediaState?.ActiveBrand : null,
-            proxyActive = ProxyService.IsActive,
             eq = new
             {
                 enabled = s.EqualizerEnabled,
@@ -2974,8 +2731,7 @@ public partial class PlayerWindow : Window
             vkUserName = s.VkUserName ?? "",
             spotifyConnected = _spotify.IsAuthenticated,
             spotifyUserName = s.SpotifyUserName ?? "",
-            youtubeCookiesConnected = YtDlpMusicProvider.HasYouTubeCookies,
-            proxyActive = ProxyService.IsActive
+            youtubeCookiesConnected = YtDlpMusicProvider.HasYouTubeCookies
         });
     }
 
@@ -3278,17 +3034,17 @@ public partial class PlayerWindow : Window
         List<IMusicProvider> providers,
         CancellationToken ct)
     {
-        int baseTimeoutSec = ProxyService.IsActive ? 14 : 8;
+        const int baseTimeoutSec = 8;
         bool singleProviderMode = providers.Count == 1;
         var tasks = providers.Select(async p =>
         {
             int sec = baseTimeoutSec;
             if (string.Equals(p.BrandKey, "spotify", StringComparison.OrdinalIgnoreCase))
             {
-                if (singleProviderMode || ProxyService.IsActive || (p is SpotifyMusicProvider sp && sp.IsAuthenticated))
-                    sec = Math.Max(baseTimeoutSec, 16);
+                if (singleProviderMode || (p is SpotifyMusicProvider sp && sp.IsAuthenticated))
+                    sec = 16;
                 else
-                    sec = Math.Max(baseTimeoutSec, 10);
+                    sec = 10;
             }
 
             using var providerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -4420,28 +4176,10 @@ public partial class PlayerWindow : Window
 
     #region Алиса и голосовое управление
 
-    private void ConfigureAliceServer()
-    {
-        var s = _settings.Current;
-        _aliceServer?.Configure(s.AliceApiEnabled, s.AliceApiPort, s.AliceApiToken);
-    }
-
     private object BuildAliceStateDto()
     {
-        var s = _settings.Current;
-        string baseUrl = _aliceServer?.BaseUrl ?? $"http://127.0.0.1:{s.AliceApiPort}";
-        string maskedToken = s.AliceApiToken.Length > 8
-            ? $"{s.AliceApiToken[..4]}••••{s.AliceApiToken[^4..]}"
-            : s.AliceApiToken;
-
         return new
         {
-            enabled = s.AliceApiEnabled,
-            port = s.AliceApiPort,
-            tokenPreview = maskedToken,
-            running = _aliceServer?.IsRunning == true,
-            statusText = _aliceServer?.StatusText ?? (s.AliceApiEnabled ? "Инициализация..." : "Локальный API выключен"),
-            webhookUrl = $"{baseUrl}/alice",
             speechPackAvailable = AliceVoiceRecognizer.HasWindowsSpeechPack(),
             listening = _isVoiceListening,
             lastQuery = _lastAliceQuery,
@@ -4488,122 +4226,6 @@ public partial class PlayerWindow : Window
 
         string stateWord = _isPlaying ? "Сейчас играет" : "На паузе";
         return $"{stateWord}: {cur.Artist} — {cur.Title} ({cur.Source}). Громкость {_player.Volume}%.";
-    }
-
-    private async Task<AliceCommandResult> HandleAliceHttpRequestAsync(AliceHttpEndpointRequest req)
-    {
-        if (req.IsNewSession && string.IsNullOrWhiteSpace(req.Utterance))
-        {
-            return new AliceCommandResult(
-                true,
-                "OmniWave на связи! Скажите, что включить, или команду: пауза, следующий, громче, тише, моя волна, вк микс.",
-                "help",
-                Status: await Dispatcher.InvokeAsync(BuildAliceStatusSnapshot));
-        }
-
-        switch (req.Path)
-        {
-            case "/api/status":
-            {
-                var (statusObj, reply) = await Dispatcher.InvokeAsync(() =>
-                    (BuildAliceStatusSnapshot(), DescribeNowPlayingReply()));
-                return new AliceCommandResult(true, reply, "status", Status: statusObj);
-            }
-
-            case "/api/play":
-            {
-                if (!string.IsNullOrWhiteSpace(req.Utterance))
-                    return await ExecuteAliceCommandAsync($"включи {req.Utterance}");
-                return await ExecuteAliceCommandAsync("продолжи");
-            }
-
-            case "/api/pause":
-                return await ExecuteAliceCommandAsync("пауза");
-
-            case "/api/toggle":
-                return await ExecuteAliceCommandAsync("переключи паузу");
-
-            case "/api/next":
-                return await ExecuteAliceCommandAsync("следующий");
-
-            case "/api/prev":
-                return await ExecuteAliceCommandAsync("предыдущий");
-
-            case "/api/shuffle":
-                if (req.Query.TryGetValue("enabled", out var shVal) && bool.TryParse(shVal, out bool shOn))
-                    return await ExecuteAliceCommandAsync(shOn ? "включи перемешивание" : "выключи перемешивание");
-                return await ExecuteAliceCommandAsync("перемешай");
-
-            case "/api/repeat":
-                if (req.Query.TryGetValue("mode", out var repVal))
-                {
-                    var m = repVal.Trim().ToLowerInvariant();
-                    if (m is "one" or "track") return await ExecuteAliceCommandAsync("повтор трека");
-                    if (m is "all" or "queue") return await ExecuteAliceCommandAsync("повтор очереди");
-                    if (m is "off" or "none") return await ExecuteAliceCommandAsync("выключи повтор");
-                }
-                return await ExecuteAliceCommandAsync("повтор");
-
-            case "/api/volume":
-                if (req.Query.TryGetValue("value", out var vStr) && int.TryParse(vStr, out int vNum))
-                    return await ExecuteAliceCommandAsync($"громкость {Math.Clamp(vNum, 0, 100)}");
-                return new AliceCommandResult(false, "Укажите параметр ?value=0..100", "volume", Status: await Dispatcher.InvokeAsync(BuildAliceStatusSnapshot));
-
-            case "/api/volume/up":
-                return await ExecuteAliceCommandAsync(
-                    req.Query.TryGetValue("delta", out var uStr) && int.TryParse(uStr, out int uNum)
-                        ? $"громче {Math.Clamp(uNum, 1, 100)}"
-                        : "громче");
-
-            case "/api/volume/down":
-                return await ExecuteAliceCommandAsync(
-                    req.Query.TryGetValue("delta", out var dStr) && int.TryParse(dStr, out int dNum)
-                        ? $"тише {Math.Clamp(dNum, 1, 100)}"
-                        : "тише");
-
-            case "/api/mute":
-                if (req.Query.TryGetValue("enabled", out var mVal) && bool.TryParse(mVal, out bool mOn))
-                    return await ExecuteAliceCommandAsync(mOn ? "выключи звук" : "включи звук");
-                return await ExecuteAliceCommandAsync(_player.Volume > 0 ? "выключи звук" : "включи звук");
-
-            case "/api/like":
-                return await ExecuteAliceCommandAsync("лайк");
-
-            case "/api/wave":
-                return await ExecuteAliceCommandAsync("моя волна");
-
-            case "/api/vkmix":
-                return await ExecuteAliceCommandAsync("вк микс");
-
-            case "/api/compact":
-                if (req.Query.TryGetValue("enabled", out var cVal) && bool.TryParse(cVal, out bool cOn))
-                    return await ExecuteAliceCommandAsync(cOn ? "компактный режим" : "разверни");
-                return await ExecuteAliceCommandAsync(_isCompactMode ? "разверни" : "компактный режим");
-
-            case "/api/search":
-                if (string.IsNullOrWhiteSpace(req.Utterance))
-                    return new AliceCommandResult(false, "Укажите запрос ?q=...", "search");
-                return await ExecuteAliceSearchOnlyAsync(req.Utterance);
-
-            default:
-                return await ExecuteAliceCommandAsync(req.Utterance ?? "");
-        }
-    }
-
-    private async Task<AliceCommandResult> ExecuteAliceSearchOnlyAsync(string query)
-    {
-        return await await Dispatcher.InvokeAsync(async () =>
-        {
-            _activeSearchFilter = "all";
-            await PerformSearchAsync(query);
-            int found = _currentSearchGroups.Count;
-            var first = _currentResults.FirstOrDefault();
-            string reply = first != null
-                ? $"Найдено {found} треков по запросу «{query}». Первый: {first.Artist} — {first.Title}."
-                : $"По запросу «{query}» ничего не найдено.";
-            PublishAliceOutcome(query, reply, first != null, "search");
-            return new AliceCommandResult(first != null, reply, "search", query, BuildAliceStatusSnapshot());
-        });
     }
 
     private Task<AliceCommandResult> ExecuteAliceCommandAsync(string phrase)
@@ -5036,6 +4658,7 @@ public partial class PlayerWindow : Window
             voskReady = st?.VoskReady ?? _voiceModels.IsVoskReady(),
             whisperReady = st?.WhisperReady ?? _voiceModels.IsWhisperReady(s.VoiceWhisperModel),
             whisperRunning = st?.WhisperRunning ?? false,
+            neuralTtsReady = st?.NeuralTtsReady ?? _voiceModels.IsNeuralTtsReady(),
             downloadBusy = st?.DownloadBusy ?? false,
             downloadPercent = st?.DownloadPercent ?? 0,
             downloadStage = st?.DownloadStage ?? "",
@@ -5053,7 +4676,7 @@ public partial class PlayerWindow : Window
             inputDeviceIndex = s.VoiceInputDeviceIndex,
             activeEngineLabel = st?.ActiveEngineLabel ?? "Модели не установлены",
             sleepTimerMinutes = sleepRemainingMin,
-            russianVoices = VoiceFeedbackService.GetRussianVoices().Select(v => new
+            russianVoices = VoiceFeedbackService.GetAvailableVoices(_voiceModels).Select(v => new
             {
                 id = v.Id,
                 displayName = v.DisplayName,
@@ -5133,7 +4756,7 @@ public partial class PlayerWindow : Window
         if (duck) _player.SetDucking(true);
         try
         {
-            await _voiceFeedback.SpeakAsync("Привет! Голосовой помощник OmniWave готов к работе.", voice);
+            await _voiceFeedback.SpeakAsync("Привет! Включаю Linkin Park — Numb. Голосовой помощник OmniWave готов к работе.", voice);
         }
         finally
         {

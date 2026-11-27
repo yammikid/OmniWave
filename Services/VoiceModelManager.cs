@@ -26,6 +26,8 @@ public sealed class VoiceModelManager
     public const string WhisperBinUrl = "https://github.com/ggml-org/whisper.cpp/releases/download/b5907/whisper-bin-x64.zip";
     public const string WhisperModelSmallQ5Url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin";
     public const string WhisperModelBaseUrl = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin";
+    public const string OnnxRuntimeNuPkgUrl = "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/1.20.1/microsoft.ml.onnxruntime.directml.1.20.1.nupkg";
+    public const string SupertonicBaseUrl = "https://huggingface.co/Supertone/supertonic-3/resolve/main/";
 
     private const int ParallelChunkBytes = 2 * 1024 * 1024;
     private const int ParallelConcurrency = 4;
@@ -55,6 +57,10 @@ public sealed class VoiceModelManager
     public string VoskModelDir => Path.Combine(RootDir, "vosk-model-ru");
     public string WhisperBinDir => Path.Combine(RootDir, "whisper-bin");
     public string WhisperModelDir => Path.Combine(RootDir, "whisper-model");
+    public string OnnxRuntimeDir => Path.Combine(RootDir, "onnxruntime");
+    public string SupertonicDir => Path.Combine(RootDir, "tts-supertonic");
+    public string SupertonicOnnxDir => Path.Combine(SupertonicDir, "onnx");
+    public string SupertonicVoicesDir => Path.Combine(SupertonicDir, "voice_styles");
 
     public VoiceDownloadProgress CurrentProgress { get; private set; } = new(false, 0, "", 0, 0);
     public event Action<VoiceDownloadProgress>? ProgressChanged;
@@ -110,6 +116,23 @@ public sealed class VoiceModelManager
                HasValidGgmlHeader(modelPath);
     }
 
+    public bool IsOnnxRuntimeReady()
+        => File.Exists(Path.Combine(OnnxRuntimeDir, "onnxruntime.dll"));
+
+    public bool IsNeuralTtsReady()
+    {
+        if (!IsOnnxRuntimeReady())
+            return false;
+
+        return HasMinFileSize(Path.Combine(SupertonicOnnxDir, "tts.json"), 1024) &&
+               HasMinFileSize(Path.Combine(SupertonicOnnxDir, "unicode_indexer.json"), 50 * 1024) &&
+               HasMinFileSize(Path.Combine(SupertonicOnnxDir, "duration_predictor.onnx"), 1024 * 1024) &&
+               HasMinFileSize(Path.Combine(SupertonicOnnxDir, "text_encoder.onnx"), 10 * 1024 * 1024) &&
+               HasMinFileSize(Path.Combine(SupertonicOnnxDir, "vector_estimator.onnx"), 100 * 1024 * 1024) &&
+               HasMinFileSize(Path.Combine(SupertonicOnnxDir, "vocoder.onnx"), 40 * 1024 * 1024) &&
+               HasMinFileSize(Path.Combine(SupertonicVoicesDir, "F1.json"), 100 * 1024);
+    }
+
     public double GetTotalDiskUsageMb()
     {
         if (!Directory.Exists(RootDir)) return 0;
@@ -145,6 +168,7 @@ public sealed class VoiceModelManager
             Directory.CreateDirectory(RootDir);
             bool needVosk = mode is "hybrid" or "vosk";
             bool needWhisper = mode is "hybrid" or "whisper";
+            bool needTts = mode is "hybrid" or "tts";
 
             if (needVosk)
             {
@@ -167,6 +191,11 @@ public sealed class VoiceModelManager
                 {
                     await DownloadWhisperModelAsync(whisperVariant, cts.Token);
                 }
+            }
+
+            if (needTts && !IsNeuralTtsReady())
+            {
+                await DownloadSupertonicTtsAsync(cts.Token);
             }
 
             PublishProgress(new VoiceDownloadProgress(false, 100, "Готово к работе", 0, 0));
@@ -314,6 +343,79 @@ public sealed class VoiceModelManager
         }
 
         File.Move(part, dest, overwrite: true);
+    }
+
+    private Task DownloadAndExtractOnnxRuntimeAsync(CancellationToken ct)
+        => DownloadAndExtractZipAsync(
+            OnnxRuntimeNuPkgUrl,
+            "onnxruntime-win-x64.nupkg.part",
+            "Скачивание ONNX Runtime (15 МБ)...",
+            "Распаковка ONNX Runtime...",
+            ct,
+            za =>
+            {
+                Directory.CreateDirectory(OnnxRuntimeDir);
+                foreach (var entry in za.Entries)
+                {
+                    if (string.IsNullOrEmpty(entry.Name)) continue;
+                    string norm = entry.FullName.Replace('\\', '/');
+                    if (!norm.StartsWith("runtimes/win-x64/native/", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!entry.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) continue;
+                    string dest = Path.Combine(OnnxRuntimeDir, entry.Name);
+                    entry.ExtractToFile(dest, overwrite: true);
+                }
+            });
+
+    private async Task DownloadSupertonicTtsAsync(CancellationToken ct)
+    {
+        if (!IsOnnxRuntimeReady())
+            await DownloadAndExtractOnnxRuntimeAsync(ct);
+
+        Directory.CreateDirectory(SupertonicOnnxDir);
+        Directory.CreateDirectory(SupertonicVoicesDir);
+
+        await DownloadSupertonicFileAsync("onnx/tts.json", Path.Combine(SupertonicOnnxDir, "tts.json"), 1024, "Конфигурация нейро-голоса...", true, ct);
+        await DownloadSupertonicFileAsync("onnx/unicode_indexer.json", Path.Combine(SupertonicOnnxDir, "unicode_indexer.json"), 50 * 1024, "Словарь фонем RU+EN...", true, ct);
+
+        foreach (var preset in SupertonicTtsEngine.FemaleVoices)
+        {
+            await DownloadSupertonicFileAsync(
+                $"voice_styles/{preset.StyleFileName}",
+                Path.Combine(SupertonicVoicesDir, preset.StyleFileName),
+                100 * 1024,
+                $"Голосовой профиль {preset.ShortName}...",
+                true,
+                ct);
+        }
+
+        await DownloadSupertonicFileAsync("onnx/duration_predictor.onnx", Path.Combine(SupertonicOnnxDir, "duration_predictor.onnx"), 1024 * 1024, "Модуль ритма речи (3.5 МБ)...", false, ct);
+        await DownloadSupertonicFileAsync("onnx/text_encoder.onnx", Path.Combine(SupertonicOnnxDir, "text_encoder.onnx"), 10 * 1024 * 1024, "Текстовый энкодер RU+EN (35 МБ)...", false, ct);
+        await DownloadSupertonicFileAsync("onnx/vector_estimator.onnx", Path.Combine(SupertonicOnnxDir, "vector_estimator.onnx"), 100 * 1024 * 1024, "Акустическая модель Supertonic 3 (245 МБ)...", false, ct);
+        await DownloadSupertonicFileAsync("onnx/vocoder.onnx", Path.Combine(SupertonicOnnxDir, "vocoder.onnx"), 40 * 1024 * 1024, "Студийный вокодер 44.1 кГц (97 МБ)...", false, ct);
+    }
+
+    private async Task DownloadSupertonicFileAsync(
+        string relativeUrl,
+        string destPath,
+        long minBytes,
+        string stage,
+        bool isJson,
+        CancellationToken ct)
+    {
+        if (HasMinFileSize(destPath, minBytes) && (!isJson || HasValidJsonHeader(destPath)))
+            return;
+
+        string part = destPath + ".part";
+        Func<string, bool> validator = isJson ? HasValidJsonHeader : HasNonHtmlHeader;
+        await DownloadFileWithProgressAsync(SupertonicBaseUrl + relativeUrl, part, stage, ct, validator);
+
+        if (!HasMinFileSize(part, minBytes) || (isJson && !HasValidJsonHeader(part)) || (!isJson && !HasNonHtmlHeader(part)))
+        {
+            TryDeleteFile(part);
+            throw new InvalidDataException($"Повреждён файл нейро-голоса: {Path.GetFileName(destPath)}");
+        }
+
+        File.Move(part, destPath, overwrite: true);
     }
 
     private static HttpClient CreateHttpClient(bool forceFreshConnection)
@@ -849,6 +951,54 @@ public sealed class VoiceModelManager
             Span<byte> buf = stackalloc byte[2];
             if (fs.Read(buf) != 2) return false;
             return buf[0] == (byte)'P' && buf[1] == (byte)'K';
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool HasValidJsonHeader(string path)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            Span<byte> buf = stackalloc byte[64];
+            int n = fs.Read(buf);
+            int i = 0;
+            if (n >= 3 && buf[0] == 0xEF && buf[1] == 0xBB && buf[2] == 0xBF) i = 3;
+            while (i < n && buf[i] <= 0x20) i++;
+            return i < n && (buf[i] == (byte)'{' || buf[i] == (byte)'[');
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool HasNonHtmlHeader(string path)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            Span<byte> buf = stackalloc byte[16];
+            int n = fs.Read(buf);
+            if (n <= 0) return false;
+            int i = 0;
+            while (i < n && buf[i] <= 0x20) i++;
+            return i < n && buf[i] != (byte)'<';
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool HasMinFileSize(string path, long minBytes)
+    {
+        try
+        {
+            return File.Exists(path) && new FileInfo(path).Length >= minBytes;
         }
         catch
         {

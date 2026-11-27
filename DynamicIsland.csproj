@@ -24,6 +24,7 @@
     <PackageReference Include="VideoLAN.LibVLC.Windows" Version="3.0.21" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.5.240627000" ExcludeAssets="build;buildTransitive;buildMultitargeting;contentFiles;analyzers" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" Version="1.20.1" />
   </ItemGroup>
 
   <ItemGroup>

@@ -185,23 +185,11 @@ public partial class VkAuthWindow : Window
                 }
             };
 
-            if (_mode == BrowserAuthMode.YouTube)
+            // Общий профиль без AdditionalBrowserArguments во избежание 0x8007139F
+            AuthWebView.CreationProperties = new CoreWebView2CreationProperties
             {
-                var wvProxyArgs = ProxyService.GetWebView2ProxyArguments();
-                AuthWebView.CreationProperties = new CoreWebView2CreationProperties
-                {
-                    UserDataFolder = userDataFolder,
-                    AdditionalBrowserArguments = string.IsNullOrWhiteSpace(wvProxyArgs) ? null : wvProxyArgs
-                };
-            }
-            else
-            {
-                // Общий профиль с VkWebSessionBridge без AdditionalBrowserArguments во избежание 0x8007139F
-                AuthWebView.CreationProperties = new CoreWebView2CreationProperties
-                {
-                    UserDataFolder = userDataFolder
-                };
-            }
+                UserDataFolder = userDataFolder
+            };
 
             await AuthWebView.EnsureCoreWebView2Async();
 

@@ -49,18 +49,6 @@ public class AppSettings
     public string? SpotifyUserId { get; set; }
     public string? SpotifyUserName { get; set; }
 
-    public bool ProxyEnabled { get; set; }
-    public string ProxyType { get; set; } = "http"; // "http", "https", "socks5", "socks4"
-    public string ProxyHost { get; set; } = "";
-    public int ProxyPort { get; set; } = 8080;
-    public string ProxyUsername { get; set; } = "";
-    public string ProxyPassword { get; set; } = "";
-    public bool ProxyBypassRuServices { get; set; } = true;
-
-    public bool AliceApiEnabled { get; set; } = true;
-    public int AliceApiPort { get; set; } = 47510;
-    public string AliceApiToken { get; set; } = "";
-
     public bool VoiceWakeWordEnabled { get; set; }
     public string VoiceWakeWords { get; set; } = "омни, волна";
     public bool VoiceWhisperEnabled { get; set; } = true;
@@ -109,18 +97,6 @@ public class AppSettings
         if (string.IsNullOrWhiteSpace(DownloadFolder))
             DownloadFolder = DefaultDownloadFolder;
 
-        ProxyType = ProxyService.NormalizeType(ProxyType);
-        ProxyHost = (ProxyHost ?? "").Trim();
-        ProxyPort = ProxyService.NormalizePort(ProxyType, ProxyPort);
-        ProxyUsername = (ProxyUsername ?? "").Trim();
-        ProxyPassword ??= "";
-
-        if (AliceApiPort <= 0) AliceApiPort = 47510;
-        AliceApiPort = Math.Clamp(AliceApiPort, 1024, 65535);
-        AliceApiToken = (AliceApiToken ?? "").Trim();
-        if (string.IsNullOrWhiteSpace(AliceApiToken))
-            AliceApiToken = GenerateAliceToken();
-
         VoiceWakeWords = (VoiceWakeWords ?? "").Trim();
         if (string.IsNullOrWhiteSpace(VoiceWakeWords))
             VoiceWakeWords = "омни, волна";
@@ -129,9 +105,6 @@ public class AppSettings
         VoiceTtsVoiceName ??= "";
         VoiceInputDeviceIndex = Math.Max(-1, VoiceInputDeviceIndex);
     }
-
-    public static string GenerateAliceToken()
-        => System.Security.Cryptography.RandomNumberGenerator.GetHexString(24).ToLowerInvariant();
 }
 
 public class SettingsService
@@ -155,7 +128,6 @@ public class SettingsService
         _settingsPath = Path.Combine(dir, "settings.json");
 
         Current = Load();
-        ProxyService.Apply(Current);
     }
 
     private AppSettings Load()
@@ -169,7 +141,6 @@ public class SettingsService
                 var loaded = JsonSerializer.Deserialize<AppSettings>(json);
                 if (loaded != null)
                 {
-                    bool hadToken = !string.IsNullOrWhiteSpace(loaded.AliceApiToken);
                     bool hadScale = loaded.WindowScalePercent > 0;
                     loaded.Normalize();
                     if (loaded.EqualizerEnabled &&
@@ -179,7 +150,7 @@ public class SettingsService
                     {
                         loaded.EqualizerEnabled = false;
                     }
-                    if (!hadToken || !hadScale)
+                    if (!hadScale)
                         TryWriteSettingsUnlocked(loaded);
                     return loaded;
                 }
@@ -209,7 +180,6 @@ public class SettingsService
         lock (_lock)
         {
             Current.Normalize();
-            ProxyService.Apply(Current);
             try
             {
                 var json = JsonSerializer.Serialize(Current, JsonOptions);
@@ -228,7 +198,6 @@ public class SettingsService
         {
             mutate(Current);
             Current.Normalize();
-            ProxyService.Apply(Current);
             try
             {
                 var json = JsonSerializer.Serialize(Current, JsonOptions);

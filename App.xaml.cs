@@ -179,7 +179,7 @@ public partial class App : Application
         var miPrev = new MenuItem { Header = "Предыдущий трек", Style = itemStyle };
         miPrev.Click += (_, _) => OnGlobalHotkeyTriggered(HotkeyAction.PrevTrack);
 
-        var miSettings = new MenuItem { Header = "Настройки (прокси и обновления)", Style = itemStyle };
+        var miSettings = new MenuItem { Header = "Настройки", Style = itemStyle };
         miSettings.Click += (_, _) => _playerWindow?.ShowSettingsSection("settings");
 
         var miAccounts = new MenuItem { Header = "Аккаунты", Style = itemStyle };
@@ -218,7 +218,7 @@ public partial class App : Application
     }
 
     private void OpenSettingsTab()
-        => _playerWindow?.ShowSettingsSection("proxy");
+        => _playerWindow?.ShowSettingsSection("settings");
 
     private void OpenAccountsWindow()
         => _playerWindow?.ShowSettingsSection("accounts");
@@ -379,7 +379,7 @@ public partial class App : Application
                 try { d.Dispose(); } catch { }
             }
         }
-        ProxyService.Shutdown();
+        MediaStreamRelayService.Shutdown();
         if (_singleInstanceMutex != null)
         {
             try { _singleInstanceMutex.ReleaseMutex(); } catch { }

@@ -1592,8 +1592,7 @@ public static class PlayerChromaCardHtml
           vkUserName: '',
           spotifyConnected: false,
           spotifyUserName: '',
-          youtubeCookiesConnected: false,
-          proxyActive: false
+          youtubeCookiesConnected: false
         },
         externalSource: null,
         windowSettings: {
@@ -1610,29 +1609,6 @@ public static class PlayerChromaCardHtml
           zeroBlurMode: true,
           downloadFolder: ''
         },
-        proxy: {
-          enabled: false,
-          type: 'http',
-          host: '',
-          port: 8080,
-          username: '',
-          password: '',
-          bypassRu: true,
-          text: 'Прокси выключен — используется системное подключение.',
-          kind: 'off',
-          testing: false
-        },
-        proxyDraft: {
-          dirty: false,
-          enabled: false,
-          type: 'http',
-          host: '',
-          port: '8080',
-          username: '',
-          password: '',
-          bypassRu: true
-        },
-        proxyPassVisible: false,
         authPanel: {
           provider: '',
           mode: '',
@@ -1661,21 +1637,10 @@ public static class PlayerChromaCardHtml
         aliceSettingsInput: '',
         pendingFocusAliceInput: false,
         alice: {
-          enabled: true,
-          port: 47510,
-          tokenPreview: '',
-          running: false,
-          statusText: 'Инициализация...',
-          webhookUrl: 'http://127.0.0.1:47510/alice',
           speechPackAvailable: false,
           listening: false,
           lastQuery: '',
           lastReply: ''
-        },
-        aliceDraft: {
-          dirty: false,
-          enabled: true,
-          port: '47510'
         },
         voice: {
           state: 'notInstalled',
@@ -1687,6 +1652,7 @@ public static class PlayerChromaCardHtml
           voskReady: false,
           whisperReady: false,
           whisperRunning: false,
+          neuralTtsReady: false,
           downloadBusy: false,
           downloadPercent: 0,
           downloadStage: '',
@@ -2282,31 +2248,6 @@ public static class PlayerChromaCardHtml
         return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
       }
 
-      function syncProxyDraftFromServer(force) {
-        const p = state.proxy || {};
-        if (!force && state.proxyDraft.dirty) return;
-        state.proxyDraft = {
-          dirty: false,
-          enabled: Boolean(p.enabled),
-          type: p.type || 'http',
-          host: p.host || '',
-          port: String(p.port || 8080),
-          username: p.username || '',
-          password: p.password || '',
-          bypassRu: p.bypassRu !== false
-        };
-      }
-
-      function syncAliceDraftFromServer(force) {
-        const al = state.alice || {};
-        if (!force && state.aliceDraft.dirty) return;
-        state.aliceDraft = {
-          dirty: false,
-          enabled: al.enabled !== false,
-          port: String(al.port || 47510)
-        };
-      }
-
       function syncVoiceDraftFromServer(force) {
         const v = state.voice || {};
         if (!force && state.voiceDraft.dirty) return;
@@ -2322,13 +2263,6 @@ public static class PlayerChromaCardHtml
           hotkeyEnabled: v.hotkeyEnabled !== false,
           inputDeviceIndex: typeof v.inputDeviceIndex === 'number' ? v.inputDeviceIndex : -1
         };
-      }
-
-      function statusKindClass(kind) {
-        if (kind === 'ok') return 'is-ok';
-        if (kind === 'warn' || kind === 'busy') return 'is-warn';
-        if (kind === 'error') return 'is-err';
-        return '';
       }
 
       function scrollElementIntoViewSoon(selector) {
@@ -2402,10 +2336,7 @@ public static class PlayerChromaCardHtml
         const acc = state.accounts;
         const ws = state.windowSettings;
         const eq = state.eq || { enabled: false, preset: 'Flat', rate: 1.0, presets: {} };
-        const pr = state.proxy || {};
-        const pd = state.proxyDraft || {};
         const al = state.alice || {};
-        const ad = state.aliceDraft || {};
         const vc = state.voice || {};
         const vd = state.voiceDraft || {};
         const mic = getVoiceMicMeta();
@@ -2477,7 +2408,7 @@ public static class PlayerChromaCardHtml
                   '<span class="ow-dot-lg" style="background:var(--src-yt)"></span>' +
                   '<div style="min-width:0">' +
                     '<div style="font-size:12px;color:#E5E7EB">YouTube (cookies)</div>' +
-                    '<div class="ow-bridge-sub truncate">' + esc(acc.youtubeCookiesConnected ? 'Cookies подключены' : (acc.proxyActive ? 'Через прокси • опционально cookies' : 'Поиск работает без входа • опц. cookies')) + '</div>' +
+                    '<div class="ow-bridge-sub truncate">' + esc(acc.youtubeCookiesConnected ? 'Cookies подключены' : 'Поиск работает без входа • опц. cookies') + '</div>' +
                   '</div>' +
                 '</div>' +
                 '<div style="display:flex;align-items:center;gap:4px;flex-shrink:0">' +
@@ -2492,7 +2423,7 @@ public static class PlayerChromaCardHtml
                   '<span class="ow-dot-lg" style="background:var(--src-sc)"></span>' +
                   '<div style="min-width:0">' +
                     '<div style="font-size:12px;color:#E5E7EB">SoundCloud</div>' +
-                    '<div class="ow-bridge-sub truncate">' + esc(acc.proxyActive ? 'Прямой поток + прокси активен' : 'Подключён • встроенный поиск') + '</div>' +
+                    '<div class="ow-bridge-sub truncate">Подключён • встроенный поиск</div>' +
                   '</div>' +
                 '</div>' +
                 '<span class="ow-badge-btn is-ok" style="cursor:default">Активен</span>' +
@@ -2504,56 +2435,17 @@ public static class PlayerChromaCardHtml
             '<button data-action="pl-sync" class="ow-btn-secondary">↻ Синхронизировать все плейлисты</button>' +
           '</div>' +
 
-          /* 2. Прокси */
-          '<div class="ow-card-block" data-section="proxy">' +
-            '<div class="ow-section-label">Прокси</div>' +
-            renderToggleRow('proxyEnabled', 'Использовать прокси', Boolean(pd.enabled)) +
-            '<div class="ow-grid-4">' +
-              ['http', 'https', 'socks5', 'socks4'].map(pt =>
-                '<button data-proxy-type="' + pt + '" class="ow-chip ' + ((pd.type || 'http') === pt ? 'is-active' : '') + '" style="justify-content:center">' + pt.toUpperCase() + '</button>'
-              ).join('') +
-            '</div>' +
-            '<div class="ow-grid-2">' +
-              '<div>' +
-                '<div class="ow-field-label">Адрес (хост / URL)</div>' +
-                '<input data-proxy-field="host" type="text" value="' + esc(pd.host || '') + '" placeholder="127.0.0.1 или socks5://..." class="ow-input" />' +
-              '</div>' +
-              '<div>' +
-                '<div class="ow-field-label">Порт</div>' +
-                '<input data-proxy-field="port" type="text" value="' + esc(pd.port || '') + '" placeholder="8080" class="ow-input ow-mono" />' +
-              '</div>' +
-            '</div>' +
-            '<div class="ow-grid-2">' +
-              '<div>' +
-                '<div class="ow-field-label">Логин</div>' +
-                '<input data-proxy-field="username" type="text" value="' + esc(pd.username || '') + '" placeholder="необязательно" class="ow-input" />' +
-              '</div>' +
-              '<div>' +
-                '<div class="ow-field-label">Пароль</div>' +
-                '<div class="ow-input-row" style="gap:4px">' +
-                  '<input data-proxy-field="password" type="' + (state.proxyPassVisible ? 'text' : 'password') + '" value="' + esc(pd.password || '') + '" placeholder="необязательно" class="ow-input" />' +
-                  '<button data-action="toggle-proxy-pass" class="ow-icon-btn sz-26" title="Показать / скрыть пароль">' + (state.proxyPassVisible ? ICONS.eyeOff : ICONS.eye) + '</button>' +
-                '</div>' +
-              '</div>' +
-            '</div>' +
-            renderToggleRow('proxyBypassRu', 'Обходить прокси для Яндекс и VK', pd.bypassRu !== false) +
-            '<div data-role="proxy-status" class="ow-status-line ' + statusKindClass(pr.kind) + '">' + esc(pr.text || '') + '</div>' +
-            '<div class="ow-btn-grid">' +
-              '<button data-action="proxy-test" class="ow-btn-secondary"' + (pr.testing ? ' disabled' : '') + '>' + (pr.testing ? 'Проверка...' : 'Проверить') + '</button>' +
-              '<button data-action="proxy-save" class="ow-btn-secondary" style="border-color:rgba(var(--chroma-r),var(--chroma-g),var(--chroma-b),0.45);color:#FFFFFF">Применить</button>' +
-            '</div>' +
-          '</div>' +
-
-          /* 2.5. Голосовой помощник (Vosk + Whisper) и локальный API Алисы */
+          /* 2. Голосовой помощник (Vosk + Whisper + Supertonic 3) */
           '<div class="ow-card-block" data-section="alice">' +
             '<div class="ow-section-head" style="margin-bottom:0">' +
               '<span class="ow-section-label">Голосовой помощник</span>' +
-              '<span class="ow-badge-btn ' + ((vc.voskReady || vc.whisperReady) ? 'is-ok' : '') + '" style="cursor:default">' + esc(vc.activeEngineLabel || 'Не установлен') + '</span>' +
+              '<span class="ow-badge-btn ' + ((vc.voskReady || vc.whisperReady || vc.neuralTtsReady) ? 'is-ok' : '') + '" style="cursor:default">' + esc(vc.activeEngineLabel || 'Не установлен') + '</span>' +
             '</div>' +
 
             '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
               '<span class="ow-badge-btn ' + (vc.voskReady ? 'is-ok' : '') + '" style="cursor:default">' + (vc.voskReady ? '✓ Vosk RU' : 'Vosk RU: нет') + '</span>' +
               '<span class="ow-badge-btn ' + (vc.whisperReady ? 'is-ok' : '') + '" style="cursor:default">' + (vc.whisperReady ? '✓ Whisper RU+EN' : 'Whisper: нет') + '</span>' +
+              '<span class="ow-badge-btn ' + (vc.neuralTtsReady ? 'is-ok' : '') + '" style="cursor:default">' + (vc.neuralTtsReady ? '✓ Нейро-голос' : 'Нейро-голос: нет') + '</span>' +
               (vc.diskUsageMb > 0 ? '<span class="ow-mono" style="font-size:10px;color:var(--ow-text-muted);margin-left:auto">' + vc.diskUsageMb + ' МБ</span>' : '') +
             '</div>' +
 
@@ -2566,15 +2458,20 @@ public static class PlayerChromaCardHtml
                   '<div class="ow-progress-bar"><div data-role="voice-dl-fill" class="ow-progress-fill" style="width:' + Math.max(0, Math.min(100, vc.downloadPercent || 0)) + '%"></div></div>' +
                   '<button data-action="voice-cancel-install" class="ow-btn-secondary">Отмена загрузки</button>' +
                 '</div>'
-              : ((!vc.voskReady && !vc.whisperReady)
-                  ? '<div class="ow-btn-grid">' +
-                      '<button data-action="voice-install-hybrid" class="ow-btn-secondary" style="border-color:rgba(var(--chroma-r),var(--chroma-g),var(--chroma-b),0.5);color:#FFFFFF">Установить Гибрид</button>' +
-                      '<button data-action="voice-install-vosk" class="ow-btn-secondary">Только Vosk (58 МБ)</button>' +
+              : ((!vc.voskReady && !vc.whisperReady && !vc.neuralTtsReady)
+                  ? '<div style="display:flex;flex-direction:column;gap:6px">' +
+                      '<div class="ow-btn-grid">' +
+                        '<button data-action="voice-install-hybrid" class="ow-btn-secondary" style="border-color:rgba(var(--chroma-r),var(--chroma-g),var(--chroma-b),0.5);color:#FFFFFF">Установить всё (Гибрид)</button>' +
+                        '<button data-action="voice-install-vosk" class="ow-btn-secondary">Только Vosk (58 МБ)</button>' +
+                      '</div>' +
+                      '<button data-action="voice-install-tts" class="ow-btn-secondary">Только нейро-голос (женский RU+EN)</button>' +
                     '</div>'
-                  : ((!vc.whisperReady || !vc.voskReady)
-                      ? '<div class="ow-btn-grid">' +
-                          (!vc.whisperReady ? '<button data-action="voice-install-whisper" class="ow-btn-secondary">Докачать Whisper</button>' : '<button data-action="voice-install-vosk" class="ow-btn-secondary">Докачать Vosk</button>') +
-                          '<button data-action="voice-delete-models" class="ow-btn-secondary">Удалить модели</button>' +
+                  : ((!vc.whisperReady || !vc.voskReady || !vc.neuralTtsReady)
+                      ? '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
+                          (!vc.neuralTtsReady ? '<button data-action="voice-install-tts" class="ow-btn-secondary" style="flex:1;min-width:150px;border-color:rgba(var(--chroma-r),var(--chroma-g),var(--chroma-b),0.5);color:#FFFFFF">Скачать нейро-голос (женский RU+EN)</button>' : '') +
+                          (!vc.whisperReady ? '<button data-action="voice-install-whisper" class="ow-btn-secondary" style="flex:1;min-width:120px">Докачать Whisper</button>' : '') +
+                          (!vc.voskReady ? '<button data-action="voice-install-vosk" class="ow-btn-secondary" style="flex:1;min-width:110px">Докачать Vosk</button>' : '') +
+                          '<button data-action="voice-delete-models" class="ow-btn-secondary" style="flex:0 0 auto;padding:6px 10px">Удалить</button>' +
                         '</div>'
                       : '<div class="ow-setting-row">' +
                           '<span class="ow-status-line is-ok truncate">' + esc(vc.statusText || 'Готов') + '</span>' +
@@ -2603,9 +2500,10 @@ public static class PlayerChromaCardHtml
             renderToggleRow('voiceTtsEnabled', 'Голосовые ответы (TTS)', vd.ttsEnabled !== false) +
             '<div class="ow-chips-row">' +
               '<button data-tts-voice="" class="ow-chip ' + (!vd.ttsVoiceName ? 'is-active' : '') + '">Авто</button>' +
-              ruVoices.map(rv =>
-                '<button data-tts-voice="' + esc(rv.displayName) + '" class="ow-chip ' + (vd.ttsVoiceName === rv.displayName ? 'is-active' : '') + '">' + esc(rv.shortName) + '</button>'
-              ).join('') +
+              ruVoices.map(rv => {
+                const vVal = (rv.id && rv.id.startsWith('supertonic:')) ? rv.id : rv.displayName;
+                return '<button data-tts-voice="' + esc(vVal) + '" class="ow-chip ' + (vd.ttsVoiceName === vVal ? 'is-active' : '') + '">' + esc(rv.shortName) + '</button>';
+              }).join('') +
               '<button data-action="voice-test-tts" class="ow-badge-btn" style="margin-left:auto">Тест</button>' +
             '</div>' +
 
@@ -2631,38 +2529,6 @@ public static class PlayerChromaCardHtml
               '<button data-action="alice-run-settings" class="ow-badge-btn is-ok" title="Выполнить">▶</button>' +
             '</div>' +
             '<div data-role="alice-reply" class="ow-status-line" style="display:' + (al.lastReply ? 'block' : 'none') + '">' + esc(al.lastReply || '') + '</div>' +
-
-            '<div style="border-top:1px solid var(--ow-hairline-soft);padding-top:8px;margin-top:2px;display:flex;flex-direction:column;gap:8px">' +
-              '<div class="ow-section-head" style="margin-bottom:0">' +
-                '<span class="ow-section-label">Локальный API Алисы (HTTP)</span>' +
-                '<span data-role="alice-pill" class="ow-badge-btn ' + (al.running ? 'is-ok' : '') + '" style="cursor:default">' + (al.running ? 'Активен' : 'Выкл.') + '</span>' +
-              '</div>' +
-              renderToggleRow('aliceApiEnabled', 'Webhook / REST сервер', Boolean(ad.enabled)) +
-              '<div class="ow-input-row">' +
-                '<div style="width:92px">' +
-                  '<div class="ow-field-label">Порт</div>' +
-                  '<input data-alice-field="port" type="text" value="' + esc(ad.port || '47510') + '" placeholder="47510" class="ow-input ow-mono" />' +
-                '</div>' +
-                '<div style="flex:1;min-width:0;padding-top:15px">' +
-                  '<button data-action="alice-save" class="ow-btn-secondary">Применить</button>' +
-                '</div>' +
-              '</div>' +
-              '<div data-role="alice-status" class="ow-status-line ' + (al.running ? 'is-ok' : '') + '">' + esc(al.statusText || '') + '</div>' +
-              '<div class="ow-bridge-row" style="padding:5px 8px">' +
-                '<div style="min-width:0">' +
-                  '<div style="font-size:10px;color:var(--ow-text-muted)">Токен (X-Alice-Token)</div>' +
-                  '<div class="ow-mono truncate" style="font-size:11px;color:#E5E7EB">' + esc(al.tokenPreview || '—') + '</div>' +
-                '</div>' +
-                '<div style="display:flex;align-items:center;gap:4px;flex-shrink:0">' +
-                  '<button data-action="alice-copy-token" class="ow-badge-btn" title="Копировать секретный токен">' + ICONS.copy + '</button>' +
-                  '<button data-action="alice-regen-token" class="ow-badge-btn">Обновить</button>' +
-                '</div>' +
-              '</div>' +
-              '<div class="ow-btn-grid">' +
-                '<button data-action="alice-copy-webhook" class="ow-btn-secondary">Webhook (/alice)</button>' +
-                '<button data-action="alice-copy-quick" class="ow-btn-secondary">GET-команда</button>' +
-              '</div>' +
-            '</div>' +
           '</div>' +
 
           /* 3. Внешний вид (Chroma Card) */
@@ -3041,42 +2907,6 @@ public static class PlayerChromaCardHtml
         sendToHost('window.setPointerHold', { active: next });
       }
 
-      function sendProxySave() {
-        const pd = state.proxyDraft;
-        sendToHost('settings.saveProxy', {
-          enabled: Boolean(pd.enabled),
-          proxyType: pd.type || 'http',
-          host: pd.host || '',
-          port: pd.port || '',
-          username: pd.username || '',
-          password: pd.password || '',
-          bypassRu: pd.bypassRu !== false
-        });
-      }
-
-      function sendProxyTest() {
-        const pd = state.proxyDraft;
-        sendToHost('settings.testProxy', {
-          proxyType: pd.type || 'http',
-          host: pd.host || '',
-          port: pd.port || '',
-          username: pd.username || '',
-          password: pd.password || ''
-        });
-      }
-
-      function sendAliceSave() {
-        const ad = state.aliceDraft || {};
-        const parsedPort = parseInt(String(ad.port || '47510').trim(), 10);
-        const port = Number.isFinite(parsedPort) ? Math.max(1024, Math.min(65535, parsedPort)) : 47510;
-        ad.port = String(port);
-        ad.dirty = false;
-        sendToHost('alice.saveSettings', {
-          enabled: ad.enabled !== false,
-          port: port
-        });
-      }
-
       function sendVoiceSave() {
         const vd = state.voiceDraft || {};
         vd.dirty = false;
@@ -3162,34 +2992,6 @@ public static class PlayerChromaCardHtml
           authInp.onkeydown = (e) => {
             if (e.key === 'Enter' && state.authPanel.provider) {
               sendToHost('auth.submitInput', { provider: state.authPanel.provider, input: state.authPanel.input || '' });
-            }
-          };
-        }
-
-        appRoot.querySelectorAll('[data-proxy-field]').forEach(inp => {
-          const field = inp.getAttribute('data-proxy-field');
-          inp.oninput = (e) => {
-            state.proxyDraft.dirty = true;
-            state.proxyDraft[field] = e.target.value;
-          };
-          inp.onkeydown = (e) => {
-            if (e.key === 'Enter') {
-              inp.blur();
-              sendProxySave();
-            }
-          };
-        });
-
-        const alicePortInp = appRoot.querySelector('[data-alice-field="port"]');
-        if (alicePortInp) {
-          alicePortInp.oninput = (e) => {
-            state.aliceDraft.dirty = true;
-            state.aliceDraft.port = e.target.value;
-          };
-          alicePortInp.onkeydown = (e) => {
-            if (e.key === 'Enter') {
-              alicePortInp.blur();
-              sendAliceSave();
             }
           };
         }
@@ -3624,51 +3426,9 @@ public static class PlayerChromaCardHtml
             return;
           }
 
-          const proxyTypeBtn = e.target.closest('[data-proxy-type]');
-          if (proxyTypeBtn) {
-            const nextType = proxyTypeBtn.getAttribute('data-proxy-type');
-            const prevDefault = (state.proxyDraft.type || '').startsWith('socks') ? '1080' : (state.proxyDraft.type === 'https' ? '443' : '8080');
-            state.proxyDraft.dirty = true;
-            state.proxyDraft.type = nextType;
-            const curPort = (state.proxyDraft.port || '').trim();
-            if (!curPort || curPort === prevDefault || curPort === '8080' || curPort === '1080' || curPort === '443') {
-              state.proxyDraft.port = nextType.startsWith('socks') ? '1080' : (nextType === 'https' ? '443' : '8080');
-            }
-            refreshTabBodyOnly();
-            return;
-          }
-
           const sw = e.target.closest('[data-setting-toggle]');
           if (sw) {
             const key = sw.getAttribute('data-setting-toggle');
-            if (key === 'proxyEnabled') {
-              const nextVal = !state.proxyDraft.enabled;
-              state.proxyDraft.dirty = true;
-              state.proxyDraft.enabled = nextVal;
-              sw.setAttribute('aria-checked', nextVal ? 'true' : 'false');
-              if (!nextVal || (state.proxyDraft.host || '').trim()) {
-                sendProxySave();
-              }
-              return;
-            }
-            if (key === 'proxyBypassRu') {
-              const nextVal = !(state.proxyDraft.bypassRu !== false);
-              state.proxyDraft.dirty = true;
-              state.proxyDraft.bypassRu = nextVal;
-              sw.setAttribute('aria-checked', nextVal ? 'true' : 'false');
-              if (state.proxyDraft.enabled && (state.proxyDraft.host || '').trim()) {
-                sendProxySave();
-              }
-              return;
-            }
-            if (key === 'aliceApiEnabled') {
-              const nextVal = !state.aliceDraft.enabled;
-              state.aliceDraft.dirty = true;
-              state.aliceDraft.enabled = nextVal;
-              sw.setAttribute('aria-checked', nextVal ? 'true' : 'false');
-              sendAliceSave();
-              return;
-            }
             if (key === 'voiceWakeWordEnabled' || key === 'voiceWhisperEnabled' || key === 'voiceTtsEnabled' || key === 'voiceDuckMusic' || key === 'voiceHotkeyEnabled') {
               const draftProp = key === 'voiceWakeWordEnabled' ? 'wakeWordEnabled'
                 : (key === 'voiceWhisperEnabled' ? 'whisperEnabled'
@@ -3864,12 +3624,6 @@ public static class PlayerChromaCardHtml
                 refreshTabBodyOnly();
               }
               break;
-            case 'toggle-proxy-pass':
-              state.proxyPassVisible = !state.proxyPassVisible;
-              refreshTabBodyOnly();
-              break;
-            case 'proxy-test': sendProxyTest(); break;
-            case 'proxy-save': sendProxySave(); break;
             case 'dl-pick': sendToHost('settings.pickDownloadFolder'); break;
             case 'dl-open': sendToHost('settings.openDownloadFolder'); break;
             case 'check-ytdlp': sendToHost('system.checkYtDlp'); break;
@@ -3889,6 +3643,9 @@ public static class PlayerChromaCardHtml
               break;
             case 'voice-install-whisper':
               sendToHost('voice.installModels', { mode: 'whisper' });
+              break;
+            case 'voice-install-tts':
+              sendToHost('voice.installModels', { mode: 'tts' });
               break;
             case 'voice-cancel-install':
               sendToHost('voice.cancelInstall');
@@ -3924,21 +3681,6 @@ public static class PlayerChromaCardHtml
               if ((state.aliceSettingsInput || '').trim()) {
                 sendToHost('alice.runCommand', { command: state.aliceSettingsInput.trim() });
               }
-              break;
-            case 'alice-save':
-              sendAliceSave();
-              break;
-            case 'alice-regen-token':
-              sendToHost('alice.regenerateToken');
-              break;
-            case 'alice-copy-token':
-              sendToHost('alice.copyUrl', { kind: 'token' });
-              break;
-            case 'alice-copy-webhook':
-              sendToHost('alice.copyUrl', { kind: 'webhook' });
-              break;
-            case 'alice-copy-quick':
-              sendToHost('alice.copyUrl', { kind: 'quick' });
               break;
           }
         };
@@ -4248,13 +3990,8 @@ public static class PlayerChromaCardHtml
         if (msg.windowSettings) state.windowSettings = Object.assign({}, state.windowSettings, msg.windowSettings);
         if (msg.telemetry) state.telemetry = msg.telemetry;
         if (msg.eq) state.eq = msg.eq;
-        if (msg.proxy && typeof msg.proxy === 'object') {
-          state.proxy = Object.assign({}, state.proxy, msg.proxy);
-          syncProxyDraftFromServer(isInit);
-        }
         if (msg.alice && typeof msg.alice === 'object') {
           state.alice = Object.assign({}, state.alice, msg.alice);
-          syncAliceDraftFromServer(isInit);
         }
         if (msg.voice && typeof msg.voice === 'object') {
           state.voice = Object.assign({}, state.voice, msg.voice);
@@ -4268,12 +4005,10 @@ public static class PlayerChromaCardHtml
             vkUserName: msg.vkUserName || '',
             spotifyConnected: Boolean(msg.spotifyConnected),
             spotifyUserName: msg.spotifyUserName || '',
-            youtubeCookiesConnected: Boolean(msg.youtubeCookiesConnected),
-            proxyActive: Boolean(msg.proxyActive)
+            youtubeCookiesConnected: Boolean(msg.youtubeCookiesConnected)
           };
         } else {
           if ('youtubeCookiesConnected' in msg) state.accounts.youtubeCookiesConnected = Boolean(msg.youtubeCookiesConnected);
-          if ('proxyActive' in msg) state.accounts.proxyActive = Boolean(msg.proxyActive);
         }
         ChromaEngine.updateForTrack(state.currentTrack, state.coverDataUrl);
         renderApp();
@@ -4351,8 +4086,7 @@ public static class PlayerChromaCardHtml
                   vkUserName: msg.vkUserName || '',
                   spotifyConnected: Boolean(msg.spotifyConnected),
                   spotifyUserName: msg.spotifyUserName || '',
-                  youtubeCookiesConnected: Boolean(msg.youtubeCookiesConnected),
-                  proxyActive: Boolean(msg.proxyActive)
+                  youtubeCookiesConnected: Boolean(msg.youtubeCookiesConnected)
                 };
                 if (!state.compact) {
                   const bDot = appRoot.querySelector('[data-role="bridge-dot"]');
@@ -4472,39 +4206,6 @@ public static class PlayerChromaCardHtml
                   patch(state.queue);
                   if (!state.compact && (state.activeTab === 'search' || state.activeTab === 'favorites')) {
                     refreshTabBodyOnly();
-                  }
-                }
-                break;
-              case 'proxyStatus':
-                state.proxy = Object.assign({}, state.proxy, {
-                  text: msg.text || '',
-                  kind: msg.kind || '',
-                  testing: Boolean(msg.testing)
-                });
-                if ('enabled' in msg) state.proxy.enabled = Boolean(msg.enabled);
-                if ('type' in msg && msg.type !== undefined) state.proxy.type = msg.type;
-                if ('host' in msg && msg.host !== undefined) state.proxy.host = msg.host;
-                if ('port' in msg && msg.port !== undefined) state.proxy.port = msg.port;
-                if ('username' in msg && msg.username !== undefined) state.proxy.username = msg.username;
-                if ('password' in msg && msg.password !== undefined) state.proxy.password = msg.password;
-                if ('bypassRu' in msg) state.proxy.bypassRu = Boolean(msg.bypassRu);
-                if (msg.kind !== 'error' && !msg.testing && msg.host !== undefined) {
-                  syncProxyDraftFromServer(true);
-                }
-                if (!state.compact && state.activeTab === 'settings') {
-                  if (!isTypingInSettings() && msg.kind !== 'error' && !msg.testing && msg.host !== undefined) {
-                    refreshTabBodyOnly();
-                  } else {
-                    const pSt = appRoot.querySelector('[data-role="proxy-status"]');
-                    if (pSt) {
-                      pSt.textContent = state.proxy.text || '';
-                      pSt.className = 'ow-status-line ' + statusKindClass(msg.kind);
-                    }
-                    const pBtn = appRoot.querySelector('[data-action="proxy-test"]');
-                    if (pBtn) {
-                      pBtn.disabled = Boolean(msg.testing);
-                      pBtn.textContent = msg.testing ? 'Проверка...' : 'Проверить';
-                    }
                   }
                 }
                 break;
@@ -4648,7 +4349,6 @@ public static class PlayerChromaCardHtml
                 break;
               case 'aliceState':
                 state.alice = Object.assign({}, state.alice, msg);
-                syncAliceDraftFromServer(false);
                 appRoot.querySelectorAll('[data-role="mic-btn"]').forEach(btn => {
                   btn.classList.toggle('is-listening', Boolean(state.alice.listening));
                 });

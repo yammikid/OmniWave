@@ -264,7 +264,6 @@ public sealed class SpotifyWebSessionBridge : IDisposable
     {
         _isGuestProfile = isGuestProfile;
         _idleTimer = new System.Threading.Timer(OnIdleTimerFired, null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
-        ProxyService.ProxyChanged += ResetSession;
     }
 
     public Task<(string? AccessToken, long ExpiresUnixMs, string? SpDcCookie)> RefreshAccessTokenAsync(
@@ -497,8 +496,7 @@ public sealed class SpotifyWebSessionBridge : IDisposable
             {
                 CreationProperties = new CoreWebView2CreationProperties
                 {
-                    UserDataFolder = userDataFolder,
-                    AdditionalBrowserArguments = ProxyService.GetWebView2ProxyArguments()
+                    UserDataFolder = userDataFolder
                 }
             };
 
@@ -1489,7 +1487,6 @@ public sealed class SpotifyWebSessionBridge : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        ProxyService.ProxyChanged -= ResetSession;
         try { _idleTimer?.Dispose(); } catch { }
         _idleTimer = null;
         ResetSession();

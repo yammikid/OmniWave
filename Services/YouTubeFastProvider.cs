@@ -52,7 +52,7 @@ public class YouTubeFastProvider : IMusicProvider, IDisposable
 
             for (int page = 0; page < 3 && results.Count < limit; page++)
             {
-                string gl = ProxyService.IsActive ? "US" : "RU";
+                const string gl = "RU";
                 var payload = page == 0
                     ? (object)new
                     {
@@ -135,7 +135,7 @@ public class YouTubeFastProvider : IMusicProvider, IDisposable
         if (!string.IsNullOrWhiteSpace(fallbackUrl))
         {
             LastResolveError = null;
-            ProxyService.RegisterStreamHeaders(fallbackUrl, ChromeUserAgent, "https://www.youtube.com/");
+            MediaStreamRelayService.RegisterStreamHeaders(fallbackUrl, ChromeUserAgent, "https://www.youtube.com/");
             return fallbackUrl;
         }
 
@@ -146,7 +146,7 @@ public class YouTubeFastProvider : IMusicProvider, IDisposable
                 ytErr.Contains("not a bot", StringComparison.OrdinalIgnoreCase) ||
                 ytErr.Contains("LOGIN_REQUIRED", StringComparison.OrdinalIgnoreCase))
             {
-                LastResolveError = "YouTube запросил подтверждение входа для IP этого прокси (войдите в YouTube в «Аккаунтах» или смените прокси).";
+                LastResolveError = "YouTube запросил подтверждение входа (войдите в YouTube в «Аккаунтах»).";
             }
             else if (string.IsNullOrWhiteSpace(LastResolveError))
             {
@@ -163,7 +163,7 @@ public class YouTubeFastProvider : IMusicProvider, IDisposable
         bool useAndroidVr,
         CancellationToken ct)
     {
-        string gl = ProxyService.IsActive ? "US" : "RU";
+        const string gl = "RU";
         object payload = useAndroidVr
             ? new
             {
@@ -331,7 +331,7 @@ public class YouTubeFastProvider : IMusicProvider, IDisposable
         if (!await VerifyStreamReadableAsync(selectedUrl, endpointUa, ct))
             return null;
 
-        ProxyService.RegisterStreamHeaders(selectedUrl, endpointUa, "https://www.youtube.com/");
+        MediaStreamRelayService.RegisterStreamHeaders(selectedUrl, endpointUa, "https://www.youtube.com/");
         return selectedUrl;
     }
 
