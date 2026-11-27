@@ -152,6 +152,19 @@ public static class AliceCommandParser
                     list.Add("алис");
                     list.Add("олиса");
                 }
+                else if (w == "ирина")
+                {
+                    list.Add("ирины");
+                    list.Add("ирину");
+                    list.Add("ирине");
+                    list.Add("ирин");
+                    list.Add("ира");
+                    list.Add("ирочка");
+                    list.Add("арина");
+                    list.Add("ерина");
+                    list.Add("ярина");
+                    list.Add("рина");
+                }
             }
         }
         return list.OrderByDescending(x => x.Length).ToList();
@@ -431,7 +444,7 @@ public static class AliceCommandParser
         return false;
     }
 
-    private static bool IsCloseSingleWord(string text, string target)
+    internal static bool IsCloseSingleWord(string text, string target)
     {
         if (string.IsNullOrEmpty(text) || text.Contains(' ', StringComparison.Ordinal) || text.Length < 5)
             return false;

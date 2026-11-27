@@ -100,8 +100,7 @@ public sealed class WhisperLocalClient : IDisposable
                 return false;
 
             int port = PickFreeLoopbackPort();
-            int threads = Math.Clamp(Environment.ProcessorCount / 2, 2, 8);
-            const string prompt = "Команда для музыкального плеера OmniWave: включи, поставь, пауза, следующий, громче, тише, моя волна, вк микс, плейлист, таймер сна, радио, Linkin Park, The Weeknd, Miyagi, Кино, Скриптонит.";
+            int threads = Math.Clamp(Environment.ProcessorCount / 2, 4, 8);
 
             var psi = new ProcessStartInfo
             {
@@ -129,18 +128,15 @@ public sealed class WhisperLocalClient : IDisposable
             psi.ArgumentList.Add("-fa");
             psi.ArgumentList.Add("-ng");
             psi.ArgumentList.Add("-bs");
-            psi.ArgumentList.Add("3");
+            psi.ArgumentList.Add("1");
             psi.ArgumentList.Add("-bo");
-            psi.ArgumentList.Add("3");
+            psi.ArgumentList.Add("1");
             psi.ArgumentList.Add("-nth");
-            psi.ArgumentList.Add("0.55");
+            psi.ArgumentList.Add("0.65");
             psi.ArgumentList.Add("-et");
             psi.ArgumentList.Add("2.4");
             psi.ArgumentList.Add("-lpt");
             psi.ArgumentList.Add("-1.0");
-            psi.ArgumentList.Add("--carry-initial-prompt");
-            psi.ArgumentList.Add("--prompt");
-            psi.ArgumentList.Add(prompt);
 
             if (_models.IsWhisperVadReady())
             {
@@ -148,13 +144,13 @@ public sealed class WhisperLocalClient : IDisposable
                 psi.ArgumentList.Add("-vm");
                 psi.ArgumentList.Add(_models.WhisperVadBinPath);
                 psi.ArgumentList.Add("-vt");
-                psi.ArgumentList.Add("0.45");
+                psi.ArgumentList.Add("0.38");
                 psi.ArgumentList.Add("-vspd");
-                psi.ArgumentList.Add("180");
+                psi.ArgumentList.Add("160");
                 psi.ArgumentList.Add("-vsd");
                 psi.ArgumentList.Add("180");
                 psi.ArgumentList.Add("-vp");
-                psi.ArgumentList.Add("120");
+                psi.ArgumentList.Add("150");
             }
 
             var proc = Process.Start(psi);
@@ -246,8 +242,6 @@ public sealed class WhisperLocalClient : IDisposable
             form.Add(new StringContent("0.0"), "temperature");
             form.Add(new StringContent("0.2"), "temperature_inc");
             form.Add(new StringContent("ru"), "language");
-            if (!string.IsNullOrWhiteSpace(dynamicPrompt))
-                form.Add(new StringContent(dynamicPrompt), "prompt");
 
             using var resp = await _http.PostAsync($"http://127.0.0.1:{port}/inference", form, ct).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode)
@@ -324,8 +318,8 @@ public sealed class WhisperLocalClient : IDisposable
             ? (float)Math.Sqrt(activeSqSum / activeCount)
             : (float)Math.Sqrt(allSqSum / sampleCount);
 
-        float gain = (rms >= 0.004f && rms < 0.14f)
-            ? Math.Clamp(0.12f / rms, 1.0f, 5.5f)
+        float gain = (rms >= 0.0025f && rms < 0.14f)
+            ? Math.Clamp(0.12f / rms, 1.0f, 6.0f)
             : 1.0f;
 
         byte[] outBytes = new byte[sampleCount * 2];

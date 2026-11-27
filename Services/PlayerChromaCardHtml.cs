@@ -796,11 +796,6 @@ public static class PlayerChromaCardHtml
       align-items: center;
       gap: 5px;
     }
-    .ow-btn-grid-3 {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 5px;
-    }
     .ow-presets-box {
       border-radius: 8px;
       border: 1px solid var(--ow-hairline);
@@ -1720,7 +1715,7 @@ public static class PlayerChromaCardHtml
           wakeWordEnabled: false,
           wakeWords: 'омни, волна',
           whisperEnabled: true,
-          whisperModel: 'small-q5',
+          whisperModel: 'turbo-q5',
           ttsEnabled: true,
           ttsVoiceName: 'supertonic:F1',
           duckMusic: true,
@@ -1736,7 +1731,7 @@ public static class PlayerChromaCardHtml
           wakeWordEnabled: false,
           wakeWords: 'омни, волна',
           whisperEnabled: true,
-          whisperModel: 'small-q5',
+          whisperModel: 'turbo-q5',
           ttsEnabled: true,
           ttsVoiceName: 'supertonic:F1',
           duckMusic: true,
@@ -2314,7 +2309,7 @@ public static class PlayerChromaCardHtml
           wakeWordEnabled: Boolean(v.wakeWordEnabled),
           wakeWords: v.wakeWords || 'омни, волна',
           whisperEnabled: v.whisperEnabled !== false,
-          whisperModel: v.whisperModel || 'small-q5',
+          whisperModel: 'turbo-q5',
           ttsEnabled: v.ttsEnabled !== false,
           ttsVoiceName: v.ttsVoiceName || 'supertonic:F1',
           duckMusic: v.duckMusic !== false,
@@ -2401,10 +2396,7 @@ public static class PlayerChromaCardHtml
         const activeTtsVoice = (vd.ttsVoiceName && vd.ttsVoiceName.startsWith('supertonic:'))
           ? vd.ttsVoiceName
           : (ruVoices[0] ? ruVoices[0].id : 'supertonic:F1');
-        const activeWhisperModel = vd.whisperModel || 'small-q5';
-        const whisperInstallLabel = activeWhisperModel === 'turbo-q5'
-          ? 'Скачать Turbo v3 (547 МБ)'
-          : (activeWhisperModel === 'base' ? 'Скачать Base (141 МБ)' : 'Докачать Whisper');
+        const whisperInstallLabel = 'Скачать Whisper Turbo v3 (547 МБ)';
         const micDevs = Array.isArray(vc.inputDevices) && vc.inputDevices.length > 0
           ? vc.inputDevices
           : [{ index: -1, name: 'Микрофон по умолчанию' }];
@@ -2509,7 +2501,7 @@ public static class PlayerChromaCardHtml
             '<div class="ow-chips-wrap">' +
               '<span class="ow-badge-btn ' + (vc.voskReady ? 'is-ok' : '') + '" style="cursor:default">' + (vc.voskReady ? '✓ Vosk RU' : 'Vosk: нет') + '</span>' +
               '<span class="ow-badge-btn ' + (vc.vadReady ? 'is-ok' : '') + '" style="cursor:default">' + (vc.vadReady ? '✓ Silero VAD' : 'VAD: нет') + '</span>' +
-              '<span class="ow-badge-btn ' + (vc.whisperReady ? 'is-ok' : '') + '" style="cursor:default">' + (vc.whisperReady ? '✓ Whisper RU+EN' : 'Whisper: нет') + '</span>' +
+              '<span class="ow-badge-btn ' + (vc.whisperReady ? 'is-ok' : '') + '" style="cursor:default">' + (vc.whisperReady ? '✓ Whisper Turbo v3' : 'Whisper Turbo: нет') + '</span>' +
               '<span class="ow-badge-btn ' + (vc.neuralTtsReady ? 'is-ok' : '') + '" style="cursor:default">' + (vc.neuralTtsReady ? '✓ Нейро-голос' : 'Нейро-голос: нет') + '</span>' +
               (vc.diskUsageMb > 0 ? '<span class="ow-mono" style="font-size:10px;color:var(--ow-text-muted);margin-left:auto">' + vc.diskUsageMb + ' МБ</span>' : '') +
             '</div>' +
@@ -2557,12 +2549,7 @@ public static class PlayerChromaCardHtml
               '</div>' +
             '</div>' +
 
-            renderToggleRow('voiceWhisperEnabled', 'Уточнять треки через Whisper (RU+EN)', vd.whisperEnabled !== false) +
-            '<div class="ow-btn-grid-3">' +
-              '<button data-voice-model="turbo-q5" class="ow-chip ' + (activeWhisperModel === 'turbo-q5' ? 'is-active' : '') + '" style="justify-content:center" title="Whisper Large v3 Turbo Q5 (547 МБ, максимальная точность RU+EN)">Turbo v3</button>' +
-              '<button data-voice-model="small-q5" class="ow-chip ' + (activeWhisperModel === 'small-q5' ? 'is-active' : '') + '" style="justify-content:center" title="Whisper Small Q5 (181 МБ, оптимальный баланс)">Small Q5</button>' +
-              '<button data-voice-model="base" class="ow-chip ' + (activeWhisperModel === 'base' ? 'is-active' : '') + '" style="justify-content:center" title="Whisper Base (141 МБ, минимальная задержка)">Base</button>' +
-            '</div>' +
+            renderToggleRow('voiceWhisperEnabled', 'Уточнять треки через Whisper Turbo v3 (RU+EN)', vd.whisperEnabled !== false) +
 
             '<div style="display:flex;flex-direction:column;gap:6px">' +
               '<div class="ow-setting-row">' +
@@ -3021,7 +3008,7 @@ public static class PlayerChromaCardHtml
           wakeWordEnabled: Boolean(vd.wakeWordEnabled),
           wakeWords: vd.wakeWords || 'омни, волна',
           whisperEnabled: vd.whisperEnabled !== false,
-          whisperModel: vd.whisperModel || 'small-q5',
+          whisperModel: 'turbo-q5',
           ttsEnabled: vd.ttsEnabled !== false,
           ttsVoiceName: vd.ttsVoiceName || '',
           duckMusic: vd.duckMusic !== false,
@@ -3575,13 +3562,6 @@ public static class PlayerChromaCardHtml
               chip.classList.toggle('is-active', Number(chip.getAttribute('data-window-scale')) === scVal);
             });
             sendToHost('window.setScale', { scale: scVal });
-            return;
-          }
-
-          const vModelBtn = e.target.closest('[data-voice-model]');
-          if (vModelBtn) {
-            state.voiceDraft.whisperModel = vModelBtn.getAttribute('data-voice-model') || 'small-q5';
-            sendVoiceSave();
             return;
           }
 

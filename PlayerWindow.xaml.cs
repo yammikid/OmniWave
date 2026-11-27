@@ -182,8 +182,9 @@ public partial class PlayerWindow : Window
         _clipboardWatchTimer.Tick += async (_, _) => await OnClipboardWatchTickAsync();
 
         RestoreSavedGeometry();
+        _ = Task.Run(() => _voiceModels.CleanupObsoleteWhisperModels());
         _voiceFeedback = new VoiceFeedbackService(_voiceModels);
-        _voiceAssistant = new VoiceAssistantService(_voiceModels, _voiceFeedback, ExecuteAliceCommandAsync, BuildVoiceContextPrompt);
+        _voiceAssistant = new VoiceAssistantService(_voiceModels, _voiceFeedback, ExecuteAliceCommandAsync);
         _voiceAssistant.DuckingRequested += ducked => _player.SetDucking(ducked);
         _voiceAssistant.StatusChanged += status => Dispatcher.BeginInvoke(() => PostVoiceStateUpdate(status));
         _voiceAssistant.AudioLevelChanged += (lvl, live) => Dispatcher.BeginInvoke(() =>
@@ -4738,7 +4739,7 @@ public partial class PlayerWindow : Window
                 s.VoiceWakeWordEnabled = wakeOn;
                 s.VoiceWakeWords = wakeWords;
                 s.VoiceWhisperEnabled = whisperOn;
-                s.VoiceWhisperModel = whisperModel;
+                s.VoiceWhisperModel = "turbo-q5";
                 s.VoiceTtsEnabled = ttsOn;
                 s.VoiceTtsVoiceName = ttsVoice;
                 s.VoiceDuckMusic = duck;
@@ -4751,7 +4752,6 @@ public partial class PlayerWindow : Window
             _isSettingsApplying = false;
         }
 
-        _voiceAssistant?.ApplySettings(_settings.Current);
         PushVoiceStateUpdate();
     }
 
@@ -4783,35 +4783,6 @@ public partial class PlayerWindow : Window
         {
             if (duck) _player.SetDucking(false);
         }
-    }
-
-    private string BuildVoiceContextPrompt()
-    {
-        var sb = new StringBuilder("Команда OmniWave: включи, поставь, пауза, следующий, громче, тише, моя волна, вк микс, плейлист, радио");
-        try
-        {
-            var hints = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var tr in _library.GetFavorites())
-            {
-                if (!string.IsNullOrWhiteSpace(tr.Artist))
-                    hints.Add(tr.Artist.Trim());
-                if (hints.Count >= 12) break;
-            }
-            foreach (var pl in _library.GetPlaylists())
-            {
-                if (!string.IsNullOrWhiteSpace(pl.Name))
-                    hints.Add(pl.Name.Trim());
-                if (hints.Count >= 18) break;
-            }
-            foreach (var h in hints)
-            {
-                if (sb.Length + h.Length + 2 > 280) break;
-                sb.Append(", ").Append(h);
-            }
-            sb.Append('.');
-        }
-        catch { }
-        return sb.ToString();
     }
 
     private async Task OnSleepTimerTickAsync()

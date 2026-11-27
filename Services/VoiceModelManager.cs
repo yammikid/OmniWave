@@ -25,8 +25,6 @@ public sealed class VoiceModelManager
     public const string VoskModelRuUrl = "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip";
     public const string WhisperBinUrl = "https://github.com/ggml-org/whisper.cpp/releases/download/b5907/whisper-bin-x64.zip";
     public const string WhisperModelLargeV3TurboUrl = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin";
-    public const string WhisperModelSmallQ5Url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin";
-    public const string WhisperModelBaseUrl = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin";
     public const string OnnxRuntimeNuPkgUrl = "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/1.20.1/microsoft.ml.onnxruntime.directml.1.20.1.nupkg";
     public const string SupertonicBaseUrl = "https://huggingface.co/Supertone/supertonic-3/resolve/main/";
     public const string SileroVadOnnxUrl = "https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx";
@@ -101,29 +99,33 @@ public sealed class VoiceModelManager
 
     public string GetWhisperServerPath() => Path.Combine(WhisperBinDir, "whisper-server.exe");
 
-    public string GetWhisperModelPath(string variant)
-    {
-        string file = variant?.Trim().ToLowerInvariant() switch
-        {
-            "turbo-q5" => "ggml-large-v3-turbo-q5_0.bin",
-            "base" => "ggml-base.bin",
-            _ => "ggml-small-q5_1.bin"
-        };
-        return Path.Combine(WhisperModelDir, file);
-    }
+    public string GetWhisperModelPath(string? variant = null)
+        => Path.Combine(WhisperModelDir, "ggml-large-v3-turbo-q5_0.bin");
 
     public bool IsWhisperBinaryReady()
         => File.Exists(GetWhisperServerPath()) &&
            File.Exists(Path.Combine(WhisperBinDir, "whisper.dll")) &&
            File.Exists(Path.Combine(WhisperBinDir, "ggml.dll"));
 
-    public bool IsWhisperReady(string variant)
+    public bool IsWhisperReady(string? variant = null)
     {
-        var modelPath = GetWhisperModelPath(variant);
+        var modelPath = GetWhisperModelPath();
         return IsWhisperBinaryReady() &&
                File.Exists(modelPath) &&
-               new FileInfo(modelPath).Length > 10 * 1024 * 1024 &&
+               new FileInfo(modelPath).Length > 100 * 1024 * 1024 &&
                HasValidGgmlHeader(modelPath);
+    }
+
+    public void CleanupObsoleteWhisperModels()
+    {
+        try
+        {
+            if (!Directory.Exists(WhisperModelDir))
+                return;
+            foreach (var name in new[] { "ggml-small-q5_1.bin", "ggml-small-q5_1.bin.part", "ggml-base.bin", "ggml-base.bin.part" })
+                TryDeleteFile(Path.Combine(WhisperModelDir, name));
+        }
+        catch { }
     }
 
     public bool IsOnnxRuntimeReady()
@@ -201,14 +203,16 @@ public sealed class VoiceModelManager
                 if (!IsWhisperBinaryReady())
                     await DownloadAndExtractWhisperBinAsync(cts.Token);
 
-                string modelPath = GetWhisperModelPath(whisperVariant);
+                string modelPath = GetWhisperModelPath();
                 if (!File.Exists(modelPath) ||
-                    new FileInfo(modelPath).Length < 10 * 1024 * 1024 ||
+                    new FileInfo(modelPath).Length < 100 * 1024 * 1024 ||
                     !HasValidGgmlHeader(modelPath))
                 {
-                    await DownloadWhisperModelAsync(whisperVariant, cts.Token);
+                    await DownloadWhisperModelAsync(cts.Token);
                 }
             }
+
+            CleanupObsoleteWhisperModels();
 
             if (needVad && (!IsSileroVadReady() || !IsWhisperVadReady()))
             {
@@ -349,26 +353,23 @@ public sealed class VoiceModelManager
         }
     }
 
-    private async Task DownloadWhisperModelAsync(string variant, CancellationToken ct)
+    private async Task DownloadWhisperModelAsync(CancellationToken ct)
     {
-        string norm = (variant ?? "").Trim().ToLowerInvariant();
-        (string url, string label) = norm switch
-        {
-            "turbo-q5" => (WhisperModelLargeV3TurboUrl, "Скачивание Whisper Large v3 Turbo RU+EN (547 МБ)..."),
-            "base" => (WhisperModelBaseUrl, "Скачивание модели Whisper Base (141 МБ)..."),
-            _ => (WhisperModelSmallQ5Url, "Скачивание модели Whisper Small RU+EN (181 МБ)...")
-        };
-
-        string dest = GetWhisperModelPath(variant!);
+        string dest = GetWhisperModelPath();
         Directory.CreateDirectory(WhisperModelDir);
         string part = dest + ".part";
 
-        await DownloadFileWithProgressAsync(url, part, label, ct, HasValidGgmlHeader);
+        await DownloadFileWithProgressAsync(
+            WhisperModelLargeV3TurboUrl,
+            part,
+            "Скачивание Whisper Large v3 Turbo RU+EN (547 МБ)...",
+            ct,
+            HasValidGgmlHeader);
 
-        if (!File.Exists(part) || new FileInfo(part).Length < 10 * 1024 * 1024 || !HasValidGgmlHeader(part))
+        if (!File.Exists(part) || new FileInfo(part).Length < 100 * 1024 * 1024 || !HasValidGgmlHeader(part))
         {
             TryDeleteFile(part);
-            throw new InvalidDataException("Повреждённый файл модели Whisper (неверный заголовок или размер)");
+            throw new InvalidDataException("Повреждённый файл модели Whisper Turbo v3 (неверный заголовок или размер)");
         }
 
         File.Move(part, dest, overwrite: true);
