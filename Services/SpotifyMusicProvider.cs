@@ -1,13 +1,16 @@
 using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace DynamicIsland.Services;
 
 /// <summary>
-/// Интеграция Spotify Web API + Web Player (через встроенную сессию WebView2 с автообновлением sp_dc):
-/// - авторизация через встроенный браузер или ручную вставку Bearer / sp_dc cookie,
+/// Интеграция Spotify Web API + Web Player (через OAuth PKCE в системном браузере и/или сессию WebView2 с sp_dc):
+/// - авторизация через системный браузер по OAuth2 PKCE (127.0.0.1 loopback) или ручную вставку sp_dc / Bearer,
 /// - загрузка «Мне нравится» и всех плейлистов пользователя с обложками,
 /// - поиск треков и артистов, разбор публичных ссылок open.spotify.com (в том числе без входа),
 /// - воспроизведение через верифицированный кросс-площадочный подбор (TrackMatcher ±3 с).
@@ -17,7 +20,12 @@ public sealed class SpotifyMusicProvider : IMusicProvider, IDisposable
     public const string BrandColorHex = "#1DB954";
     public const string OpenSpotifyUrl = "https://open.spotify.com/";
     public const string LoginUrl = "https://accounts.spotify.com/login?continue=https%3A%2F%2Fopen.spotify.com%2F";
+    public const string DesktopPkceClientId = "65b708073fc0480ea92a077233ca87bd";
 
+    private const string PkceTokenEndpoint = "https://accounts.spotify.com/api/token";
+    private const string PkceScopes =
+        "user-read-private user-read-email user-library-read user-library-modify " +
+        "playlist-read-private playlist-read-collaborative playlist-modify-public playlist-modify-private";
     private const string ApiBase = "https://api.spotify.com/v1";
 
     private static readonly Regex SpotifyUrlRegex = new(
@@ -50,6 +58,7 @@ public sealed class SpotifyMusicProvider : IMusicProvider, IDisposable
 
     public bool IsAuthenticated =>
         !string.IsNullOrWhiteSpace(_settings.Current.SpotifyAccessToken) ||
+        !string.IsNullOrWhiteSpace(_settings.Current.SpotifyRefreshToken) ||
         !string.IsNullOrWhiteSpace(_settings.Current.SpotifySpDcCookie);
 
     public SpotifyMusicProvider(SettingsService settings, IEnumerable<IMusicProvider>? fallbackProviders = null)
@@ -123,11 +132,14 @@ public sealed class SpotifyMusicProvider : IMusicProvider, IDisposable
         string? hintUserName,
         string? hintUserId = null,
         string? clientToken = null,
+        string? refreshToken = null,
+        bool allowSaveOnRateLimit = false,
         CancellationToken ct = default)
     {
         var (parsedToken, parsedSpDc) = ExtractSessionInputs(rawTokenOrInput);
         string? token = parsedToken;
         string? spDc = !string.IsNullOrWhiteSpace(explicitSpDc) ? explicitSpDc.Trim() : parsedSpDc;
+        string? cleanRefresh = string.IsNullOrWhiteSpace(refreshToken) ? null : refreshToken.Trim();
         string? activeClientToken = !string.IsNullOrWhiteSpace(clientToken) ? clientToken.Trim() : _bridge.LastClientToken;
         long expMs = expiresUnixMs > 0
             ? expiresUnixMs
@@ -171,9 +183,16 @@ public sealed class SpotifyMusicProvider : IMusicProvider, IDisposable
             }
         }
 
-        if (status != HttpStatusCode.OK &&
-            status != HttpStatusCode.Unauthorized &&
-            !string.IsNullOrWhiteSpace(spDc))
+        if (status == HttpStatusCode.TooManyRequests &&
+            allowSaveOnRateLimit &&
+            !string.IsNullOrWhiteSpace(token))
+        {
+            _apiRateLimitedUntilUtc = DateTime.UtcNow.AddMinutes(2);
+            status = HttpStatusCode.OK;
+        }
+        else if (status != HttpStatusCode.OK &&
+                 status != HttpStatusCode.Unauthorized &&
+                 !string.IsNullOrWhiteSpace(spDc))
         {
             if (status == HttpStatusCode.TooManyRequests)
                 _apiRateLimitedUntilUtc = DateTime.UtcNow.AddMinutes(3);
@@ -209,7 +228,7 @@ public sealed class SpotifyMusicProvider : IMusicProvider, IDisposable
             return status switch
             {
                 HttpStatusCode.Unauthorized => (false, "Токен Spotify недействителен или истёк."),
-                HttpStatusCode.TooManyRequests => (false, "Spotify ограничил запросы Web API (429). Войдите через встроенный браузер или вставьте cookie sp_dc."),
+                HttpStatusCode.TooManyRequests => (false, "Spotify ограничил запросы Web API (429). Войдите через Мост браузера или вставьте cookie sp_dc."),
                 HttpStatusCode.Forbidden => (false, "Spotify отклонил запрос (403). Если сервис недоступен в регионе, включите прокси в Настройках."),
                 _ => (false, $"Не удалось подключить Spotify: {err ?? status.ToString()}")
             };
@@ -222,8 +241,24 @@ public sealed class SpotifyMusicProvider : IMusicProvider, IDisposable
         _settings.Update(s =>
         {
             s.SpotifyAccessToken = token;
-            s.SpotifyClientToken = activeClientToken;
-            s.SpotifySpDcCookie = spDc;
+            if (!string.IsNullOrWhiteSpace(cleanRefresh))
+            {
+                s.SpotifyRefreshToken = cleanRefresh;
+                s.SpotifySpDcCookie = null;
+                s.SpotifyClientToken = null;
+            }
+            else if (!string.IsNullOrWhiteSpace(spDc))
+            {
+                s.SpotifySpDcCookie = spDc;
+                s.SpotifyClientToken = activeClientToken;
+                s.SpotifyRefreshToken = null;
+            }
+            else
+            {
+                s.SpotifyClientToken = activeClientToken;
+                s.SpotifySpDcCookie = null;
+                s.SpotifyRefreshToken = null;
+            }
             s.SpotifyTokenExpiresUnixMs = expMs;
             s.SpotifyUserId = uid ?? "";
             s.SpotifyUserName = finalName;
@@ -240,6 +275,7 @@ public sealed class SpotifyMusicProvider : IMusicProvider, IDisposable
             s.SpotifyAccessToken = null;
             s.SpotifyClientToken = null;
             s.SpotifySpDcCookie = null;
+            s.SpotifyRefreshToken = null;
             s.SpotifyTokenExpiresUnixMs = 0;
             s.SpotifyUserId = null;
             s.SpotifyUserName = null;
@@ -304,8 +340,11 @@ public sealed class SpotifyMusicProvider : IMusicProvider, IDisposable
             return snap.SpotifyAccessToken;
         }
 
-        if (string.IsNullOrWhiteSpace(snap.SpotifySpDcCookie))
+        if (string.IsNullOrWhiteSpace(snap.SpotifyRefreshToken) &&
+            string.IsNullOrWhiteSpace(snap.SpotifySpDcCookie))
+        {
             return forceRefresh ? null : snap.SpotifyAccessToken;
+        }
 
         await _tokenLock.WaitAsync(ct);
         try
@@ -319,25 +358,44 @@ public sealed class SpotifyMusicProvider : IMusicProvider, IDisposable
                 return snap.SpotifyAccessToken;
             }
 
-            if (string.IsNullOrWhiteSpace(snap.SpotifySpDcCookie))
-                return forceRefresh ? null : snap.SpotifyAccessToken;
-
-            var acq = await _bridge.AcquireTokenAsync(snap.SpotifySpDcCookie, allowAnonymous: false, ct);
-            if (!acq.IsAnonymous && !string.IsNullOrWhiteSpace(acq.AccessToken))
+            if (!string.IsNullOrWhiteSpace(snap.SpotifyRefreshToken))
             {
-                long finalExp = acq.ExpiresUnixMs > 0
-                    ? acq.ExpiresUnixMs
-                    : DateTimeOffset.UtcNow.AddMinutes(55).ToUnixTimeMilliseconds();
-                _settings.Update(s =>
+                var pkce = await RefreshPkceTokenAsync(snap.SpotifyRefreshToken, ct);
+                if (!string.IsNullOrWhiteSpace(pkce.AccessToken))
                 {
-                    s.SpotifyAccessToken = acq.AccessToken;
-                    if (!string.IsNullOrWhiteSpace(acq.ClientToken))
-                        s.SpotifyClientToken = acq.ClientToken;
-                    s.SpotifyTokenExpiresUnixMs = finalExp;
-                    if (!string.IsNullOrWhiteSpace(acq.SpDcCookie))
-                        s.SpotifySpDcCookie = acq.SpDcCookie;
-                }, notify: false);
-                return acq.AccessToken;
+                    long pkceExp = pkce.ExpiresUnixMs > 0
+                        ? pkce.ExpiresUnixMs
+                        : DateTimeOffset.UtcNow.AddMinutes(55).ToUnixTimeMilliseconds();
+                    _settings.Update(s =>
+                    {
+                        s.SpotifyAccessToken = pkce.AccessToken;
+                        if (!string.IsNullOrWhiteSpace(pkce.RefreshToken))
+                            s.SpotifyRefreshToken = pkce.RefreshToken;
+                        s.SpotifyTokenExpiresUnixMs = pkceExp;
+                    }, notify: false);
+                    return pkce.AccessToken;
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(snap.SpotifySpDcCookie))
+            {
+                var acq = await _bridge.AcquireTokenAsync(snap.SpotifySpDcCookie, allowAnonymous: false, ct);
+                if (!acq.IsAnonymous && !string.IsNullOrWhiteSpace(acq.AccessToken))
+                {
+                    long finalExp = acq.ExpiresUnixMs > 0
+                        ? acq.ExpiresUnixMs
+                        : DateTimeOffset.UtcNow.AddMinutes(55).ToUnixTimeMilliseconds();
+                    _settings.Update(s =>
+                    {
+                        s.SpotifyAccessToken = acq.AccessToken;
+                        if (!string.IsNullOrWhiteSpace(acq.ClientToken))
+                            s.SpotifyClientToken = acq.ClientToken;
+                        s.SpotifyTokenExpiresUnixMs = finalExp;
+                        if (!string.IsNullOrWhiteSpace(acq.SpDcCookie))
+                            s.SpotifySpDcCookie = acq.SpDcCookie;
+                    }, notify: false);
+                    return acq.AccessToken;
+                }
             }
 
             return forceRefresh ? null : snap.SpotifyAccessToken;
@@ -346,6 +404,274 @@ public sealed class SpotifyMusicProvider : IMusicProvider, IDisposable
         {
             _tokenLock.Release();
         }
+    }
+
+    private async Task<(string? AccessToken, string? RefreshToken, long ExpiresUnixMs)> RefreshPkceTokenAsync(
+        string refreshToken,
+        CancellationToken ct)
+    {
+        try
+        {
+            using var content = new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["grant_type"] = "refresh_token",
+                ["client_id"] = DesktopPkceClientId,
+                ["refresh_token"] = refreshToken
+            });
+
+            using var resp = await _http.PostAsync(PkceTokenEndpoint, content, ct);
+            var json = await resp.Content.ReadAsStringAsync(ct);
+            if (!resp.IsSuccessStatusCode || string.IsNullOrWhiteSpace(json))
+                return (null, null, 0);
+
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            string? access = ReadString(root, "access_token");
+            string? nextRefresh = ReadString(root, "refresh_token");
+            int expiresIn = root.TryGetProperty("expires_in", out var expEl) && expEl.ValueKind == JsonValueKind.Number
+                ? expEl.GetInt32()
+                : 3600;
+            long expMs = DateTimeOffset.UtcNow.AddSeconds(Math.Clamp(expiresIn - 60, 60, 86400)).ToUnixTimeMilliseconds();
+            return (access, nextRefresh, expMs);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return (null, null, 0);
+        }
+    }
+
+    public async Task<(bool Ok, string Message)> AuthenticateViaSystemBrowserPkceAsync(
+        Action<string> openBrowserUrl,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(openBrowserUrl);
+
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        string redirectUri = $"http://127.0.0.1:{port}/login";
+
+        string codeVerifier = Base64UrlEncode(RandomNumberGenerator.GetBytes(48));
+        string codeChallenge = Base64UrlEncode(SHA256.HashData(Encoding.ASCII.GetBytes(codeVerifier)));
+        string expectedState = Base64UrlEncode(RandomNumberGenerator.GetBytes(18));
+
+        string authorizeUrl =
+            "https://accounts.spotify.com/authorize" +
+            $"?client_id={Uri.EscapeDataString(DesktopPkceClientId)}" +
+            "&response_type=code" +
+            $"&redirect_uri={Uri.EscapeDataString(redirectUri)}" +
+            "&code_challenge_method=S256" +
+            $"&code_challenge={Uri.EscapeDataString(codeChallenge)}" +
+            $"&state={Uri.EscapeDataString(expectedState)}" +
+            $"&scope={Uri.EscapeDataString(PkceScopes)}";
+
+        openBrowserUrl(authorizeUrl);
+
+        string? authCode = null;
+        string? authState = null;
+        string? authError = null;
+
+        using var waitCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        waitCts.CancelAfter(TimeSpan.FromSeconds(180));
+
+        try
+        {
+            while (!waitCts.IsCancellationRequested)
+            {
+                using var tcpClient = await listener.AcceptTcpClientAsync(waitCts.Token);
+                using var stream = tcpClient.GetStream();
+
+                var requestLine = await ReadHttpRequestLineAsync(stream, waitCts.Token);
+                if (string.IsNullOrWhiteSpace(requestLine))
+                    continue;
+
+                var parts = requestLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length < 2)
+                {
+                    await SendHttpTextResponseAsync(stream, "400 Bad Request", "text/plain; charset=utf-8", "Bad Request", waitCts.Token);
+                    continue;
+                }
+
+                string target = parts[1];
+                int qIdx = target.IndexOf('?');
+                string path = qIdx >= 0 ? target[..qIdx] : target;
+                string query = qIdx >= 0 ? target[(qIdx + 1)..] : "";
+
+                if (path.StartsWith("/favicon", StringComparison.OrdinalIgnoreCase))
+                {
+                    await SendHttpNoContentResponseAsync(stream, waitCts.Token);
+                    continue;
+                }
+
+                if (!string.Equals(path, "/login", StringComparison.OrdinalIgnoreCase))
+                {
+                    await SendHttpTextResponseAsync(stream, "404 Not Found", "text/plain; charset=utf-8", "Not Found", waitCts.Token);
+                    continue;
+                }
+
+                var queryParams = ParseQueryParameters(query);
+                queryParams.TryGetValue("code", out authCode);
+                queryParams.TryGetValue("state", out authState);
+                queryParams.TryGetValue("error", out authError);
+
+                bool isSuccessHtml = string.IsNullOrWhiteSpace(authError) && !string.IsNullOrWhiteSpace(authCode);
+                string html = BuildPkceCallbackHtml(isSuccessHtml, authError);
+                await SendHttpTextResponseAsync(stream, "200 OK", "text/html; charset=utf-8", html, waitCts.Token);
+                break;
+            }
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return (false, "Время ожидания входа Spotify истекло (3 мин). Нажмите «Войти» ещё раз.");
+        }
+        finally
+        {
+            try { listener.Stop(); } catch { }
+        }
+
+        if (!string.IsNullOrWhiteSpace(authError))
+            return (false, $"Spotify отклонил вход: {authError}");
+
+        if (!string.Equals(authState, expectedState, StringComparison.Ordinal))
+            return (false, "Ошибка проверки параметра state при входе Spotify.");
+
+        if (string.IsNullOrWhiteSpace(authCode))
+            return (false, "Spotify не передал код авторизации.");
+
+        try
+        {
+            using var tokenContent = new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["grant_type"] = "authorization_code",
+                ["client_id"] = DesktopPkceClientId,
+                ["code"] = authCode,
+                ["redirect_uri"] = redirectUri,
+                ["code_verifier"] = codeVerifier
+            });
+
+            using var tokenResp = await _http.PostAsync(PkceTokenEndpoint, tokenContent, ct);
+            var tokenJson = await tokenResp.Content.ReadAsStringAsync(ct);
+            if (!tokenResp.IsSuccessStatusCode || string.IsNullOrWhiteSpace(tokenJson))
+            {
+                return (false, $"Spotify отклонил обмен кода (HTTP {(int)tokenResp.StatusCode}). Проверьте прокси.");
+            }
+
+            using var doc = JsonDocument.Parse(tokenJson);
+            var root = doc.RootElement;
+            string? accessToken = ReadString(root, "access_token");
+            string? refreshToken = ReadString(root, "refresh_token");
+            int expiresIn = root.TryGetProperty("expires_in", out var expEl) && expEl.ValueKind == JsonValueKind.Number
+                ? expEl.GetInt32()
+                : 3600;
+            long expMs = DateTimeOffset.UtcNow.AddSeconds(Math.Clamp(expiresIn - 60, 60, 86400)).ToUnixTimeMilliseconds();
+
+            if (string.IsNullOrWhiteSpace(accessToken))
+                return (false, "Spotify не вернул access_token.");
+
+            return await VerifyAndSaveSessionAsync(
+                accessToken,
+                explicitSpDc: null,
+                expiresUnixMs: expMs,
+                hintUserName: null,
+                hintUserId: null,
+                clientToken: null,
+                refreshToken: refreshToken,
+                allowSaveOnRateLimit: true,
+                ct: ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return (false, $"Ошибка обмена кода Spotify: {ex.Message}");
+        }
+    }
+
+    private static string Base64UrlEncode(byte[] bytes)
+        => Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    private static async Task<string?> ReadHttpRequestLineAsync(NetworkStream stream, CancellationToken ct)
+    {
+        var buffer = new byte[8192];
+        int total = 0;
+        while (total < buffer.Length)
+        {
+            int read = await stream.ReadAsync(buffer.AsMemory(total, buffer.Length - total), ct);
+            if (read <= 0) break;
+            total += read;
+            var text = Encoding.ASCII.GetString(buffer, 0, total);
+            int nl = text.IndexOf('\n');
+            if (nl >= 0)
+                return text[..nl].TrimEnd('\r', '\n');
+        }
+        return total > 0 ? Encoding.ASCII.GetString(buffer, 0, total).Trim() : null;
+    }
+
+    private static async Task SendHttpNoContentResponseAsync(NetworkStream stream, CancellationToken ct)
+    {
+        var bytes = Encoding.ASCII.GetBytes("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
+        await stream.WriteAsync(bytes, ct);
+        await stream.FlushAsync(ct);
+    }
+
+    private static async Task SendHttpTextResponseAsync(
+        NetworkStream stream,
+        string status,
+        string contentType,
+        string body,
+        CancellationToken ct)
+    {
+        var bodyBytes = Encoding.UTF8.GetBytes(body);
+        var header =
+            $"HTTP/1.1 {status}\r\n" +
+            $"Content-Type: {contentType}\r\n" +
+            $"Content-Length: {bodyBytes.Length}\r\n" +
+            "Cache-Control: no-store\r\n" +
+            "Connection: close\r\n\r\n";
+        var headerBytes = Encoding.ASCII.GetBytes(header);
+        await stream.WriteAsync(headerBytes, ct);
+        await stream.WriteAsync(bodyBytes, ct);
+        await stream.FlushAsync(ct);
+    }
+
+    private static Dictionary<string, string> ParseQueryParameters(string query)
+    {
+        var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(query)) return dict;
+        foreach (var pair in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            int eq = pair.IndexOf('=');
+            if (eq <= 0) continue;
+            string k = Uri.UnescapeDataString(pair[..eq].Replace('+', ' '));
+            string v = Uri.UnescapeDataString(pair[(eq + 1)..].Replace('+', ' '));
+            dict[k] = v;
+        }
+        return dict;
+    }
+
+    private static string BuildPkceCallbackHtml(bool ok, string? error)
+    {
+        string border = ok ? "rgba(29,185,84,0.48)" : "rgba(251,113,133,0.48)";
+        string accent = ok ? "#4ADE80" : "#FB7185";
+        string title = ok ? "✓ Spotify подключён к OmniWave" : "Не удалось завершить вход в Spotify";
+        string sub = ok
+            ? "Авторизация прошла успешно — эту вкладку можно закрыть и вернуться в плеер."
+            : WebUtility.HtmlEncode(error ?? "Попробуйте войти ещё раз из настроек OmniWave.");
+
+        return
+            "<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\"><title>OmniWave • Spotify</title>" +
+            "<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0A0B0E;color:#F3F4F6;font-family:'Segoe UI',system-ui,sans-serif;}" +
+            $".card{{max-width:420px;padding:24px 26px;border-radius:16px;background:#14161D;border:1px solid {border};box-shadow:0 16px 40px rgba(0,0,0,0.45);text-align:center;}}" +
+            $"h1{{margin:0 0 10px;font-size:18px;color:{accent};font-weight:600;}}" +
+            "p{margin:0;font-size:13.5px;line-height:1.5;color:#9CA3AF;}</style></head>" +
+            $"<body><div class=\"card\"><h1>{title}</h1><p>{sub}</p></div>" +
+            "<script>setTimeout(function(){try{window.close();}catch(e){}},1200);</script></body></html>";
     }
 
     private async Task<JsonDocument?> GetAuthorizedJsonAsync(string url, CancellationToken ct)
@@ -999,6 +1325,126 @@ public sealed class SpotifyMusicProvider : IMusicProvider, IDisposable
 
         LastResolveError = $"Не удалось найти точный аудиопоток для «{track.Artist} — {track.Title}»";
         return null;
+    }
+
+    public async Task<(bool Ok, string Message)> RemoveTrackFromPlaylistAsync(
+        string externalPlaylistId,
+        TrackItem track,
+        CancellationToken ct = default)
+    {
+        if (!IsAuthenticated)
+            return (false, "Подключите аккаунт Spotify в Настройках.");
+
+        var trackId = ExtractSpotifyTrackId(track);
+        if (string.IsNullOrWhiteSpace(trackId))
+            return (false, "Не удалось определить Spotify Track ID.");
+
+        bool isLikes = string.Equals(externalPlaylistId, "spotify:likes", StringComparison.OrdinalIgnoreCase);
+        bool isPlaylist = externalPlaylistId.StartsWith("spotify:pl:", StringComparison.OrdinalIgnoreCase);
+        if (!isLikes && !isPlaylist)
+            return (false, "Некорректный идентификатор плейлиста Spotify.");
+
+        string apiUrl;
+        string? jsonBody = null;
+        if (isLikes)
+        {
+            apiUrl = $"{ApiBase}/me/tracks?ids={Uri.EscapeDataString(trackId)}";
+        }
+        else
+        {
+            var plId = externalPlaylistId["spotify:pl:".Length..];
+            apiUrl = $"{ApiBase}/playlists/{Uri.EscapeDataString(plId)}/tracks";
+            jsonBody = JsonSerializer.Serialize(new
+            {
+                tracks = new[] { new { uri = $"spotify:track:{trackId}" } }
+            });
+        }
+
+        if (DateTime.UtcNow < _apiRateLimitedUntilUtc && !string.IsNullOrWhiteSpace(_settings.Current.SpotifySpDcCookie))
+        {
+            int brStatus = await _bridge.SendAuthenticatedDeleteAsync(
+                apiUrl,
+                jsonBody,
+                _settings.Current.SpotifySpDcCookie!,
+                ct);
+            if (brStatus is >= 200 and < 300)
+                return (true, isLikes
+                    ? $"Удалено из Spotify «Мне нравится»: {track.Title}"
+                    : $"Удалено из плейлиста Spotify: {track.Title}");
+            if (brStatus == 403)
+                return (false, "Нет прав на удаление из этого плейлиста Spotify (возможно, плейлист чужой).");
+            return (false, $"Spotify отклонил удаление (HTTP {brStatus}).");
+        }
+
+        var token = await EnsureValidTokenAsync(false, ct);
+        if (!string.IsNullOrWhiteSpace(token))
+        {
+            for (int attempt = 0; attempt < 2; attempt++)
+            {
+                using var req = new HttpRequestMessage(HttpMethod.Delete, apiUrl);
+                ApplyWebApiHeaders(req, token, GetActiveClientToken());
+                if (jsonBody != null)
+                    req.Content = new StringContent(jsonBody, System.Text.Encoding.UTF8, "application/json");
+
+                using var resp = await _http.SendAsync(req, ct);
+                if (resp.StatusCode == HttpStatusCode.Unauthorized && attempt == 0)
+                {
+                    token = await EnsureValidTokenAsync(true, ct);
+                    if (string.IsNullOrWhiteSpace(token)) break;
+                    continue;
+                }
+
+                if ((int)resp.StatusCode is >= 200 and < 300)
+                {
+                    return (true, isLikes
+                        ? $"Удалено из Spotify «Мне нравится»: {track.Title}"
+                        : $"Удалено из плейлиста Spotify: {track.Title}");
+                }
+
+                if (resp.StatusCode == HttpStatusCode.TooManyRequests)
+                {
+                    _apiRateLimitedUntilUtc = DateTime.UtcNow.AddMinutes(3);
+                    break;
+                }
+
+                if (resp.StatusCode == HttpStatusCode.Forbidden)
+                    return (false, "Нет прав на удаление из этого плейлиста Spotify (возможно, плейлист чужой).");
+
+                return (false, $"Spotify вернул ошибку удаления (HTTP {(int)resp.StatusCode}).");
+            }
+        }
+
+        var spDc = _settings.Current.SpotifySpDcCookie;
+        if (!string.IsNullOrWhiteSpace(spDc))
+        {
+            int brStatus = await _bridge.SendAuthenticatedDeleteAsync(apiUrl, jsonBody, spDc, ct);
+            if (brStatus is >= 200 and < 300)
+                return (true, isLikes
+                    ? $"Удалено из Spotify «Мне нравится»: {track.Title}"
+                    : $"Удалено из плейлиста Spotify: {track.Title}");
+            if (brStatus == 403)
+                return (false, "Нет прав на удаление из этого плейлиста Spotify (возможно, плейлист чужой).");
+            return (false, $"Spotify отклонил удаление (HTTP {brStatus}).");
+        }
+
+        return (false, "Не удалось удалить трек из Spotify (нет активной сессии).");
+    }
+
+    private static string ExtractSpotifyTrackId(TrackItem track)
+    {
+        if (!string.IsNullOrWhiteSpace(track.Id) &&
+            !track.Id.Contains(':') &&
+            !track.Id.Contains('/') &&
+            track.Id.Length >= 10)
+        {
+            return track.Id.Trim();
+        }
+
+        var m = SpotifyUrlRegex.Match(track.PageUrl ?? "");
+        if (m.Success && string.Equals(m.Groups[1].Value, "track", StringComparison.OrdinalIgnoreCase))
+            return m.Groups[2].Value.Trim();
+
+        return "";
     }
 
     private TrackItem? ParseSpotifyTrack(

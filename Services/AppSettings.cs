@@ -10,16 +10,8 @@ public class AppSettings
         Environment.GetFolderPath(Environment.SpecialFolder.MyMusic),
         "OmniWave");
 
-    public double? AnchorCenterX { get; set; }
-    public double? AnchorTopY { get; set; }
     public bool StartMinimizedToIsland { get; set; }
     public bool AutoPauseOnSwitch { get; set; } = true;
-    public bool ShowEqualizerOnIsland { get; set; } = true;
-    public bool CoverGlowOnIsland { get; set; } = true;
-    public double IslandScale { get; set; } = 1.0;
-    public double IslandOpacity { get; set; } = 0.94;
-    public bool PinIslandExpanded { get; set; }
-    public bool IslandAlwaysOnTop { get; set; } = true;
     public int Volume { get; set; } = 80;
     public bool EqualizerEnabled { get; set; }
     public string EqualizerPreset { get; set; } = "Flat";
@@ -28,9 +20,16 @@ public class AppSettings
     public float PlaybackRate { get; set; } = 1.0f;
     public string DownloadFolder { get; set; } = DefaultDownloadFolder;
 
-    public bool EnableIslandAcrylic { get; set; } = true;
-    public bool EnableIslandMarquee { get; set; } = true;
-    public bool IsSidebarCollapsed { get; set; } = false;
+    public double? PlayerWindowLeft { get; set; }
+    public double? PlayerWindowTop { get; set; }
+    public bool IsCompactMode { get; set; }
+    public bool WindowAlwaysOnTop { get; set; } = true;
+    public bool MinimizeToTray { get; set; } = true;
+    public bool CompactEdgeAutoHide { get; set; } = true;
+    public string CompactDockedEdge { get; set; } = "";
+    public int ChromaIntensity { get; set; } = 67;
+    public int WindowOpacityPercent { get; set; } = 100;
+    public bool ZeroBlurMode { get; set; } = true;
 
     public string? VkAccessToken { get; set; }
     public string? VkCookieHeader { get; set; }
@@ -44,12 +43,12 @@ public class AppSettings
     public string? SpotifyAccessToken { get; set; }
     public string? SpotifyClientToken { get; set; }
     public string? SpotifySpDcCookie { get; set; }
+    public string? SpotifyRefreshToken { get; set; }
     public long SpotifyTokenExpiresUnixMs { get; set; }
     public string? SpotifyUserId { get; set; }
     public string? SpotifyUserName { get; set; }
 
-    public string IslandDockEdge { get; set; } = "None"; // "None", "Left", "Right", "Top", "Bottom"
-    public double? IslandDockOffset { get; set; }
+    public string? BridgeSecret { get; set; }
 
     public bool ProxyEnabled { get; set; }
     public string ProxyType { get; set; } = "http"; // "http", "https", "socks5", "socks4"
@@ -61,20 +60,25 @@ public class AppSettings
 
     public void Normalize()
     {
-        if (AnchorCenterX.HasValue && (double.IsNaN(AnchorCenterX.Value) || double.IsInfinity(AnchorCenterX.Value)))
-            AnchorCenterX = null;
-        if (AnchorTopY.HasValue && (double.IsNaN(AnchorTopY.Value) || double.IsInfinity(AnchorTopY.Value)))
-            AnchorTopY = null;
-        if (IslandDockOffset.HasValue && (double.IsNaN(IslandDockOffset.Value) || double.IsInfinity(IslandDockOffset.Value)))
-            IslandDockOffset = null;
+        if (PlayerWindowLeft.HasValue && (double.IsNaN(PlayerWindowLeft.Value) || double.IsInfinity(PlayerWindowLeft.Value)))
+            PlayerWindowLeft = null;
+        if (PlayerWindowTop.HasValue && (double.IsNaN(PlayerWindowTop.Value) || double.IsInfinity(PlayerWindowTop.Value)))
+            PlayerWindowTop = null;
 
-        IslandDockEdge = IslandDockEdge is "Left" or "Right" or "Top" or "Bottom" ? IslandDockEdge : "None";
+        var edge = (CompactDockedEdge ?? "").Trim().ToLowerInvariant();
+        CompactDockedEdge = edge is "left" or "right" or "top" ? edge : "";
+
+        ChromaIntensity = Math.Clamp(ChromaIntensity, 0, 100);
+        WindowOpacityPercent = Math.Clamp(WindowOpacityPercent, 75, 100);
+
         VkUserId = Math.Max(0, VkUserId);
         YandexUserId = Math.Max(0, YandexUserId);
         SpotifyTokenExpiresUnixMs = Math.Max(0, SpotifyTokenExpiresUnixMs);
 
-        IslandScale = Math.Clamp(double.IsNaN(IslandScale) ? 1.0 : IslandScale, 0.85, 1.30);
-        IslandOpacity = Math.Clamp(double.IsNaN(IslandOpacity) ? 0.94 : IslandOpacity, 0.50, 1.0);
+        BridgeSecret = (BridgeSecret ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(BridgeSecret) || BridgeSecret.Length < 24)
+            BridgeSecret = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+
         Volume = Math.Clamp(Volume, 0, 100);
         EqualizerPreset = string.IsNullOrWhiteSpace(EqualizerPreset) ? "Flat" : EqualizerPreset;
         EqualizerPreamp = Math.Clamp(float.IsNaN(EqualizerPreamp) ? 0f : EqualizerPreamp, -12f, 12f);

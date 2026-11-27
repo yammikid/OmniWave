@@ -19,9 +19,16 @@ namespace DynamicIsland.Services;
 public sealed class YandexMusicProvider : IMusicProvider, IDisposable
 {
     public const string BrandColorHex = "#FFCC00";
+    public const string OAuthClientId = "23cabbbdc6cd418abb4b39c32c41195d";
+    public const string OAuthClientSecret = "53bc75238f0c4d08a118e51fe9203300";
+    public const string FallbackDeviceClientId = "c0ebe342af7d48fbbbfcf2d2eedb8f9e";
+    public const string FallbackDeviceClientSecret = "ad0a908f0aa341a182a37ecd75bc319e";
     public const string OAuthAuthorizeUrl =
         "https://oauth.yandex.ru/authorize?response_type=token&client_id=23cabbbdc6cd418abb4b39c32c41195d";
 
+    private const string DeviceCodeEndpoint = "https://oauth.yandex.ru/device/code";
+    private const string TokenEndpoint = "https://oauth.yandex.ru/token";
+    private const string MobileXTokenEndpoint = "https://oauth.mobile.yandex.net/1/token";
     private const string ApiBase = "https://api.music.yandex.net";
     private const string ClientHeader = "YandexMusicAndroid/24023621";
     private const string SignSalt = "XGRlBW9FXlekgbPrRHuSiA";
@@ -154,6 +161,207 @@ public sealed class YandexMusicProvider : IMusicProvider, IDisposable
         {
             return (false, $"Ошибка проверки Яндекс Музыки: {ex.Message}");
         }
+    }
+
+    public sealed record YandexDeviceAuthSession(
+        string DeviceCode,
+        string UserCode,
+        string VerificationUrl,
+        int IntervalSeconds,
+        int ExpiresInSeconds,
+        string ClientId,
+        string ClientSecret);
+
+    public async Task<YandexDeviceAuthSession> StartDeviceAuthAsync(CancellationToken ct = default)
+    {
+        var rawIdentity = $"{Environment.MachineName}:{Environment.UserName}:OmniWave";
+        var deviceId = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(rawIdentity)))[..32].ToLowerInvariant();
+
+        var (primary, primaryErr) = await RequestDeviceCodeForClientAsync(
+            OAuthClientId,
+            OAuthClientSecret,
+            deviceId,
+            ct);
+        if (primary != null)
+            return primary;
+
+        var (fallback, fallbackErr) = await RequestDeviceCodeForClientAsync(
+            FallbackDeviceClientId,
+            FallbackDeviceClientSecret,
+            deviceId,
+            ct);
+        if (fallback != null)
+            return fallback;
+
+        throw new InvalidOperationException(
+            $"Не удалось запустить вход по коду Яндекс: {fallbackErr ?? primaryErr ?? "сервер отклонил запрос"}");
+    }
+
+    private async Task<(YandexDeviceAuthSession? Session, string? Error)> RequestDeviceCodeForClientAsync(
+        string clientId,
+        string clientSecret,
+        string deviceId,
+        CancellationToken ct)
+    {
+        try
+        {
+            using var content = new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["client_id"] = clientId,
+                ["device_id"] = deviceId,
+                ["device_name"] = "OmniWave"
+            });
+
+            using var resp = await _http.PostAsync(DeviceCodeEndpoint, content, ct);
+            var json = await resp.Content.ReadAsStringAsync(ct);
+            if (string.IsNullOrWhiteSpace(json))
+                return (null, $"HTTP {(int)resp.StatusCode}");
+
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            if (!resp.IsSuccessStatusCode || !root.TryGetProperty("device_code", out var dcEl))
+            {
+                var err = ReadFirstNonEmpty(root, "error_description", "error") ?? $"HTTP {(int)resp.StatusCode}";
+                return (null, err);
+            }
+
+            string deviceCode = dcEl.GetString() ?? "";
+            string userCode = ReadFirstNonEmpty(root, "user_code") ?? "";
+            string verifyUrl = ReadFirstNonEmpty(root, "verification_url") ?? "https://ya.ru/device";
+            if (string.IsNullOrWhiteSpace(deviceCode) || string.IsNullOrWhiteSpace(userCode))
+                return (null, "Пустой device_code или user_code");
+
+            int interval = ParseFlexibleInt(root, "interval", 5);
+            int expiresIn = ParseFlexibleInt(root, "expires_in", 300);
+
+            return (new YandexDeviceAuthSession(
+                DeviceCode: deviceCode,
+                UserCode: userCode,
+                VerificationUrl: verifyUrl,
+                IntervalSeconds: Math.Clamp(interval, 3, 15),
+                ExpiresInSeconds: Math.Clamp(expiresIn, 60, 900),
+                ClientId: clientId,
+                ClientSecret: clientSecret), null);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return (null, ex.Message);
+        }
+    }
+
+    public async Task<string> PollDeviceTokenAsync(YandexDeviceAuthSession session, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+
+        var deadline = DateTime.UtcNow.AddSeconds(Math.Clamp(session.ExpiresInSeconds, 60, 900));
+        int delaySeconds = Math.Clamp(session.IntervalSeconds, 3, 10);
+
+        while (DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(delaySeconds), ct);
+
+            using var content = new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["grant_type"] = "device_code",
+                ["code"] = session.DeviceCode,
+                ["client_id"] = session.ClientId,
+                ["client_secret"] = session.ClientSecret
+            });
+
+            using var resp = await _http.PostAsync(TokenEndpoint, content, ct);
+            var json = await resp.Content.ReadAsStringAsync(ct);
+            if (string.IsNullOrWhiteSpace(json))
+                continue;
+
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            if (root.TryGetProperty("error", out var errEl))
+            {
+                var err = errEl.GetString() ?? "";
+                if (string.Equals(err, "authorization_pending", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (string.Equals(err, "slow_down", StringComparison.OrdinalIgnoreCase))
+                {
+                    delaySeconds = Math.Min(delaySeconds + 2, 15);
+                    continue;
+                }
+                if (string.Equals(err, "expired_token", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("Код подтверждения Яндекс истёк. Нажмите «Войти» ещё раз.");
+                if (string.Equals(err, "access_denied", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("Пользователь отклонил доступ для OmniWave в Яндексе.");
+
+                var desc = ReadFirstNonEmpty(root, "error_description") ?? err;
+                throw new InvalidOperationException($"Ошибка Яндекс OAuth: {desc}");
+            }
+
+            var accessToken = ReadFirstNonEmpty(root, "access_token");
+            if (string.IsNullOrWhiteSpace(accessToken))
+                continue;
+
+            if (string.Equals(session.ClientId, OAuthClientId, StringComparison.OrdinalIgnoreCase))
+                return accessToken;
+
+            try
+            {
+                using var checkDoc = await GetJsonAsync("/account/status", accessToken, ct);
+                if (checkDoc != null &&
+                    checkDoc.RootElement.TryGetProperty("result", out var res) &&
+                    res.TryGetProperty("account", out _))
+                {
+                    return accessToken;
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch { }
+
+            return await ExchangeMobileXTokenAsync(accessToken, ct);
+        }
+
+        throw new TimeoutException("Истекло время ожидания подтверждения входа в Яндекс.");
+    }
+
+    private async Task<string> ExchangeMobileXTokenAsync(string xToken, CancellationToken ct)
+    {
+        using var content = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["grant_type"] = "x-token",
+            ["access_token"] = xToken,
+            ["client_id"] = OAuthClientId,
+            ["client_secret"] = OAuthClientSecret
+        });
+
+        using var resp = await _http.PostAsync(MobileXTokenEndpoint, content, ct);
+        var json = await resp.Content.ReadAsStringAsync(ct);
+        if (!string.IsNullOrWhiteSpace(json))
+        {
+            using var doc = JsonDocument.Parse(json);
+            var musicToken = ReadFirstNonEmpty(doc.RootElement, "access_token");
+            if (!string.IsNullOrWhiteSpace(musicToken))
+                return musicToken;
+
+            var err = ReadFirstNonEmpty(doc.RootElement, "error_description", "error");
+            if (!string.IsNullOrWhiteSpace(err))
+                throw new InvalidOperationException($"Не удалось обменять токен Яндекс Музыки: {err}");
+        }
+
+        throw new InvalidOperationException($"Не удалось обменять токен Яндекс Музыки (HTTP {(int)resp.StatusCode}).");
+    }
+
+    private static int ParseFlexibleInt(JsonElement obj, string prop, int fallback)
+    {
+        if (!obj.TryGetProperty(prop, out var el)) return fallback;
+        if (el.ValueKind == JsonValueKind.Number && el.TryGetInt32(out int n)) return n;
+        if (el.ValueKind == JsonValueKind.String && int.TryParse(el.GetString(), out int s)) return s;
+        return fallback;
     }
 
     public void Disconnect()
@@ -1313,6 +1521,99 @@ public sealed class YandexMusicProvider : IMusicProvider, IDisposable
         }
 
         return new YandexTransferResult(added > 0 || alreadyLiked > 0, added, alreadyLiked, notFound, msg);
+    }
+
+    public async Task<(bool Ok, string Message)> RemoveTrackFromPlaylistAsync(
+        string externalPlaylistId,
+        TrackItem track,
+        CancellationToken ct = default)
+    {
+        if (!IsAuthenticated)
+            return (false, "Подключите аккаунт Яндекс Музыки в Настройках.");
+
+        if (!TryExtractYandexTrackAndAlbumId(track, out var tid, out var aid) || string.IsNullOrWhiteSpace(tid))
+            return (false, "Не удалось определить ID трека Яндекс Музыки.");
+
+        var token = _settings.Current.YandexToken!;
+        var uid = _settings.Current.YandexUserId;
+
+        try
+        {
+            if (string.Equals(externalPlaylistId, "likes", StringComparison.OrdinalIgnoreCase))
+            {
+                var spec = !string.IsNullOrWhiteSpace(aid) ? $"{tid}:{aid}" : tid;
+                var form = $"track-ids={Uri.EscapeDataString(spec)}";
+                using var respDoc = await PostFormJsonAsync($"/users/{uid}/likes/tracks/remove", form, token, ct);
+                return respDoc != null
+                    ? (true, $"Удалено из Яндекс «Мне нравится»: {track.Title}")
+                    : (false, "Яндекс Музыка не подтвердила удаление трека.");
+            }
+
+            if (!long.TryParse(externalPlaylistId, out long kind) || kind < 0)
+                return (false, "Некорректный идентификатор плейлиста Яндекс Музыки.");
+
+            using var detailDoc = await GetJsonAsync($"/users/{uid}/playlists/{kind}", token, ct);
+            if (detailDoc == null || !detailDoc.RootElement.TryGetProperty("result", out var plDetail))
+                return (false, "Не удалось получить актуальную ревизию плейлиста Яндекс Музыки.");
+
+            if (plDetail.TryGetProperty("owner", out var ownerEl))
+            {
+                var ownerUidStr = ReadStringOrNumber(ownerEl, "uid");
+                if (long.TryParse(ownerUidStr, out long ownerUid) && ownerUid != uid)
+                    return (false, "Нельзя редактировать чужой плейлист Яндекс Музыки.");
+            }
+
+            long revision = plDetail.TryGetProperty("revision", out var revEl) && revEl.ValueKind == JsonValueKind.Number
+                ? revEl.GetInt64()
+                : -1;
+            if (revision < 0)
+                return (false, "Яндекс Музыка не вернула revision плейлиста.");
+
+            if (!plDetail.TryGetProperty("tracks", out var tracksArr) || tracksArr.ValueKind != JsonValueKind.Array)
+                return (false, "Плейлист Яндекс Музыки пуст или недоступен.");
+
+            int targetIdx = -1;
+            int idx = 0;
+            foreach (var entry in tracksArr.EnumerateArray())
+            {
+                var entryId = ReadStringOrNumber(entry, "id");
+                if (string.IsNullOrWhiteSpace(entryId) &&
+                    entry.TryGetProperty("track", out var innerTr) &&
+                    innerTr.ValueKind == JsonValueKind.Object)
+                {
+                    entryId = ReadStringOrNumber(innerTr, "id");
+                }
+
+                if (string.Equals(entryId, tid, StringComparison.Ordinal))
+                {
+                    targetIdx = idx;
+                    break;
+                }
+                idx++;
+            }
+
+            if (targetIdx < 0)
+                return (true, $"Трек «{track.Title}» уже отсутствует в плейлисте Яндекс Музыки.");
+
+            string diff = $"[{{\"op\":\"delete\",\"from\":{targetIdx},\"to\":{targetIdx + 1}}}]";
+            string formBody = $"kind={kind}&revision={revision}&diff={Uri.EscapeDataString(diff)}";
+            using var changeDoc = await PostFormJsonAsync($"/users/{uid}/playlists/{kind}/change", formBody, token, ct);
+            return changeDoc != null
+                ? (true, $"Удалено из плейлиста Яндекс Музыки: {track.Title}")
+                : (false, "Не удалось сохранить удаление в плейлисте Яндекс Музыки.");
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+        {
+            return (false, $"Нет доступа к изменению плейлиста Яндекс ({(int)ex.StatusCode}).");
+        }
+        catch (Exception ex)
+        {
+            return (false, $"Ошибка синхронизации удаления с Яндекс: {ex.Message}");
+        }
     }
 
     private async Task<TrackItem?> FindBestYandexMatchAsync(TrackItem target, CancellationToken ct)

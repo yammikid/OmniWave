@@ -8,7 +8,6 @@ using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
-using System.Windows.Media.Effects;
 
 namespace DynamicIsland.Services;
 
@@ -448,32 +447,26 @@ public static class AppUpdateService
         var win = new Window
         {
             Title = "Доступно обновление OmniWave",
-            Width = 430,
+            Width = 408,
             SizeToContent = SizeToContent.Height,
             WindowStyle = WindowStyle.None,
-            AllowsTransparency = true,
-            Background = Brushes.Transparent,
+            AllowsTransparency = false,
+            Background = new SolidColorBrush(Color.FromRgb(17, 18, 22)),
             ResizeMode = ResizeMode.NoResize,
             WindowStartupLocation = WindowStartupLocation.CenterScreen,
             Topmost = true,
             ShowInTaskbar = false
         };
+        win.SourceInitialized += (_, _) => WindowBlurHelper.ApplyChromaWindowStyle(win, 14);
+        win.SizeChanged += (_, _) => WindowBlurHelper.UpdateWin10RoundedRegion(win, 14);
 
         var rootBorder = new Border
         {
-            Margin = new Thickness(14),
-            Background = new SolidColorBrush(Color.FromArgb(247, 18, 19, 26)),
-            BorderBrush = new SolidColorBrush(Color.FromArgb(46, 255, 255, 255)),
+            Background = new SolidColorBrush(Color.FromRgb(17, 18, 22)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(35, 38, 47)),
             BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(20),
-            Padding = new Thickness(20, 18, 20, 18),
-            Effect = new DropShadowEffect
-            {
-                Color = Colors.Black,
-                BlurRadius = 26,
-                ShadowDepth = 8,
-                Opacity = 0.72
-            }
+            CornerRadius = new CornerRadius(WindowBlurHelper.IsWindows11OrLater ? 8 : 14),
+            Padding = new Thickness(20, 18, 20, 18)
         };
 
         var stack = new StackPanel();

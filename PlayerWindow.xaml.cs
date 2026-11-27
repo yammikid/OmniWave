@@ -1,8 +1,11 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
 using System.Windows;
-using System.Windows.Media;
+using System.Windows.Input;
+using System.Windows.Interop;
+using System.Windows.Threading;
 using DynamicIsland.Services;
 using Microsoft.Web.WebView2.Wpf;
 
@@ -10,16 +13,33 @@ namespace DynamicIsland;
 
 public partial class PlayerWindow : Window
 {
+    public const double ExpandedWidth = 400.0;
+    public const double ExpandedHeight = 604.0;
+    public const double CompactWidth = 348.0;
+    public const double CompactHeight = 84.0;
+    private const double EdgePeekPx = 10.0;
+    private const double EdgeSnapThresholdPx = 22.0;
+    private const double EdgeAnimDurationMs = 210.0;
+    private const int WM_ENTERSIZEMOVE = 0x0231;
+    private const int WM_EXITSIZEMOVE = 0x0232;
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
+    private sealed class SearchTrackGroup
+    {
+        public required string GroupKey { get; init; }
+        public required List<TrackItem> Variants { get; init; }
+        public int SelectedIndex { get; set; }
+        public TrackItem ActiveTrack => Variants[Math.Clamp(SelectedIndex, 0, Variants.Count - 1)];
+    }
+
     private readonly List<IMusicProvider> _providers;
     private readonly AudioPlayerService _player;
     private readonly MediaControllerService _controller;
     private readonly LibraryService _library;
-    private readonly LyricsService _lyrics;
     private readonly SettingsService _settings;
     private readonly DownloadService _downloads;
     private readonly YandexMusicProvider _yandex;
@@ -28,20 +48,38 @@ public partial class PlayerWindow : Window
     private readonly Action _openSettingsAction;
     private readonly Action _openAccountsAction;
     private readonly Func<Task<string>> _syncAccountsAction;
+    private readonly Action _requestExitAction;
+    private readonly Action _trayStateSyncAction;
+    private readonly uint _restoreMsgId;
 
     private readonly Dictionary<string, TrackItem> _trackIndex = new(StringComparer.OrdinalIgnoreCase);
+    private readonly DispatcherTimer _posSaveTimer;
+    private readonly DispatcherTimer _telemetryTimer;
+    private readonly DispatcherTimer _suspendTimer;
+    private readonly DispatcherTimer _edgeAnimTimer;
+    private readonly DispatcherTimer _edgeHoverTimer;
+    private readonly DispatcherTimer _clipboardWatchTimer;
+    private readonly Process _selfProcess = Process.GetCurrentProcess();
 
+    private HwndSource? _hwndSource;
+    private BrowserBridgeServer? _browserBridge;
     private CancellationTokenSource? _searchCts;
-    private CancellationTokenSource? _lyricsCts;
+    private CancellationTokenSource? _proxyTestCts;
+    private CancellationTokenSource? _authFlowCts;
+    private List<SearchTrackGroup> _currentSearchGroups = new();
+    private List<TrackItem> _rawSearchTracks = new();
     private List<TrackItem> _currentResults = new();
     private List<TrackItem> _favorites = new();
 
     private string _lastQuery = "";
     private string _activeSearchFilter = "all";
+    private string _activeTab = "search";
     private int _currentLimitPerProvider = 10;
     private int _savedVolumeBeforeMute = 80;
     private bool _webViewReady;
     private bool _isPlaying;
+    private bool _isUiSuspended;
+    private bool _isWebViewSuspended;
     private bool _isExportingToYandex;
     private string? _lastExternalVisualKey;
     private TrackItem? _externalActiveTrack;
@@ -49,16 +87,38 @@ public partial class PlayerWindow : Window
     private long _totalMs;
     private long _lastPosPushTick;
     private string? _lastCoverDataUrl;
-    private Color _lastAccentColor = Color.FromRgb(255, 204, 0);
+    private bool _isCompactMode;
+    private bool _isApplyingGeometry;
+    private bool _isSettingsApplying;
+    private string _dockedEdge = "";
+    private bool _isEdgeCollapsed;
+    private bool _isDraggingWindow;
+    private bool _isWebPointerHeld;
+    private long _edgeLastHoverTick;
+    private long _edgeSuppressExpandUntilTick;
+    private double _animStartLeft;
+    private double _animStartTop;
+    private double _animTargetLeft;
+    private double _animTargetTop;
+    private long _animStartTick;
+    private string? _pendingBrowserAuthProvider;
+    private string _clipboardBeforeAuth = "";
+    private string _lastTestedClipboard = "";
+    private DateTime _clipboardWatchDeadlineUtc = DateTime.MinValue;
+    private bool _clipboardWatchBusy;
+    private bool _isAuthBusy;
+    private bool _systemCheckInitialized;
+    private TimeSpan _lastCpuTime;
+    private DateTime _lastCpuSampleUtc = DateTime.UtcNow;
 
     public bool AllowClose { get; set; }
+    public bool IsCompactMode => _isCompactMode;
 
     public PlayerWindow(
         List<IMusicProvider> providers,
         AudioPlayerService player,
         MediaControllerService controller,
         LibraryService library,
-        LyricsService lyrics,
         SettingsService settings,
         DownloadService downloads,
         YandexMusicProvider yandex,
@@ -66,14 +126,16 @@ public partial class PlayerWindow : Window
         SpotifyMusicProvider spotify,
         Action openSettingsAction,
         Action openAccountsAction,
-        Func<Task<string>> syncAccountsAction)
+        Func<Task<string>> syncAccountsAction,
+        Action requestExitAction,
+        Action trayStateSyncAction,
+        uint restoreMsgId = 0)
     {
         InitializeComponent();
         _providers = providers;
         _player = player;
         _controller = controller;
         _library = library;
-        _lyrics = lyrics;
         _settings = settings;
         _downloads = downloads;
         _yandex = yandex;
@@ -82,30 +144,201 @@ public partial class PlayerWindow : Window
         _openSettingsAction = openSettingsAction;
         _openAccountsAction = openAccountsAction;
         _syncAccountsAction = syncAccountsAction;
+        _requestExitAction = requestExitAction;
+        _trayStateSyncAction = trayStateSyncAction;
+        _restoreMsgId = restoreMsgId;
 
+        _posSaveTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(350) };
+        _posSaveTimer.Tick += (_, _) =>
+        {
+            _posSaveTimer.Stop();
+            SaveCurrentWindowPosition();
+        };
+
+        _lastCpuTime = _selfProcess.TotalProcessorTime;
+        _lastCpuSampleUtc = DateTime.UtcNow;
+        _telemetryTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(3000) };
+        _telemetryTimer.Tick += (_, _) => PushTelemetrySample();
+
+        _suspendTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
+        _suspendTimer.Tick += async (_, _) => await SuspendWebViewInTrayAsync();
+
+        _edgeAnimTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
+        _edgeAnimTimer.Tick += (_, _) => OnEdgeAnimTick();
+
+        _edgeHoverTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(85) };
+        _edgeHoverTimer.Tick += (_, _) => OnEdgeHoverTick();
+
+        _clipboardWatchTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(450) };
+        _clipboardWatchTimer.Tick += async (_, _) => await OnClipboardWatchTickAsync();
+
+        _browserBridge = new BrowserBridgeServer(
+            _settings,
+            payload => Dispatcher.InvokeAsync(() => OnBridgeAuthReceivedAsync(payload)).Task.Unwrap());
+        _browserBridge.StatusChanged += _ => Dispatcher.BeginInvoke(() =>
+        {
+            if (!_isUiSuspended) PushAccountsUpdate();
+        });
+
+        RestoreSavedGeometry();
+
+        PreviewKeyDown += PlayerWindow_PreviewKeyDown;
+        Activated += PlayerWindow_Activated;
         Loaded += async (_, _) => await InitWebViewAsync();
-        StateChanged += (_, _) => PostToWeb("windowState", new { maximized = WindowState == WindowState.Maximized });
+        LocationChanged += (_, _) =>
+        {
+            if (_isApplyingGeometry || _isEdgeCollapsed || !IsVisible || WindowState == WindowState.Minimized) return;
+            _posSaveTimer.Stop();
+            _posSaveTimer.Start();
+        };
+        SizeChanged += (_, _) =>
+        {
+            WindowBlurHelper.UpdateWin10RoundedRegion(this, _isCompactMode ? 12 : 16);
+        };
+        IsVisibleChanged += (_, _) => UpdateSuspensionState();
+        StateChanged += (_, _) =>
+        {
+            if (WindowState == WindowState.Maximized)
+                WindowState = WindowState.Normal;
+            UpdateSuspensionState();
+            if (!_isUiSuspended && !_isWebViewSuspended)
+                PostToWeb("windowState", new { maximized = false, compact = _isCompactMode });
+        };
 
         _player.PositionChanged += OnPositionChanged;
         _player.PlaybackStateChanged += OnPlaybackStateChanged;
         _player.TrackChanged += OnTrackChanged;
-        _player.RepeatModeChanged += mode => Dispatcher.BeginInvoke(() =>
-            PostToWeb("repeatMode", new { mode = (int)mode }));
-        _player.StatusMessage += msg => Dispatcher.BeginInvoke(() =>
-            PostToWeb("status", new { message = msg }));
-        _player.QueueChanged += () => Dispatcher.BeginInvoke(PushQueueUpdate);
-        _player.VolumeChanged += v => Dispatcher.BeginInvoke(() =>
-            PostToWeb("volume", new { volume = v }));
-        _library.LibraryChanged += () => Dispatcher.BeginInvoke(PushLibraryUpdate);
-        _downloads.DownloadCompleted += _ => Dispatcher.BeginInvoke(SyncAllDownloadedStates);
-        _settings.SettingsChanged += _ => Dispatcher.BeginInvoke(PushAccountsUpdate);
-        _controller.StateChanged += state => Dispatcher.BeginInvoke(() => OnControllerStateChanged(state));
+        _player.RepeatModeChanged += OnRepeatModeChanged;
+        _player.ShuffleChanged += OnShuffleChanged;
+        _player.StatusMessage += OnStatusMessage;
+        _player.QueueChanged += OnQueueChanged;
+        _player.VolumeChanged += OnVolumeChanged;
+        _library.LibraryChanged += OnLibraryChanged;
+        _downloads.DownloadCompleted += OnDownloadCompleted;
+        _settings.SettingsChanged += OnSettingsChanged;
+        _controller.StateChanged += OnMediaControllerStateChanged;
     }
+
+    private void OnRepeatModeChanged(RepeatMode mode) => Dispatcher.BeginInvoke(() =>
+    {
+        if (!_isUiSuspended) PostToWeb("repeatMode", new { mode = (int)mode });
+    });
+
+    private void OnShuffleChanged(bool enabled) => Dispatcher.BeginInvoke(() =>
+    {
+        if (!_isUiSuspended) PostToWeb("shuffleState", new { enabled });
+    });
+
+    private void OnStatusMessage(string msg) => Dispatcher.BeginInvoke(() =>
+    {
+        if (!_isUiSuspended) PostToWeb("status", new { message = msg });
+    });
+
+    private void OnQueueChanged() => Dispatcher.BeginInvoke(() =>
+    {
+        if (!_isUiSuspended) PushQueueUpdate();
+    });
+
+    private void OnVolumeChanged(int v) => Dispatcher.BeginInvoke(() =>
+    {
+        if (!_isUiSuspended) PostToWeb("volume", new { volume = v });
+    });
+
+    private void OnLibraryChanged() => Dispatcher.BeginInvoke(() =>
+    {
+        if (!_isUiSuspended) PushLibraryUpdate();
+    });
+
+    private void OnDownloadCompleted(TrackItem _) => Dispatcher.BeginInvoke(() =>
+    {
+        if (!_isUiSuspended) SyncAllDownloadedStates();
+    });
+
+    private void OnSettingsChanged(AppSettings _) => Dispatcher.BeginInvoke(() =>
+    {
+        ApplyWindowSettingsFromConfig();
+        if (!_isUiSuspended)
+        {
+            PushAccountsUpdate();
+            PushWindowSettingsUpdate();
+        }
+    });
+
+    private void OnMediaControllerStateChanged(MediaState state) => Dispatcher.BeginInvoke(() => OnControllerStateChanged(state));
 
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);
-        WindowBlurHelper.ApplyDarkAcrylic(this, true, extendFrame: true);
+        var hwnd = new WindowInteropHelper(this).Handle;
+        if (hwnd != IntPtr.Zero)
+        {
+            _hwndSource = HwndSource.FromHwnd(hwnd);
+            _hwndSource?.AddHook(WindowHwndProc);
+        }
+        WindowBlurHelper.ApplyChromaWindowStyle(this, _isCompactMode ? 12 : 16);
+        Dispatcher.BeginInvoke(DispatcherPriority.Render, () => WindowBlurHelper.UpdateWin10RoundedRegion(this, _isCompactMode ? 12 : 16));
+        WindowBlurHelper.SetWindowAlpha(this, _settings.Current.WindowOpacityPercent / 100.0);
+        Topmost = _settings.Current.WindowAlwaysOnTop;
+    }
+
+    protected override void OnDpiChanged(DpiScale oldDpi, DpiScale newDpi)
+    {
+        base.OnDpiChanged(oldDpi, newDpi);
+        WindowBlurHelper.UpdateWin10RoundedRegion(this, _isCompactMode ? 12 : 16);
+        if (_isApplyingGeometry || !IsLoaded) return;
+
+        if (_isCompactMode && !string.IsNullOrEmpty(_dockedEdge))
+        {
+            var work = WindowBlurHelper.GetMonitorWorkAreaForWindow(this);
+            var (el, et) = ComputeEdgePosition(_dockedEdge, _isEdgeCollapsed, work);
+            _isApplyingGeometry = true;
+            try
+            {
+                Left = el;
+                Top = et;
+            }
+            finally
+            {
+                _isApplyingGeometry = false;
+            }
+            return;
+        }
+
+        var (clampedLeft, clampedTop) = WindowBlurHelper.ClampToVisibleMonitors(this, Left, Top, Width, Height);
+        if (Math.Abs(clampedLeft - Left) > 0.5 || Math.Abs(clampedTop - Top) > 0.5)
+        {
+            _isApplyingGeometry = true;
+            try
+            {
+                Left = clampedLeft;
+                Top = clampedTop;
+            }
+            finally
+            {
+                _isApplyingGeometry = false;
+            }
+        }
+    }
+
+    private IntPtr WindowHwndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (_restoreMsgId != 0 && msg == (int)_restoreMsgId)
+        {
+            Dispatcher.BeginInvoke(RestoreFromTray);
+            handled = true;
+        }
+        else if (msg == WM_ENTERSIZEMOVE)
+        {
+            _isDraggingWindow = true;
+            _edgeAnimTimer.Stop();
+        }
+        else if (msg == WM_EXITSIZEMOVE)
+        {
+            _isDraggingWindow = false;
+            if (_isCompactMode && _settings.Current.CompactEdgeAutoHide)
+                Dispatcher.BeginInvoke(EvaluateEdgeDockAfterDrag);
+        }
+        return IntPtr.Zero;
     }
 
     protected override void OnClosing(CancelEventArgs e)
@@ -113,12 +346,1112 @@ public partial class PlayerWindow : Window
         if (!AllowClose)
         {
             e.Cancel = true;
-            Hide();
+            if (_settings.Current.MinimizeToTray)
+                HideToTray();
+            else
+                _requestExitAction();
             return;
         }
 
+        _posSaveTimer.Stop();
+        _telemetryTimer.Stop();
+        _suspendTimer.Stop();
+        _edgeAnimTimer.Stop();
+        _edgeHoverTimer.Stop();
+        _clipboardWatchTimer.Stop();
+        Activated -= PlayerWindow_Activated;
+
+        _player.PositionChanged -= OnPositionChanged;
+        _player.PlaybackStateChanged -= OnPlaybackStateChanged;
+        _player.TrackChanged -= OnTrackChanged;
+        _player.RepeatModeChanged -= OnRepeatModeChanged;
+        _player.ShuffleChanged -= OnShuffleChanged;
+        _player.StatusMessage -= OnStatusMessage;
+        _player.QueueChanged -= OnQueueChanged;
+        _player.VolumeChanged -= OnVolumeChanged;
+        _library.LibraryChanged -= OnLibraryChanged;
+        _downloads.DownloadCompleted -= OnDownloadCompleted;
+        _settings.SettingsChanged -= OnSettingsChanged;
+        _controller.StateChanged -= OnMediaControllerStateChanged;
+        _hwndSource?.RemoveHook(WindowHwndProc);
+        _hwndSource = null;
+
+        try { _authFlowCts?.Cancel(); _authFlowCts?.Dispose(); } catch { }
+        try { _browserBridge?.Dispose(); _browserBridge = null; } catch { }
+        try { _searchCts?.Cancel(); _searchCts?.Dispose(); } catch { }
+        try { _proxyTestCts?.Cancel(); _proxyTestCts?.Dispose(); } catch { }
+        try { _selfProcess.Dispose(); } catch { }
         try { PlayerWebView?.Dispose(); } catch { }
         base.OnClosing(e);
+    }
+
+    private void RestoreSavedGeometry()
+    {
+        var s = _settings.Current;
+        _isCompactMode = s.IsCompactMode;
+        double w = _isCompactMode ? CompactWidth : ExpandedWidth;
+        double h = _isCompactMode ? CompactHeight : ExpandedHeight;
+
+        _isApplyingGeometry = true;
+        try
+        {
+            Width = w;
+            Height = h;
+            Topmost = s.WindowAlwaysOnTop;
+
+            var area = SystemParameters.WorkArea;
+            double rawLeft = s.PlayerWindowLeft ?? (area.Left + (area.Width - w) / 2.0);
+            double rawTop = s.PlayerWindowTop ?? (area.Top + (area.Height - h) / 2.0);
+            var (clampedLeft, clampedTop) = WindowBlurHelper.ClampToVisibleMonitors(this, rawLeft, rawTop, w, h);
+            Left = clampedLeft;
+            Top = clampedTop;
+
+            if (_isCompactMode && s.CompactEdgeAutoHide && !string.IsNullOrEmpty(s.CompactDockedEdge))
+            {
+                _dockedEdge = s.CompactDockedEdge;
+                _isEdgeCollapsed = false;
+                var (eLeft, eTop) = ComputeEdgePosition(_dockedEdge, false, WindowBlurHelper.GetMonitorWorkAreaForWindow(this));
+                Left = eLeft;
+                Top = eTop;
+                _edgeLastHoverTick = Environment.TickCount64 + 900;
+                _edgeHoverTimer.Start();
+            }
+        }
+        finally
+        {
+            _isApplyingGeometry = false;
+        }
+    }
+
+    private void ApplyWindowSettingsFromConfig()
+    {
+        if (_isSettingsApplying) return;
+        var s = _settings.Current;
+        if (_isCompactMode != s.IsCompactMode)
+            SetCompactMode(s.IsCompactMode, save: false);
+        if (Topmost != s.WindowAlwaysOnTop)
+            SetAlwaysOnTop(s.WindowAlwaysOnTop, save: false);
+        WindowBlurHelper.SetWindowAlpha(this, s.WindowOpacityPercent / 100.0);
+    }
+
+    private void SaveCurrentWindowPosition()
+    {
+        if (_isCompactMode && !string.IsNullOrEmpty(_dockedEdge))
+        {
+            if (_isEdgeCollapsed) return;
+            var work = WindowBlurHelper.GetMonitorWorkAreaForWindow(this);
+            var (eLeft, eTop) = ComputeEdgePosition(_dockedEdge, false, work);
+            _isSettingsApplying = true;
+            try
+            {
+                _settings.Update(s =>
+                {
+                    s.PlayerWindowLeft = eLeft;
+                    s.PlayerWindowTop = eTop;
+                }, notify: false);
+            }
+            finally
+            {
+                _isSettingsApplying = false;
+            }
+            return;
+        }
+
+        var (clampedLeft, clampedTop) = WindowBlurHelper.ClampToVisibleMonitors(this, Left, Top, Width, Height);
+        if (Math.Abs(clampedLeft - Left) > 0.5 || Math.Abs(clampedTop - Top) > 0.5)
+        {
+            _isApplyingGeometry = true;
+            try
+            {
+                Left = clampedLeft;
+                Top = clampedTop;
+            }
+            finally
+            {
+                _isApplyingGeometry = false;
+            }
+        }
+
+        _isSettingsApplying = true;
+        try
+        {
+            _settings.Update(s =>
+            {
+                s.PlayerWindowLeft = Left;
+                s.PlayerWindowTop = Top;
+            }, notify: false);
+        }
+        finally
+        {
+            _isSettingsApplying = false;
+        }
+    }
+
+    public void SetCompactMode(bool compact, bool save = true)
+    {
+        _isCompactMode = compact;
+        double targetW = compact ? CompactWidth : ExpandedWidth;
+        double targetH = compact ? CompactHeight : ExpandedHeight;
+
+        _edgeAnimTimer.Stop();
+        _isApplyingGeometry = true;
+        try
+        {
+            Width = targetW;
+            Height = targetH;
+
+            if (compact && _settings.Current.CompactEdgeAutoHide && !string.IsNullOrEmpty(_settings.Current.CompactDockedEdge))
+            {
+                _dockedEdge = _settings.Current.CompactDockedEdge;
+                _isEdgeCollapsed = false;
+                var work = WindowBlurHelper.GetMonitorWorkAreaForWindow(this);
+                var (eLeft, eTop) = ComputeEdgePosition(_dockedEdge, false, work);
+                Left = eLeft;
+                Top = eTop;
+                _edgeLastHoverTick = Environment.TickCount64 + 800;
+                _edgeHoverTimer.Start();
+            }
+            else
+            {
+                _dockedEdge = "";
+                _isEdgeCollapsed = false;
+                _edgeHoverTimer.Stop();
+                var (clampedLeft, clampedTop) = WindowBlurHelper.ClampToVisibleMonitors(this, Left, Top, targetW, targetH);
+                Left = clampedLeft;
+                Top = clampedTop;
+            }
+        }
+        finally
+        {
+            _isApplyingGeometry = false;
+        }
+
+        WindowBlurHelper.ApplyChromaWindowStyle(this, compact ? 12 : 16);
+        Dispatcher.BeginInvoke(DispatcherPriority.Render, () => WindowBlurHelper.UpdateWin10RoundedRegion(this, _isCompactMode ? 12 : 16));
+
+        if (save)
+        {
+            _isSettingsApplying = true;
+            try
+            {
+                _settings.Update(s =>
+                {
+                    s.IsCompactMode = compact;
+                    s.PlayerWindowLeft = Left;
+                    s.PlayerWindowTop = Top;
+                }, notify: true);
+            }
+            finally
+            {
+                _isSettingsApplying = false;
+            }
+        }
+
+        _trayStateSyncAction();
+        PostToWeb("windowMode", new { compact });
+        PostToWeb("edgeDockState", new { dockedEdge = _dockedEdge, collapsed = _isEdgeCollapsed });
+    }
+
+    private (double Left, double Top) ComputeEdgePosition(string edge, bool collapsed, Rect work)
+    {
+        double w = Width > 0 ? Width : CompactWidth;
+        double h = Height > 0 ? Height : CompactHeight;
+        double safeTop = Math.Clamp(Top, work.Top + 4, Math.Max(work.Top + 4, work.Bottom - h - 4));
+        double safeLeft = Math.Clamp(Left, work.Left + 4, Math.Max(work.Left + 4, work.Right - w - 4));
+
+        return edge switch
+        {
+            "left" => (collapsed ? work.Left - w + EdgePeekPx : work.Left + 6, safeTop),
+            "right" => (collapsed ? work.Right - EdgePeekPx : work.Right - w - 6, safeTop),
+            "top" => (safeLeft, collapsed ? work.Top - h + EdgePeekPx : work.Top + 6),
+            _ => (safeLeft, safeTop)
+        };
+    }
+
+    private void EvaluateEdgeDockAfterDrag()
+    {
+        if (!_isCompactMode || !_settings.Current.CompactEdgeAutoHide)
+            return;
+
+        var work = WindowBlurHelper.GetMonitorWorkAreaForWindow(this);
+        double w = Width > 0 ? Width : CompactWidth;
+        double h = Height > 0 ? Height : CompactHeight;
+
+        double dLeft = Left - work.Left;
+        double dRight = work.Right - (Left + w);
+        double dTop = Top - work.Top;
+
+        string detected = "";
+        double minDist = double.MaxValue;
+        if (dLeft <= EdgeSnapThresholdPx && dLeft < minDist) { minDist = dLeft; detected = "left"; }
+        if (dRight <= EdgeSnapThresholdPx && dRight < minDist) { minDist = dRight; detected = "right"; }
+        if (dTop <= EdgeSnapThresholdPx && dTop < minDist) { detected = "top"; }
+
+        if (!string.IsNullOrEmpty(detected))
+        {
+            _dockedEdge = detected;
+            _isEdgeCollapsed = false;
+            _edgeLastHoverTick = Environment.TickCount64 + 450;
+            _edgeHoverTimer.Start();
+
+            _isSettingsApplying = true;
+            try { _settings.Update(s => s.CompactDockedEdge = detected, notify: false); }
+            finally { _isSettingsApplying = false; }
+
+            var (eLeft, eTop) = ComputeEdgePosition(detected, false, work);
+            PostToWeb("edgeDockState", new { dockedEdge = _dockedEdge, collapsed = false });
+            StartEdgeAnimation(eLeft, eTop);
+        }
+        else if (!string.IsNullOrEmpty(_dockedEdge) &&
+                 dLeft > EdgeSnapThresholdPx * 1.8 &&
+                 dRight > EdgeSnapThresholdPx * 1.8 &&
+                 dTop > EdgeSnapThresholdPx * 1.8)
+        {
+            UndockFromEdge(animateInside: false);
+        }
+    }
+
+    private void ToggleCompactEdgeDock()
+    {
+        if (!_isCompactMode) return;
+
+        if (!string.IsNullOrEmpty(_dockedEdge))
+        {
+            UndockFromEdge(animateInside: true);
+            return;
+        }
+
+        var work = WindowBlurHelper.GetMonitorWorkAreaForWindow(this);
+        double w = Width > 0 ? Width : CompactWidth;
+
+        double dLeft = Math.Max(0, Left - work.Left);
+        double dRight = Math.Max(0, work.Right - (Left + w));
+        double dTop = Math.Max(0, Top - work.Top);
+
+        string edge = "right";
+        double best = dRight;
+        if (dLeft < best) { best = dLeft; edge = "left"; }
+        if (dTop < best) { edge = "top"; }
+
+        _dockedEdge = edge;
+        _isSettingsApplying = true;
+        try
+        {
+            _settings.Update(s =>
+            {
+                s.CompactEdgeAutoHide = true;
+                s.CompactDockedEdge = edge;
+            }, notify: false);
+        }
+        finally
+        {
+            _isSettingsApplying = false;
+        }
+
+        _edgeLastHoverTick = Environment.TickCount64;
+        _edgeSuppressExpandUntilTick = Environment.TickCount64 + 650;
+        _edgeHoverTimer.Start();
+        AnimateEdgeCollapsed(true);
+        PushWindowSettingsUpdate();
+    }
+
+    private void UndockFromEdge(bool animateInside)
+    {
+        var prevEdge = _dockedEdge;
+        _dockedEdge = "";
+        _isEdgeCollapsed = false;
+        _edgeHoverTimer.Stop();
+
+        _isSettingsApplying = true;
+        try { _settings.Update(s => s.CompactDockedEdge = "", notify: false); }
+        finally { _isSettingsApplying = false; }
+
+        PostToWeb("edgeDockState", new { dockedEdge = "", collapsed = false });
+
+        if (animateInside && !string.IsNullOrEmpty(prevEdge))
+        {
+            var work = WindowBlurHelper.GetMonitorWorkAreaForWindow(this);
+            var (tLeft, tTop) = ComputeEdgePosition(prevEdge, false, work);
+            if (prevEdge == "left") tLeft += 14;
+            else if (prevEdge == "right") tLeft -= 14;
+            else if (prevEdge == "top") tTop += 14;
+            StartEdgeAnimation(tLeft, tTop);
+        }
+    }
+
+    private void AnimateEdgeCollapsed(bool collapse)
+    {
+        if (string.IsNullOrEmpty(_dockedEdge)) return;
+        if (_isEdgeCollapsed == collapse && _edgeAnimTimer.IsEnabled) return;
+
+        _isEdgeCollapsed = collapse;
+        var work = WindowBlurHelper.GetMonitorWorkAreaForWindow(this);
+        var (targetLeft, targetTop) = ComputeEdgePosition(_dockedEdge, collapse, work);
+        PostToWeb("edgeDockState", new { dockedEdge = _dockedEdge, collapsed = _isEdgeCollapsed });
+        StartEdgeAnimation(targetLeft, targetTop);
+    }
+
+    private void StartEdgeAnimation(double targetLeft, double targetTop)
+    {
+        _edgeAnimTimer.Stop();
+        _animStartLeft = Left;
+        _animStartTop = Top;
+        _animTargetLeft = targetLeft;
+        _animTargetTop = targetTop;
+        _animStartTick = Environment.TickCount64;
+
+        if (Math.Abs(_animTargetLeft - _animStartLeft) < 0.5 && Math.Abs(_animTargetTop - _animStartTop) < 0.5)
+        {
+            _isApplyingGeometry = true;
+            try { Left = targetLeft; Top = targetTop; }
+            finally { _isApplyingGeometry = false; }
+            return;
+        }
+
+        _edgeAnimTimer.Start();
+    }
+
+    private void OnEdgeAnimTick()
+    {
+        double raw = Math.Clamp((Environment.TickCount64 - _animStartTick) / EdgeAnimDurationMs, 0.0, 1.0);
+        double eased = 1.0 - Math.Pow(1.0 - raw, 3);
+
+        _isApplyingGeometry = true;
+        try
+        {
+            Left = _animStartLeft + (_animTargetLeft - _animStartLeft) * eased;
+            Top = _animStartTop + (_animTargetTop - _animStartTop) * eased;
+        }
+        finally
+        {
+            _isApplyingGeometry = false;
+        }
+
+        if (raw >= 1.0)
+            _edgeAnimTimer.Stop();
+    }
+
+    private void OnEdgeHoverTick()
+    {
+        if (!IsVisible || WindowState == WindowState.Minimized || !_isCompactMode || string.IsNullOrEmpty(_dockedEdge) || _isDraggingWindow)
+            return;
+
+        if (!WindowBlurHelper.TryGetCursorScreenDipPosition(this, out var pt))
+            return;
+
+        double pad = _isEdgeCollapsed ? 4.0 : 8.0;
+        double w = Width > 0 ? Width : CompactWidth;
+        double h = Height > 0 ? Height : CompactHeight;
+        bool cursorInside = pt.X >= Left - pad && pt.X <= Left + w + pad &&
+                            pt.Y >= Top - pad && pt.Y <= Top + h + pad;
+
+        long now = Environment.TickCount64;
+        if (_isEdgeCollapsed)
+        {
+            if (cursorInside && now >= _edgeSuppressExpandUntilTick)
+            {
+                _edgeLastHoverTick = now;
+                AnimateEdgeCollapsed(false);
+            }
+        }
+        else
+        {
+            if (cursorInside || _isWebPointerHeld)
+                _edgeLastHoverTick = now;
+            else if (now - _edgeLastHoverTick >= 550)
+                AnimateEdgeCollapsed(true);
+        }
+    }
+
+    public void ShowSettingsSection(string section = "settings")
+    {
+        RestoreFromTray();
+        if (_isCompactMode)
+            SetCompactMode(false, save: true);
+        PostToWeb("showTab", new { tab = "settings", section });
+    }
+
+    public void SetAlwaysOnTop(bool onTop, bool save = true)
+    {
+        Topmost = onTop;
+        if (save)
+        {
+            _isSettingsApplying = true;
+            try
+            {
+                _settings.Update(s =>
+                {
+                    s.WindowAlwaysOnTop = onTop;
+                }, notify: true);
+            }
+            finally
+            {
+                _isSettingsApplying = false;
+            }
+        }
+
+        _trayStateSyncAction();
+    }
+
+    public void SetWindowOpacity(int percent, bool save = true)
+    {
+        int clamped = Math.Clamp(percent, 75, 100);
+        WindowBlurHelper.SetWindowAlpha(this, clamped / 100.0);
+        if (save)
+        {
+            _isSettingsApplying = true;
+            try
+            {
+                _settings.Update(s => s.WindowOpacityPercent = clamped, notify: false);
+            }
+            finally
+            {
+                _isSettingsApplying = false;
+            }
+        }
+    }
+
+    public void CenterOnPrimaryMonitor()
+    {
+        _edgeAnimTimer.Stop();
+        _edgeHoverTimer.Stop();
+        _dockedEdge = "";
+        _isEdgeCollapsed = false;
+        _isSettingsApplying = true;
+        try { _settings.Update(s => s.CompactDockedEdge = "", notify: false); }
+        finally { _isSettingsApplying = false; }
+
+        var area = SystemParameters.WorkArea;
+        _isApplyingGeometry = true;
+        try
+        {
+            double targetLeft = area.Left + (area.Width - Width) / 2.0;
+            double targetTop = area.Top + (area.Height - Height) / 2.0;
+            var (clampedLeft, clampedTop) = WindowBlurHelper.ClampToVisibleMonitors(this, targetLeft, targetTop, Width, Height);
+            Left = clampedLeft;
+            Top = clampedTop;
+        }
+        finally
+        {
+            _isApplyingGeometry = false;
+        }
+
+        SaveCurrentWindowPosition();
+        PostToWeb("edgeDockState", new { dockedEdge = "", collapsed = false });
+        if (!IsVisible)
+            RestoreFromTray();
+    }
+
+    public void HideToTray()
+    {
+        if (IsVisible)
+            Hide();
+        UpdateSuspensionState(forceSuspended: true);
+    }
+
+    private async void PlayerWindow_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        // Если фокус внутри WebView2, клавиши обрабатывает сам Chromium-слой (с учётом <input>)
+        if (PlayerWebView != null && PlayerWebView.IsKeyboardFocusWithin)
+            return;
+
+        var key = e.Key == Key.System ? e.SystemKey : e.Key;
+        var mods = Keyboard.Modifiers;
+
+        switch (key)
+        {
+            case Key.Space when mods == ModifierKeys.None:
+                e.Handled = true;
+                if (_controller.IsLocalActive || (_player.CurrentTrack != null && _externalActiveTrack == null))
+                    _player.TogglePause();
+                else
+                    await _controller.SendCommandAsync("toggle");
+                break;
+
+            case Key.Right when mods == ModifierKeys.Shift:
+                e.Handled = true;
+                await _controller.SeekRelativeMsAsync(15000);
+                break;
+
+            case Key.Left when mods == ModifierKeys.Shift:
+                e.Handled = true;
+                await _controller.SeekRelativeMsAsync(-15000);
+                break;
+
+            case Key.Right when mods == ModifierKeys.None:
+                e.Handled = true;
+                if (_controller.IsLocalActive || (_player.CurrentTrack != null && _externalActiveTrack == null))
+                    await _player.NextAsync();
+                else
+                    await _controller.SendCommandAsync("next");
+                break;
+
+            case Key.Left when mods == ModifierKeys.None:
+                e.Handled = true;
+                if (_controller.IsLocalActive || (_player.CurrentTrack != null && _externalActiveTrack == null))
+                    await _player.PrevAsync();
+                else
+                    await _controller.SendCommandAsync("prev");
+                break;
+
+            case Key.M when mods == ModifierKeys.None:
+                e.Handled = true;
+                SetCompactMode(!_isCompactMode, save: true);
+                break;
+        }
+    }
+
+    public void RestoreFromTray()
+    {
+        Show();
+        if (WindowState == WindowState.Minimized)
+            WindowState = WindowState.Normal;
+        Activate();
+        UpdateSuspensionState();
+    }
+
+    private void UpdateSuspensionState(bool forceSuspended = false)
+    {
+        bool visible = !forceSuspended && IsVisible && WindowState != WindowState.Minimized;
+        bool nextSuspended = !visible;
+        if (_isUiSuspended == nextSuspended)
+        {
+            if (visible && _activeTab == "settings" && !_telemetryTimer.IsEnabled)
+                _telemetryTimer.Start();
+            return;
+        }
+
+        _isUiSuspended = nextSuspended;
+        _controller.SetUiVisible(visible);
+
+        if (_isUiSuspended)
+        {
+            _telemetryTimer.Stop();
+            _edgeHoverTimer.Stop();
+            _edgeAnimTimer.Stop();
+            PostToWeb("uiVisibility", new { visible = false });
+            _suspendTimer.Stop();
+            _suspendTimer.Start();
+        }
+        else
+        {
+            _suspendTimer.Stop();
+            if (PlayerWebView.Visibility != Visibility.Visible)
+                PlayerWebView.Visibility = Visibility.Visible;
+
+            if (_isWebViewSuspended && PlayerWebView.CoreWebView2 != null)
+            {
+                try { PlayerWebView.CoreWebView2.Resume(); } catch { }
+                _isWebViewSuspended = false;
+            }
+
+            if (_isCompactMode && !string.IsNullOrEmpty(_dockedEdge))
+            {
+                _edgeLastHoverTick = Environment.TickCount64 + 600;
+                _edgeHoverTimer.Start();
+            }
+
+            PostToWeb("uiVisibility", new { visible = true });
+            PushResumeSnapshot();
+            if (_activeTab == "settings")
+            {
+                PushTelemetrySample();
+                _telemetryTimer.Start();
+            }
+        }
+    }
+
+    private async void PlayerWindow_Activated(object? sender, EventArgs e)
+    {
+        var pending = _pendingBrowserAuthProvider;
+        if (string.IsNullOrEmpty(pending) || _isAuthBusy || _clipboardWatchBusy)
+            return;
+
+        await Task.Delay(150);
+        if (_pendingBrowserAuthProvider != pending || _isAuthBusy || _clipboardWatchBusy)
+            return;
+
+        await ProcessCapturedClipboardAsync(pending, SafeGetClipboardText().Trim());
+    }
+
+    private async Task OnClipboardWatchTickAsync()
+    {
+        if (_clipboardWatchBusy || _isAuthBusy)
+            return;
+
+        var pending = _pendingBrowserAuthProvider;
+        if (string.IsNullOrEmpty(pending))
+        {
+            _clipboardWatchTimer.Stop();
+            return;
+        }
+
+        if (DateTime.UtcNow > _clipboardWatchDeadlineUtc)
+        {
+            _clipboardWatchTimer.Stop();
+            _pendingBrowserAuthProvider = null;
+            return;
+        }
+
+        await ProcessCapturedClipboardAsync(pending, SafeGetClipboardText().Trim());
+    }
+
+    private async Task ProcessCapturedClipboardAsync(string provider, string clip)
+    {
+        if (_clipboardWatchBusy || _isAuthBusy || string.IsNullOrWhiteSpace(clip))
+            return;
+        if (string.Equals(clip, _clipboardBeforeAuth, StringComparison.Ordinal) ||
+            string.Equals(clip, _lastTestedClipboard, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if (!LooksLikeAuthPayload(provider, clip))
+            return;
+
+        _clipboardWatchBusy = true;
+        _lastTestedClipboard = clip;
+        try
+        {
+            if (provider == "youtube")
+            {
+                var dir = Path.GetDirectoryName(YtDlpMusicProvider.YouTubeCookiesPath)!;
+                Directory.CreateDirectory(dir);
+                File.WriteAllText(
+                    YtDlpMusicProvider.YouTubeCookiesPath,
+                    clip,
+                    new System.Text.UTF8Encoding(false));
+                _pendingBrowserAuthProvider = null;
+                _clipboardWatchTimer.Stop();
+                RestoreClipboardAfterCapture(provider);
+                PushAccountsUpdate();
+                const string ytMsg = "YouTube cookies автоматически подключены из буфера обмена.";
+                PostToWeb("authResult", new { provider = "youtube", ok = true, message = ytMsg });
+                PostToWeb("status", new { message = ytMsg });
+                return;
+            }
+
+            var (ok, _) = await CompleteProviderAuthInternalAsync(provider, clip);
+            if (ok)
+                RestoreClipboardAfterCapture(provider);
+        }
+        finally
+        {
+            _clipboardWatchBusy = false;
+        }
+    }
+
+    private void RestoreClipboardAfterCapture(string provider)
+    {
+        try
+        {
+            if (!string.IsNullOrEmpty(_clipboardBeforeAuth) && !LooksLikeAuthPayload(provider, _clipboardBeforeAuth))
+                Clipboard.SetText(_clipboardBeforeAuth);
+            else
+                Clipboard.Clear();
+        }
+        catch { }
+    }
+
+    private static string SafeGetClipboardText()
+    {
+        try
+        {
+            return Clipboard.ContainsText() ? (Clipboard.GetText() ?? "") : "";
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
+    private static void SafeSetClipboardText(string text)
+    {
+        try
+        {
+            Clipboard.SetText(text ?? "");
+        }
+        catch { }
+    }
+
+    private static bool LooksLikeAuthPayload(string provider, string text)
+    {
+        if (string.IsNullOrWhiteSpace(text) || text.Length < 16) return false;
+        var t = text.Trim();
+        return provider switch
+        {
+            "yandex" => t.Contains("access_token=", StringComparison.OrdinalIgnoreCase) ||
+                        t.StartsWith("y0_", StringComparison.OrdinalIgnoreCase),
+            "vk" => t.Contains("access_token=", StringComparison.OrdinalIgnoreCase) ||
+                    t.StartsWith("vk1.a", StringComparison.OrdinalIgnoreCase) ||
+                    t.Contains("remixsid=", StringComparison.OrdinalIgnoreCase),
+            "spotify" => t.Contains("sp_dc=", StringComparison.OrdinalIgnoreCase) ||
+                         (t.StartsWith("AQ", StringComparison.Ordinal) && t.Length >= 80 && !t.Contains(' ')) ||
+                         (t.StartsWith("BQ", StringComparison.Ordinal) && t.Length >= 40 && !t.Contains(' ')),
+            "youtube" => (text.Contains(".youtube.com\t", StringComparison.OrdinalIgnoreCase) ||
+                          text.Contains(".google.com\t", StringComparison.OrdinalIgnoreCase)) &&
+                         (text.Contains("SAPISID", StringComparison.OrdinalIgnoreCase) ||
+                          text.Contains("__Secure-3PAPISID", StringComparison.OrdinalIgnoreCase) ||
+                          text.Contains("\tSID\t", StringComparison.OrdinalIgnoreCase)),
+            _ => false
+        };
+    }
+
+    private void StartClipboardWatcher(string provider)
+    {
+        _pendingBrowserAuthProvider = provider;
+        _clipboardBeforeAuth = SafeGetClipboardText().Trim();
+        _lastTestedClipboard = "";
+        _clipboardWatchDeadlineUtc = DateTime.UtcNow.AddMinutes(5);
+        _clipboardWatchTimer.Start();
+    }
+
+    private void CancelActiveAuthFlow()
+    {
+        var prev = _authFlowCts;
+        _authFlowCts = null;
+        if (prev != null)
+        {
+            try { prev.Cancel(); } catch { }
+            try { prev.Dispose(); } catch { }
+        }
+        _clipboardWatchTimer.Stop();
+        _pendingBrowserAuthProvider = null;
+        _lastTestedClipboard = "";
+    }
+
+    private void OpenExternalBrowserAuth(string provider)
+    {
+        CancelActiveAuthFlow();
+        _authFlowCts = new CancellationTokenSource();
+        var ct = _authFlowCts.Token;
+
+        bool bridgeConnected = _browserBridge?.IsExtensionConnected == true;
+
+        switch (provider)
+        {
+            case "yandex":
+                StartClipboardWatcher("yandex");
+                if (bridgeConnected)
+                {
+                    if (!TryOpenUrlInBrowser(YandexMusicProvider.OAuthAuthorizeUrl))
+                        return;
+                    PostToWeb("authPending", new { provider = "yandex", active = true, busy = false, mode = "bridge" });
+                    PostToWeb("status", new { message = "Подтвердите вход в Яндексе — Мост браузера перехватит токен сам" });
+                }
+                else
+                {
+                    _ = StartYandexDeviceAuthUiFlowAsync(ct);
+                }
+                break;
+
+            case "vk":
+                StartClipboardWatcher("vk");
+                if (bridgeConnected && _browserBridge != null)
+                {
+                    if (!TryOpenUrlInBrowser(_browserBridge.GetConnectUrl("vk")))
+                        return;
+                    PostToWeb("authPending", new { provider = "vk", active = true, busy = true, mode = "bridge" });
+                    PostToWeb("status", new { message = "Синхронизация VK Музыки через Мост браузера..." });
+                }
+                else
+                {
+                    if (!TryOpenUrlInBrowser(VkMusicProvider.OAuthAuthorizeUrl))
+                        return;
+                    PostToWeb("authPending", new
+                    {
+                        provider = "vk",
+                        active = true,
+                        busy = false,
+                        mode = "vk_blank"
+                    });
+                    PostToWeb("status", new
+                    {
+                        message = "Нажмите «Разрешить», затем кликните по адресной строке oauth.vk.ru и нажмите Ctrl+C"
+                    });
+                }
+                break;
+
+            case "spotify":
+                StartClipboardWatcher("spotify");
+                if (bridgeConnected && _browserBridge != null)
+                {
+                    if (!TryOpenUrlInBrowser(_browserBridge.GetConnectUrl("spotify")))
+                        return;
+                    PostToWeb("authPending", new { provider = "spotify", active = true, busy = true, mode = "bridge" });
+                    PostToWeb("status", new { message = "Синхронизация Spotify через Мост браузера..." });
+                }
+                else
+                {
+                    _ = StartSpotifyPkceUiFlowAsync(ct);
+                }
+                break;
+
+            case "youtube":
+                StartClipboardWatcher("youtube");
+                if (bridgeConnected && _browserBridge != null)
+                {
+                    if (!TryOpenUrlInBrowser(_browserBridge.GetConnectUrl("youtube")))
+                        return;
+                    PostToWeb("authPending", new { provider = "youtube", active = true, busy = true, mode = "bridge" });
+                    PostToWeb("status", new { message = "Синхронизация YouTube cookies через Мост браузера..." });
+                }
+                else
+                {
+                    PostToWeb("authPending", new { provider = "youtube", active = true, busy = false, mode = "youtube_setup" });
+                    PostToWeb("status", new { message = "Настройте Мост браузера (1 клик) или выберите cookies.txt для YouTube" });
+                }
+                break;
+        }
+    }
+
+    private bool TryOpenUrlInBrowser(string url)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+            return true;
+        }
+        catch (Exception ex)
+        {
+            PostToWeb("status", new { message = $"Не удалось открыть браузер: {ex.Message}" });
+            return false;
+        }
+    }
+
+    private async Task StartYandexDeviceAuthUiFlowAsync(CancellationToken ct)
+    {
+        try
+        {
+            PostToWeb("authPending", new { provider = "yandex", active = true, busy = true, mode = "device" });
+            PostToWeb("status", new { message = "Запрос одноразового кода входа Яндекс..." });
+
+            var session = await _yandex.StartDeviceAuthAsync(ct);
+            if (ct.IsCancellationRequested) return;
+
+            SafeSetClipboardText(session.UserCode);
+            _clipboardBeforeAuth = session.UserCode;
+
+            TryOpenUrlInBrowser(session.VerificationUrl);
+
+            PostToWeb("authPending", new
+            {
+                provider = "yandex",
+                active = true,
+                busy = false,
+                mode = "device",
+                userCode = session.UserCode,
+                verificationUrl = session.VerificationUrl
+            });
+            PostToWeb("status", new { message = $"Код {session.UserCode} скопирован! Вставьте его (Ctrl+V) в открывшейся вкладке Яндекса" });
+
+            var token = await _yandex.PollDeviceTokenAsync(session, ct);
+            if (ct.IsCancellationRequested) return;
+
+            await CompleteProviderAuthInternalAsync("yandex", token);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            PostToWeb("authResult", new { provider = "yandex", ok = false, message = ex.Message });
+            PostToWeb("status", new { message = ex.Message });
+        }
+    }
+
+    private async Task StartSpotifyPkceUiFlowAsync(CancellationToken ct)
+    {
+        try
+        {
+            PostToWeb("authPending", new { provider = "spotify", active = true, busy = false, mode = "pkce" });
+            PostToWeb("status", new { message = "Подтвердите вход Spotify в открывшемся окне браузера..." });
+
+            var (ok, msg) = await _spotify.AuthenticateViaSystemBrowserPkceAsync(
+                url => Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }),
+                ct);
+
+            if (ct.IsCancellationRequested) return;
+
+            if (ok)
+            {
+                _pendingBrowserAuthProvider = null;
+                _clipboardWatchTimer.Stop();
+                PostToWeb("status", new { message = $"{msg}. Загрузка медиатеки Spotify..." });
+                try
+                {
+                    var pls = await _spotify.FetchUserPlaylistsAsync();
+                    _library.ReplaceExternalPlaylists("spotify", pls);
+                    msg = $"{msg} • Плейлистов: {pls.Count}, треков: {pls.Sum(p => p.Tracks.Count)}";
+                }
+                catch { }
+            }
+
+            PushAccountsUpdate();
+            PostToWeb("authResult", new { provider = "spotify", ok, message = msg });
+            PostToWeb("status", new { message = msg });
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            PushAccountsUpdate();
+            var errMsg = $"Ошибка Spotify OAuth: {ex.Message}";
+            PostToWeb("authResult", new { provider = "spotify", ok = false, message = errMsg });
+            PostToWeb("status", new { message = errMsg });
+        }
+    }
+
+    private async Task<(bool Ok, string Message)> OnBridgeAuthReceivedAsync(BridgeAuthPayload payload)
+    {
+        string prov = (payload.Provider ?? "").Trim().ToLowerInvariant();
+        if (prov == "spotify" && !string.IsNullOrWhiteSpace(payload.SpDc))
+        {
+            CancelActiveAuthFlow();
+            return await CompleteProviderAuthInternalAsync("spotify", $"sp_dc={payload.SpDc}");
+        }
+
+        if (prov == "youtube" && payload.Cookies != null && payload.Cookies.Count > 0)
+        {
+            CancelActiveAuthFlow();
+            var rows = payload.Cookies.Select(c =>
+            {
+                long exp = c.ExpirationDate > 0 ? (long)Math.Round(c.ExpirationDate) : 0;
+                string path = string.IsNullOrWhiteSpace(c.Path) ? "/" : c.Path;
+                bool sub = !c.HostOnly || c.Domain.StartsWith('.');
+                return (c.Domain, sub, path, c.Secure, exp, c.Name, c.Value);
+            });
+            YtDlpMusicProvider.SaveNetscapeCookies(rows);
+            PushAccountsUpdate();
+            string ytMsg = $"YouTube cookies синхронизированы ({payload.Cookies.Count} шт.)";
+            PostToWeb("authResult", new { provider = "youtube", ok = true, message = ytMsg });
+            PostToWeb("status", new { message = ytMsg });
+            return (true, ytMsg);
+        }
+
+        if (prov == "vk")
+        {
+            var vkInput = !string.IsNullOrWhiteSpace(payload.Raw) ? payload.Raw : payload.CookieHeader;
+            if (!string.IsNullOrWhiteSpace(vkInput))
+            {
+                CancelActiveAuthFlow();
+                return await CompleteProviderAuthInternalAsync("vk", vkInput);
+            }
+        }
+
+        if (prov == "yandex" && !string.IsNullOrWhiteSpace(payload.Raw))
+        {
+            CancelActiveAuthFlow();
+            return await CompleteProviderAuthInternalAsync("yandex", payload.Raw);
+        }
+
+        return (false, "Неподдерживаемый ответ от Моста браузера.");
+    }
+
+    private Task CompleteProviderAuthAsync(string provider, string rawInput)
+        => CompleteProviderAuthInternalAsync(provider, rawInput);
+
+    private async Task<(bool Ok, string Message)> CompleteProviderAuthInternalAsync(string provider, string rawInput)
+    {
+        if (_isAuthBusy)
+            return (false, "Проверка авторизации уже выполняется.");
+
+        var clean = (rawInput ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(clean))
+        {
+            const string emptyMsg = "Вставьте токен, cookie или итоговую ссылку из браузера.";
+            PostToWeb("authResult", new { provider, ok = false, message = emptyMsg });
+            return (false, emptyMsg);
+        }
+
+        _isAuthBusy = true;
+        PostToWeb("authPending", new { provider, active = true, busy = true });
+        PostToWeb("status", new { message = $"Проверка авторизации ({provider})..." });
+
+        bool ok = false;
+        string message = "Неизвестный сервис";
+
+        try
+        {
+            switch (provider)
+            {
+                case "yandex":
+                    (ok, message) = await _yandex.VerifyAndSaveTokenAsync(clean);
+                    if (ok)
+                    {
+                        CancelActiveAuthFlow();
+                        PostToWeb("status", new { message = $"{message}. Загрузка плейлистов..." });
+                        var pls = await _yandex.FetchUserPlaylistsAsync();
+                        _library.ReplaceExternalPlaylists("yandex", pls);
+                        message = $"{message} • Плейлистов: {pls.Count}, треков: {pls.Sum(p => p.Tracks.Count)}";
+                    }
+                    break;
+
+                case "vk":
+                    (ok, message) = await _vk.VerifyAndSaveSessionAsync(clean, null, 0, null);
+                    if (ok)
+                    {
+                        CancelActiveAuthFlow();
+                        PostToWeb("status", new { message = $"{message}. Загрузка плейлистов ВК..." });
+                        var pls = await _vk.FetchUserPlaylistsAsync();
+                        _library.ReplaceExternalPlaylists("vk", pls);
+                        message = $"{message} • Плейлистов: {pls.Count}, треков: {pls.Sum(p => p.Tracks.Count)}";
+                    }
+                    break;
+
+                case "spotify":
+                    (ok, message) = await _spotify.VerifyAndSaveSessionAsync(clean, null, 0, null);
+                    if (ok)
+                    {
+                        CancelActiveAuthFlow();
+                        PostToWeb("status", new { message = $"{message}. Загрузка медиатеки Spotify..." });
+                        var pls = await _spotify.FetchUserPlaylistsAsync();
+                        _library.ReplaceExternalPlaylists("spotify", pls);
+                        message = $"{message} • Плейлистов: {pls.Count}, треков: {pls.Sum(p => p.Tracks.Count)}";
+                    }
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            ok = false;
+            message = $"Ошибка авторизации: {ex.Message}";
+        }
+        finally
+        {
+            _isAuthBusy = false;
+        }
+
+        PushAccountsUpdate();
+        PostToWeb("authResult", new { provider, ok, message });
+        PostToWeb("status", new { message });
+        return (ok, message);
+    }
+
+    private async Task SuspendWebViewInTrayAsync()
+    {
+        _suspendTimer.Stop();
+        if (!_isUiSuspended || !_webViewReady || _isWebViewSuspended || PlayerWebView.CoreWebView2 == null)
+            return;
+
+        try
+        {
+            PlayerWebView.Visibility = Visibility.Collapsed;
+            bool ok = await PlayerWebView.CoreWebView2.TrySuspendAsync();
+            if (_isUiSuspended)
+            {
+                _isWebViewSuspended = ok;
+                _controller.TrimCaches();
+                WindowBlurHelper.TrimWorkingSet();
+            }
+            else if (ok)
+            {
+                try { PlayerWebView.CoreWebView2.Resume(); } catch { }
+                PlayerWebView.Visibility = Visibility.Visible;
+            }
+        }
+        catch { }
     }
 
     private async Task InitWebViewAsync()
@@ -131,21 +1464,30 @@ public partial class PlayerWindow : Window
                 "WebView2Player");
             Directory.CreateDirectory(userDataFolder);
 
-            PlayerWebView.DefaultBackgroundColor = System.Drawing.Color.Transparent;
+            PlayerWebView.DefaultBackgroundColor = System.Drawing.Color.FromArgb(255, 17, 18, 22);
+            const string perfArgs = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,Translate --disable-component-update --disable-domain-reliability --disable-background-networking";
             var wvProxyArgs = ProxyService.GetWebView2ProxyArguments();
+            string combinedArgs = string.IsNullOrWhiteSpace(wvProxyArgs) ? perfArgs : $"{perfArgs} {wvProxyArgs}";
+
             PlayerWebView.CreationProperties = new CoreWebView2CreationProperties
             {
                 UserDataFolder = userDataFolder,
-                AdditionalBrowserArguments = wvProxyArgs
+                AdditionalBrowserArguments = combinedArgs
             };
 
             await PlayerWebView.EnsureCoreWebView2Async();
-            PlayerWebView.DefaultBackgroundColor = System.Drawing.Color.Transparent;
+            PlayerWebView.DefaultBackgroundColor = System.Drawing.Color.FromArgb(255, 17, 18, 22);
 
             var wvSettings = PlayerWebView.CoreWebView2.Settings;
             wvSettings.AreDefaultContextMenusEnabled = false;
             wvSettings.IsStatusBarEnabled = false;
             wvSettings.IsZoomControlEnabled = false;
+            wvSettings.IsGeneralAutofillEnabled = false;
+            wvSettings.IsPasswordAutosaveEnabled = false;
+            wvSettings.AreBrowserAcceleratorKeysEnabled = false;
+#if !DEBUG
+            wvSettings.AreDevToolsEnabled = false;
+#endif
 
             PlayerWebView.WebMessageReceived += (_, ev) =>
             {
@@ -153,7 +1495,7 @@ public partial class PlayerWindow : Window
             };
 
             FallbackLoadingText.Visibility = Visibility.Collapsed;
-            PlayerWebView.NavigateToString(PlayerLiquidGlassHtml.Html);
+            PlayerWebView.NavigateToString(PlayerChromaCardHtml.GetHtml(WindowBlurHelper.IsWindows11OrLater));
         }
         catch (Exception ex)
         {
@@ -161,14 +1503,9 @@ public partial class PlayerWindow : Window
         }
     }
 
-    public void OpenPlaylistsTabAndFocusNew()
-    {
-        PostToWeb("focusNewPlaylist", new { });
-    }
-
     private void PostToWeb(string type, object payload)
     {
-        if (!_webViewReady || PlayerWebView.CoreWebView2 == null) return;
+        if (!_webViewReady || _isWebViewSuspended || PlayerWebView.CoreWebView2 == null) return;
 
         try
         {
@@ -224,23 +1561,154 @@ public partial class PlayerWindow : Window
                 break;
 
             case "window.minimize":
-                WindowState = WindowState.Minimized;
+                if (_settings.Current.MinimizeToTray)
+                    HideToTray();
+                else
+                    WindowState = WindowState.Minimized;
                 break;
 
-            case "window.maximizeToggle":
-                WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+            case "window.hideToTray":
+                HideToTray();
                 break;
 
-            case "window.hideToIsland":
-                Hide();
+            case "window.closeAction":
+                if (_settings.Current.MinimizeToTray)
+                    HideToTray();
+                else
+                    _requestExitAction();
+                break;
+
+            case "window.setCompactMode":
+                if (root.TryGetProperty("compact", out var cmpEl))
+                    SetCompactMode(cmpEl.GetBoolean(), save: true);
+                else
+                    SetCompactMode(!_isCompactMode, save: true);
+                break;
+
+            case "window.setAlwaysOnTop":
+                if (root.TryGetProperty("alwaysOnTop", out var topEl))
+                    SetAlwaysOnTop(topEl.GetBoolean(), save: true);
+                else
+                    SetAlwaysOnTop(!_settings.Current.WindowAlwaysOnTop, save: true);
+                break;
+
+            case "window.setOpacity":
+                if (root.TryGetProperty("opacity", out var opEl) && opEl.ValueKind == JsonValueKind.Number)
+                    SetWindowOpacity((int)Math.Round(opEl.GetDouble()), save: true);
+                break;
+
+            case "window.setChromaIntensity":
+                if (root.TryGetProperty("intensity", out var chEl) && chEl.ValueKind == JsonValueKind.Number)
+                {
+                    int val = Math.Clamp((int)Math.Round(chEl.GetDouble()), 0, 100);
+                    _isSettingsApplying = true;
+                    try { _settings.Update(s => s.ChromaIntensity = val, notify: false); }
+                    finally { _isSettingsApplying = false; }
+                }
+                break;
+
+            case "window.setMinimizeToTray":
+                if (root.TryGetProperty("enabled", out var mtEl))
+                {
+                    bool enabled = mtEl.GetBoolean();
+                    _isSettingsApplying = true;
+                    try { _settings.Update(s => s.MinimizeToTray = enabled, notify: true); }
+                    finally { _isSettingsApplying = false; }
+                }
+                break;
+
+            case "window.setAutoStart":
+                if (root.TryGetProperty("enabled", out var asEl))
+                {
+                    _settings.SetAutoStart(asEl.GetBoolean());
+                    PushWindowSettingsUpdate();
+                }
+                break;
+
+            case "window.setZeroBlur":
+                if (root.TryGetProperty("enabled", out var zbEl))
+                {
+                    bool enabled = zbEl.GetBoolean();
+                    _isSettingsApplying = true;
+                    try { _settings.Update(s => s.ZeroBlurMode = enabled, notify: true); }
+                    finally { _isSettingsApplying = false; }
+                }
+                break;
+
+            case "ui.tabChanged":
+                _activeTab = ReadStr(root, "tab") ?? "search";
+                if (_activeTab == "settings" && !_isUiSuspended)
+                {
+                    PushTelemetrySample();
+                    _telemetryTimer.Start();
+                    if (!_systemCheckInitialized)
+                    {
+                        _systemCheckInitialized = true;
+                        _ = CheckYtDlpForWebAsync();
+                        _ = CheckUpdateForWebAsync();
+                    }
+                }
+                else
+                {
+                    _telemetryTimer.Stop();
+                }
+                break;
+
+            case "window.setPointerHold":
+                _isWebPointerHeld = root.TryGetProperty("active", out var phEl) && phEl.ValueKind == JsonValueKind.True;
+                if (!_isWebPointerHeld && _isCompactMode && !string.IsNullOrEmpty(_dockedEdge))
+                    _edgeLastHoverTick = Environment.TickCount64;
+                break;
+
+            case "window.toggleEdgeDock":
+                ToggleCompactEdgeDock();
+                break;
+
+            case "window.setCompactEdgeAutoHide":
+                if (root.TryGetProperty("enabled", out var ehEl))
+                {
+                    bool enabled = ehEl.ValueKind == JsonValueKind.True;
+                    _isSettingsApplying = true;
+                    try { _settings.Update(s => s.CompactEdgeAutoHide = enabled, notify: false); }
+                    finally { _isSettingsApplying = false; }
+                    if (!enabled && !string.IsNullOrEmpty(_dockedEdge))
+                        UndockFromEdge(animateInside: true);
+                    PushWindowSettingsUpdate();
+                }
+                break;
+
+            case "window.setStartMinimized":
+                if (root.TryGetProperty("enabled", out var smEl))
+                {
+                    bool enabled = smEl.ValueKind == JsonValueKind.True;
+                    _isSettingsApplying = true;
+                    try { _settings.Update(s => s.StartMinimizedToIsland = enabled, notify: false); }
+                    finally { _isSettingsApplying = false; }
+                    PushWindowSettingsUpdate();
+                }
+                break;
+
+            case "window.setAutoPauseOnSwitch":
+                if (root.TryGetProperty("enabled", out var apEl))
+                {
+                    bool enabled = apEl.ValueKind == JsonValueKind.True;
+                    _isSettingsApplying = true;
+                    try { _settings.Update(s => s.AutoPauseOnSwitch = enabled, notify: false); }
+                    finally { _isSettingsApplying = false; }
+                    PushWindowSettingsUpdate();
+                }
+                break;
+
+            case "window.center":
+                CenterOnPrimaryMonitor();
                 break;
 
             case "window.openSettings":
-                _openSettingsAction();
+                ShowSettingsSection("proxy");
                 break;
 
             case "window.openAccounts":
-                _openAccountsAction();
+                ShowSettingsSection("accounts");
                 break;
 
             case "yandex.startWave":
@@ -249,14 +1717,6 @@ public partial class PlayerWindow : Window
 
             case "vk.startMix":
                 await StartVkMixAsync();
-                break;
-
-            case "sidebar.setCollapsed":
-                if (root.TryGetProperty("collapsed", out var colEl))
-                {
-                    bool collapsed = colEl.GetBoolean();
-                    _settings.Update(s => s.IsSidebarCollapsed = collapsed, notify: false);
-                }
                 break;
 
             case "search.run":
@@ -273,6 +1733,51 @@ public partial class PlayerWindow : Window
                 var filter = ReadStr(root, "filter") ?? "all";
                 _activeSearchFilter = filter;
                 await LoadMoreAsync();
+                break;
+            }
+
+            case "search.selectVariant":
+            {
+                var groupKey = ReadStr(root, "groupKey");
+                var trackKey = ReadStr(root, "trackKey");
+                bool play = root.TryGetProperty("play", out var plEl) && plEl.ValueKind == JsonValueKind.True;
+                int gIdx = _currentSearchGroups.FindIndex(g => string.Equals(g.GroupKey, groupKey, StringComparison.OrdinalIgnoreCase));
+                if (gIdx >= 0)
+                {
+                    var grp = _currentSearchGroups[gIdx];
+                    int vIdx = grp.Variants.FindIndex(v => string.Equals(v.UniqueKey, trackKey, StringComparison.OrdinalIgnoreCase));
+                    if (vIdx >= 0)
+                    {
+                        grp.SelectedIndex = vIdx;
+                        _currentResults = _currentSearchGroups.Select(g => g.ActiveTrack).ToList();
+                        if (play)
+                            await _player.PlayFromQueueAsync(_currentResults, gIdx);
+                    }
+                }
+                break;
+            }
+
+            case "search.reorder":
+            {
+                var src = ReadStr(root, "sourceKey");
+                var dst = ReadStr(root, "targetKey");
+                if (!string.IsNullOrWhiteSpace(src) && !string.IsNullOrWhiteSpace(dst) &&
+                    !string.Equals(src, dst, StringComparison.OrdinalIgnoreCase))
+                {
+                    int srcIdx = _currentSearchGroups.FindIndex(g =>
+                        string.Equals(g.GroupKey, src, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(g.ActiveTrack.UniqueKey, src, StringComparison.OrdinalIgnoreCase));
+                    int dstIdx = _currentSearchGroups.FindIndex(g =>
+                        string.Equals(g.GroupKey, dst, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(g.ActiveTrack.UniqueKey, dst, StringComparison.OrdinalIgnoreCase));
+                    if (srcIdx >= 0 && dstIdx >= 0 && srcIdx != dstIdx)
+                    {
+                        var item = _currentSearchGroups[srcIdx];
+                        _currentSearchGroups.RemoveAt(srcIdx);
+                        _currentSearchGroups.Insert(Math.Clamp(dstIdx, 0, _currentSearchGroups.Count), item);
+                        _currentResults = _currentSearchGroups.Select(g => g.ActiveTrack).ToList();
+                    }
+                }
                 break;
             }
 
@@ -302,6 +1807,15 @@ public partial class PlayerWindow : Window
             case "favorites.exportYandex":
                 await ExportFavoritesToYandexAsync();
                 break;
+
+            case "favorites.reorder":
+            {
+                var src = ReadStr(root, "sourceKey");
+                var dst = ReadStr(root, "targetKey");
+                if (!string.IsNullOrWhiteSpace(src) && !string.IsNullOrWhiteSpace(dst))
+                    _library.ReorderFavoriteTrack(src, dst);
+                break;
+            }
 
             case "track.exportYandex":
             {
@@ -335,24 +1849,6 @@ public partial class PlayerWindow : Window
                 break;
             }
 
-            case "playlists.move":
-            {
-                var id = ReadStr(root, "id");
-                int delta = ReadInt(root, "delta", 0);
-                if (!string.IsNullOrWhiteSpace(id) && delta != 0)
-                    _library.MovePlaylist(id, delta);
-                break;
-            }
-
-            case "favorites.reorder":
-            {
-                var src = ReadStr(root, "sourceKey");
-                var dst = ReadStr(root, "targetKey");
-                if (!string.IsNullOrWhiteSpace(src) && !string.IsNullOrWhiteSpace(dst))
-                    _library.ReorderFavoriteTrack(src, dst);
-                break;
-            }
-
             case "playlists.reorder":
             {
                 var src = ReadStr(root, "sourceId");
@@ -369,25 +1865,6 @@ public partial class PlayerWindow : Window
                 var dst = ReadStr(root, "targetKey");
                 if (!string.IsNullOrWhiteSpace(plId) && !string.IsNullOrWhiteSpace(src) && !string.IsNullOrWhiteSpace(dst))
                     _library.ReorderPlaylistTrack(plId, src, dst);
-                break;
-            }
-
-            case "search.reorder":
-            {
-                var src = ReadStr(root, "sourceKey");
-                var dst = ReadStr(root, "targetKey");
-                if (!string.IsNullOrWhiteSpace(src) && !string.IsNullOrWhiteSpace(dst) &&
-                    !string.Equals(src, dst, StringComparison.OrdinalIgnoreCase))
-                {
-                    int srcIdx = _currentResults.FindIndex(t => string.Equals(t.UniqueKey, src, StringComparison.OrdinalIgnoreCase));
-                    int dstIdx = _currentResults.FindIndex(t => string.Equals(t.UniqueKey, dst, StringComparison.OrdinalIgnoreCase));
-                    if (srcIdx >= 0 && dstIdx >= 0 && srcIdx != dstIdx)
-                    {
-                        var item = _currentResults[srcIdx];
-                        _currentResults.RemoveAt(srcIdx);
-                        _currentResults.Insert(Math.Clamp(dstIdx, 0, _currentResults.Count), item);
-                    }
-                }
                 break;
             }
 
@@ -408,39 +1885,15 @@ public partial class PlayerWindow : Window
                 break;
             }
 
-            case "playlists.addTrack":
-            {
-                var plId = ReadStr(root, "playlistId");
-                var key = ReadStr(root, "trackKey");
-                if (!string.IsNullOrWhiteSpace(plId) && TryResolveTrack(key, out var track))
-                {
-                    var pl = _library.GetLocalPlaylists().FirstOrDefault(p => p.Id == plId);
-                    if (_library.AddTrackToPlaylist(plId, track) && pl != null)
-                        PostToWeb("status", new { message = $"Добавлено в «{pl.Name}»" });
-                }
-                break;
-            }
-
             case "playlists.removeTrack":
             {
                 var plId = ReadStr(root, "playlistId");
                 var key = ReadStr(root, "trackKey");
                 if (!string.IsNullOrWhiteSpace(plId) && !string.IsNullOrWhiteSpace(key))
-                    _library.RemoveTrackFromPlaylist(plId, key);
+                    await RemoveTrackFromPlaylistSyncedAsync(plId, key);
                 break;
             }
 
-            case "playlists.quickCreateAndAdd":
-            {
-                var key = ReadStr(root, "trackKey");
-                if (TryResolveTrack(key, out var track))
-                {
-                    var created = _library.CreatePlaylist($"Микс • {DateTime.Now:dd.MM}");
-                    _library.AddTrackToPlaylist(created.Id, track);
-                    PostToWeb("status", new { message = $"Создан «{created.Name}» и добавлен трек" });
-                }
-                break;
-            }
 
             case "track.toggleLike":
             {
@@ -498,16 +1951,6 @@ public partial class PlayerWindow : Window
                 }
                 break;
 
-            case "player.seekMs":
-                if (root.TryGetProperty("ms", out var msEl) && msEl.ValueKind == JsonValueKind.Number)
-                {
-                    long ms = (long)msEl.GetDouble();
-                    if (_controller.IsLocalActive)
-                        _player.SeekToMs(ms);
-                    else if (_totalMs > 0)
-                        await _controller.SeekFractionAsync((double)ms / _totalMs);
-                }
-                break;
 
             case "player.seekRelative":
                 if (root.TryGetProperty("deltaMs", out var dEl) && dEl.ValueKind == JsonValueKind.Number)
@@ -535,8 +1978,8 @@ public partial class PlayerWindow : Window
                 }
                 break;
 
-            case "player.shuffle":
-                _player.ShuffleQueue();
+            case "player.toggleShuffle":
+                _player.ToggleShuffle();
                 break;
 
             case "player.cycleRepeat":
@@ -626,7 +2069,589 @@ public partial class PlayerWindow : Window
                     PushEqState();
                 }
                 break;
+
+            case "settings.saveProxy":
+                SaveProxyFromWeb(root);
+                break;
+
+            case "settings.testProxy":
+                await TestProxyFromWebAsync(root);
+                break;
+
+            case "settings.setDownloadFolder":
+            {
+                var path = ReadStr(root, "path")?.Trim() ?? "";
+                if (string.IsNullOrWhiteSpace(path))
+                    path = AppSettings.DefaultDownloadFolder;
+                _settings.Update(s => s.DownloadFolder = path, notify: false);
+                PushWindowSettingsUpdate();
+                PostToWeb("status", new { message = $"Папка загрузок: {_settings.Current.DownloadFolder}" });
+                break;
+            }
+
+            case "settings.pickDownloadFolder":
+            {
+                var dlg = new Microsoft.Win32.OpenFolderDialog
+                {
+                    Title = "Выберите папку для скачанных треков",
+                    InitialDirectory = Directory.Exists(_settings.Current.DownloadFolder)
+                        ? _settings.Current.DownloadFolder
+                        : AppSettings.DefaultDownloadFolder
+                };
+                if (dlg.ShowDialog(this) == true && !string.IsNullOrWhiteSpace(dlg.FolderName))
+                {
+                    _settings.Update(s => s.DownloadFolder = dlg.FolderName, notify: false);
+                    PushWindowSettingsUpdate();
+                    PostToWeb("status", new { message = $"Папка загрузок: {_settings.Current.DownloadFolder}" });
+                }
+                break;
+            }
+
+            case "settings.openDownloadFolder":
+                try
+                {
+                    var folder = _settings.Current.DownloadFolder;
+                    Directory.CreateDirectory(folder);
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "explorer.exe",
+                        Arguments = $"\"{folder}\"",
+                        UseShellExecute = true
+                    });
+                }
+                catch { }
+                break;
+
+            case "system.checkYtDlp":
+                await CheckYtDlpForWebAsync();
+                break;
+
+            case "system.checkUpdate":
+                await CheckUpdateForWebAsync();
+                break;
+
+            case "system.installUpdate":
+                await InstallUpdateForWebAsync();
+                break;
+
+            case "auth.openBrowser":
+            {
+                var prov = ReadStr(root, "provider") ?? "";
+                OpenExternalBrowserAuth(prov);
+                break;
+            }
+
+            case "auth.cancelBrowser":
+                CancelActiveAuthFlow();
+                PostToWeb("authPending", new { provider = ReadStr(root, "provider") ?? "", active = false });
+                break;
+
+            case "auth.submitInput":
+            {
+                var prov = ReadStr(root, "provider") ?? "";
+                var input = ReadStr(root, "input") ?? "";
+                await CompleteProviderAuthAsync(prov, input);
+                break;
+            }
+
+            case "auth.pasteAndSubmit":
+            {
+                var prov = ReadStr(root, "provider") ?? "";
+                var clip = SafeGetClipboardText().Trim();
+                await CompleteProviderAuthAsync(prov, clip);
+                break;
+            }
+
+            case "auth.copyCode":
+            {
+                var code = ReadStr(root, "code") ?? "";
+                if (!string.IsNullOrWhiteSpace(code))
+                {
+                    SafeSetClipboardText(code);
+                    PostToWeb("status", new { message = $"Код {code} скопирован в буфер обмена" });
+                }
+                break;
+            }
+
+            case "bridge.copyExtUrl":
+                if (_browserBridge != null)
+                {
+                    SafeSetClipboardText(_browserBridge.ExtensionsUrl);
+                    PostToWeb("status", new { message = $"Скопировано: {_browserBridge.ExtensionsUrl} — вставьте в адресную строку браузера и включите Режим разработчика" });
+                }
+                break;
+
+            case "bridge.openExtFolder":
+                if (_browserBridge != null)
+                {
+                    try
+                    {
+                        Directory.CreateDirectory(_browserBridge.ExtensionDirectory);
+                        Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{_browserBridge.ManifestPath}\"")
+                        {
+                            UseShellExecute = true
+                        });
+                        PostToWeb("status", new { message = "Нажмите «Загрузить распакованное расширение» и укажите папку BrowserBridge" });
+                    }
+                    catch (Exception ex)
+                    {
+                        PostToWeb("status", new { message = $"Не удалось открыть папку: {ex.Message}" });
+                    }
+                }
+                break;
+
+            case "bridge.syncAll":
+                if (_browserBridge?.IsExtensionConnected == true)
+                {
+                    TryOpenUrlInBrowser(_browserBridge.GetConnectUrl("all"));
+                    PostToWeb("status", new { message = "Синхронизация Spotify и YouTube через Мост браузера..." });
+                }
+                else
+                {
+                    PostToWeb("status", new { message = "Сначала добавьте папку BrowserBridge в расширения вашего браузера (1 раз)." });
+                }
+                break;
+
+            case "auth.disconnect":
+            {
+                var prov = ReadStr(root, "provider") ?? "";
+                DisconnectProvider(prov);
+                break;
+            }
+
+            case "auth.syncProvider":
+            {
+                var prov = ReadStr(root, "provider") ?? "";
+                await SyncSingleProviderAsync(prov);
+                break;
+            }
+
+            case "auth.importYandexJson":
+                ImportYandexJsonFromWeb();
+                break;
+
+            case "auth.importYoutubeCookies":
+                ImportYoutubeCookiesFromWeb();
+                break;
         }
+    }
+
+    private object BuildWindowSettingsDto()
+    {
+        var s = _settings.Current;
+        return new
+        {
+            compact = _isCompactMode,
+            alwaysOnTop = s.WindowAlwaysOnTop,
+            minimizeToTray = s.MinimizeToTray,
+            compactEdgeAutoHide = s.CompactEdgeAutoHide,
+            dockedEdge = _dockedEdge,
+            edgeCollapsed = _isEdgeCollapsed,
+            startMinimized = s.StartMinimizedToIsland,
+            autoPauseOnSwitch = s.AutoPauseOnSwitch,
+            autoStart = _settings.IsAutoStartEnabled(),
+            chromaIntensity = s.ChromaIntensity,
+            windowOpacity = s.WindowOpacityPercent,
+            zeroBlurMode = s.ZeroBlurMode,
+            downloadFolder = s.DownloadFolder
+        };
+    }
+
+    private object BuildProxyDto(AppSettings s)
+    {
+        string text;
+        string kind;
+        if (!s.ProxyEnabled)
+        {
+            if (!string.IsNullOrWhiteSpace(s.ProxyHost))
+            {
+                text = $"Сохранено ({s.ProxyType.ToUpperInvariant()} {s.ProxyHost}:{s.ProxyPort}), но прокси выключен.";
+                kind = "warn";
+            }
+            else
+            {
+                text = "Прокси выключен — используется системное подключение.";
+                kind = "off";
+            }
+        }
+        else if (string.IsNullOrWhiteSpace(s.ProxyHost))
+        {
+            text = "Укажите адрес прокси-сервера и нажмите «Применить».";
+            kind = "warn";
+        }
+        else
+        {
+            string ruNote = s.ProxyBypassRuServices ? " • Яндекс и ВК напрямую" : " • весь трафик";
+            text = $"Активен: {s.ProxyType.ToUpperInvariant()} {s.ProxyHost}:{s.ProxyPort}{ruNote}";
+            kind = "ok";
+        }
+
+        return new
+        {
+            enabled = s.ProxyEnabled,
+            type = s.ProxyType,
+            host = s.ProxyHost,
+            port = s.ProxyPort,
+            username = s.ProxyUsername,
+            password = s.ProxyPassword,
+            bypassRu = s.ProxyBypassRuServices,
+            text,
+            kind
+        };
+    }
+
+    private void SaveProxyFromWeb(JsonElement root)
+    {
+        bool enabled = root.TryGetProperty("enabled", out var enEl) && enEl.ValueKind == JsonValueKind.True;
+        bool bypassRu = !root.TryGetProperty("bypassRu", out var brEl) || brEl.ValueKind == JsonValueKind.True;
+        string rawType = ReadStr(root, "proxyType") ?? "http";
+        string rawHost = (ReadStr(root, "host") ?? "").Trim();
+        string rawPort = root.TryGetProperty("port", out var pEl)
+            ? (pEl.ValueKind == JsonValueKind.Number ? pEl.GetInt32().ToString() : (pEl.GetString() ?? ""))
+            : "";
+        string rawUser = (ReadStr(root, "username") ?? "").Trim();
+        string rawPass = ReadStr(root, "password") ?? "";
+
+        if (!string.IsNullOrWhiteSpace(rawHost) &&
+            (rawHost.Contains("://", StringComparison.Ordinal) ||
+             rawHost.Contains('@', StringComparison.Ordinal) ||
+             (rawHost.Contains(':', StringComparison.Ordinal) && !rawHost.Contains("::", StringComparison.Ordinal))) &&
+            ProxyService.TryParseProxyInput(rawHost, out var parsed) &&
+            !string.IsNullOrWhiteSpace(parsed.Host))
+        {
+            if (!string.IsNullOrWhiteSpace(parsed.Type)) rawType = parsed.Type;
+            rawHost = parsed.Host;
+            if (parsed.Port.HasValue) rawPort = parsed.Port.Value.ToString();
+            if (parsed.Username != null) rawUser = parsed.Username;
+            if (parsed.Password != null) rawPass = parsed.Password;
+        }
+
+        string type = ProxyService.NormalizeType(rawType);
+        int port;
+        if (string.IsNullOrWhiteSpace(rawPort))
+        {
+            port = ProxyService.NormalizePort(type, 0);
+        }
+        else if (!int.TryParse(rawPort.Trim(), out port) || port < 1 || port > 65535)
+        {
+            PostToWeb("proxyStatus", new { text = "Ошибка: порт должен быть числом от 1 до 65535.", kind = "error" });
+            return;
+        }
+
+        if (enabled && string.IsNullOrWhiteSpace(rawHost))
+        {
+            PostToWeb("proxyStatus", new { text = "Введите адрес прокси-сервера перед применением.", kind = "error" });
+            return;
+        }
+
+        _settings.Update(s =>
+        {
+            s.ProxyEnabled = enabled;
+            s.ProxyType = type;
+            s.ProxyHost = rawHost;
+            s.ProxyPort = port;
+            s.ProxyUsername = rawUser;
+            s.ProxyPassword = rawPass;
+            s.ProxyBypassRuServices = bypassRu;
+        }, notify: true);
+
+        PostToWeb("proxyStatus", BuildProxyDto(_settings.Current));
+        PushAccountsUpdate();
+        PostToWeb("status", new { message = enabled ? $"Прокси применён: {type.ToUpperInvariant()} {rawHost}:{port}" : "Прокси отключён" });
+    }
+
+    private async Task TestProxyFromWebAsync(JsonElement root)
+    {
+        string rawType = ReadStr(root, "proxyType") ?? "http";
+        string rawHost = (ReadStr(root, "host") ?? "").Trim();
+        string rawPort = root.TryGetProperty("port", out var pEl)
+            ? (pEl.ValueKind == JsonValueKind.Number ? pEl.GetInt32().ToString() : (pEl.GetString() ?? ""))
+            : "";
+        string rawUser = (ReadStr(root, "username") ?? "").Trim();
+        string rawPass = ReadStr(root, "password") ?? "";
+
+        if (!string.IsNullOrWhiteSpace(rawHost) &&
+            (rawHost.Contains("://", StringComparison.Ordinal) ||
+             rawHost.Contains('@', StringComparison.Ordinal) ||
+             (rawHost.Contains(':', StringComparison.Ordinal) && !rawHost.Contains("::", StringComparison.Ordinal))) &&
+            ProxyService.TryParseProxyInput(rawHost, out var parsed) &&
+            !string.IsNullOrWhiteSpace(parsed.Host))
+        {
+            if (!string.IsNullOrWhiteSpace(parsed.Type)) rawType = parsed.Type;
+            rawHost = parsed.Host;
+            if (parsed.Port.HasValue) rawPort = parsed.Port.Value.ToString();
+            if (parsed.Username != null) rawUser = parsed.Username;
+            if (parsed.Password != null) rawPass = parsed.Password;
+        }
+
+        string type = ProxyService.NormalizeType(rawType);
+        int port = string.IsNullOrWhiteSpace(rawPort)
+            ? ProxyService.NormalizePort(type, 0)
+            : (int.TryParse(rawPort.Trim(), out int p) && p >= 1 && p <= 65535 ? p : 0);
+
+        if (port == 0)
+        {
+            PostToWeb("proxyStatus", new { text = "Укажите корректный порт (от 1 до 65535).", kind = "error" });
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(rawHost))
+        {
+            PostToWeb("proxyStatus", new { text = "Введите адрес прокси-сервера.", kind = "error" });
+            return;
+        }
+
+        var nextCts = new CancellationTokenSource();
+        var prev = Interlocked.Exchange(ref _proxyTestCts, nextCts);
+        if (prev != null) { try { prev.Cancel(); } catch { } try { prev.Dispose(); } catch { } }
+        var ct = nextCts.Token;
+
+        PostToWeb("proxyStatus", new { text = $"Проверка {type.ToUpperInvariant()} {rawHost}:{port}...", kind = "busy", testing = true });
+        try
+        {
+            var (ok, message) = await ProxyService.TestProxyAsync(type, rawHost, port, rawUser, rawPass, ct);
+            if (!ct.IsCancellationRequested)
+                PostToWeb("proxyStatus", new { text = message, kind = ok ? "ok" : "error", testing = false });
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private async Task CheckYtDlpForWebAsync()
+    {
+        PostToWeb("ytDlpStatus", new { text = "Проверка yt-dlp --version...", ok = false, busy = true });
+        var (ok, info) = await YtDlpMusicProvider.CheckYtDlpAsync();
+        PostToWeb("ytDlpStatus", new { text = info, ok, busy = false });
+    }
+
+    private async Task CheckUpdateForWebAsync()
+    {
+        PostToWeb("updateStatus", new { text = "Проверка последней версии на GitHub...", checkedOk = false, isAvailable = false, busy = true, progress = 0 });
+        var res = await AppUpdateService.CheckForUpdateAsync();
+        var text = string.IsNullOrWhiteSpace(res.CommitMessage) || !res.IsUpdateAvailable
+            ? res.StatusMessage
+            : $"{res.StatusMessage} {res.CommitMessage}";
+        PostToWeb("updateStatus", new
+        {
+            text,
+            checkedOk = res.CheckedOk,
+            isAvailable = res.IsUpdateAvailable,
+            busy = false,
+            progress = 0
+        });
+    }
+
+    private async Task InstallUpdateForWebAsync()
+    {
+        PostToWeb("updateStatus", new { text = "Загрузка обновления с GitHub...", checkedOk = true, isAvailable = true, busy = true, progress = 5 });
+        var (ok, err) = await AppUpdateService.DownloadAndApplyUpdateAsync((pct, msg) =>
+        {
+            Dispatcher.BeginInvoke(() => PostToWeb("updateStatus", new
+            {
+                text = msg,
+                checkedOk = true,
+                isAvailable = true,
+                busy = true,
+                progress = pct
+            }));
+        });
+        if (!ok)
+        {
+            PostToWeb("updateStatus", new { text = err, checkedOk = false, isAvailable = true, busy = false, progress = 0 });
+            PostToWeb("status", new { message = err });
+        }
+    }
+
+    private void DisconnectProvider(string provider)
+    {
+        switch (provider)
+        {
+            case "yandex":
+                _yandex.Disconnect();
+                _library.RemoveExternalPlaylists("yandex");
+                PostToWeb("status", new { message = "Вы вышли из аккаунта Яндекс Музыки." });
+                break;
+            case "vk":
+                _vk.Disconnect();
+                _library.RemoveExternalPlaylists("vk");
+                PostToWeb("status", new { message = "Вы вышли из аккаунта ВКонтакте." });
+                break;
+            case "spotify":
+                _spotify.Disconnect();
+                _library.RemoveExternalPlaylists("spotify");
+                PostToWeb("status", new { message = "Вы вышли из аккаунта Spotify." });
+                break;
+            case "youtube":
+                YtDlpMusicProvider.ClearYouTubeCookies();
+                PostToWeb("status", new { message = "YouTube cookies удалены." });
+                break;
+        }
+        PushAccountsUpdate();
+    }
+
+    private async Task SyncSingleProviderAsync(string provider)
+    {
+        try
+        {
+            switch (provider)
+            {
+                case "yandex" when _yandex.IsAuthenticated:
+                {
+                    PostToWeb("status", new { message = "Синхронизация Яндекс Музыки..." });
+                    var pls = await _yandex.FetchUserPlaylistsAsync();
+                    _library.ReplaceExternalPlaylists("yandex", pls);
+                    PostToWeb("status", new { message = $"Яндекс Музыка: плейлистов {pls.Count}, треков {pls.Sum(p => p.Tracks.Count)}" });
+                    break;
+                }
+                case "vk" when _vk.IsAuthenticated:
+                {
+                    PostToWeb("status", new { message = "Синхронизация ВК Музыки..." });
+                    var pls = await _vk.FetchUserPlaylistsAsync();
+                    _library.ReplaceExternalPlaylists("vk", pls);
+                    PostToWeb("status", new { message = $"ВК Музыка: плейлистов {pls.Count}, треков {pls.Sum(p => p.Tracks.Count)}" });
+                    break;
+                }
+                case "spotify" when _spotify.IsAuthenticated:
+                {
+                    PostToWeb("status", new { message = "Синхронизация Spotify..." });
+                    var pls = await _spotify.FetchUserPlaylistsAsync();
+                    _library.ReplaceExternalPlaylists("spotify", pls);
+                    PostToWeb("status", new { message = $"Spotify: плейлистов {pls.Count}, треков {pls.Sum(p => p.Tracks.Count)}" });
+                    break;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            PostToWeb("status", new { message = $"Ошибка синхронизации: {ex.Message}" });
+        }
+    }
+
+    private void ImportYandexJsonFromWeb()
+    {
+        var dlg = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "Импорт списка треков (формат yandex2spotify JSON)",
+            Filter = "JSON файлы (*.json)|*.json|Все файлы (*.*)|*.*"
+        };
+        if (dlg.ShowDialog(this) != true) return;
+
+        try
+        {
+            var json = File.ReadAllText(dlg.FileName);
+            var tracks = YandexMusicProvider.ParseYandex2SpotifyJson(json);
+            if (tracks.Count == 0)
+            {
+                PostToWeb("status", new { message = "В JSON-файле не найдено треков формата [{\"artist\":\"...\",\"track\":\"...\"}]." });
+                return;
+            }
+            var name = $"Импорт • {Path.GetFileNameWithoutExtension(dlg.FileName)}";
+            _library.AddImportedPlaylist(name, tracks);
+            PostToWeb("status", new { message = $"Импортирован плейлист «{name}» ({tracks.Count} треков)." });
+        }
+        catch (Exception ex)
+        {
+            PostToWeb("status", new { message = $"Ошибка импорта JSON: {ex.Message}" });
+        }
+    }
+
+    private void ImportYoutubeCookiesFromWeb()
+    {
+        var dlg = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "Импорт Netscape cookies.txt для YouTube",
+            Filter = "Cookies файлы (*.txt)|*.txt|Все файлы (*.*)|*.*"
+        };
+        if (dlg.ShowDialog(this) != true) return;
+
+        try
+        {
+            var content = File.ReadAllText(dlg.FileName);
+            if (!content.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) &&
+                !content.Contains(".google.com", StringComparison.OrdinalIgnoreCase))
+            {
+                PostToWeb("status", new { message = "Выбранный файл не содержит cookies YouTube / Google." });
+                return;
+            }
+            var dir = Path.GetDirectoryName(YtDlpMusicProvider.YouTubeCookiesPath)!;
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(YtDlpMusicProvider.YouTubeCookiesPath, content, new System.Text.UTF8Encoding(false));
+            PushAccountsUpdate();
+            PostToWeb("status", new { message = "Файл cookies.txt для YouTube подключён." });
+        }
+        catch (Exception ex)
+        {
+            PostToWeb("status", new { message = $"Ошибка импорта cookies.txt: {ex.Message}" });
+        }
+    }
+
+    private object SampleTelemetryDto()
+    {
+        try
+        {
+            _selfProcess.Refresh();
+            long ramMb = Math.Max(1, _selfProcess.WorkingSet64 / (1024L * 1024L));
+            var nowUtc = DateTime.UtcNow;
+            var curCpu = _selfProcess.TotalProcessorTime;
+            double elapsedMs = Math.Max(1.0, (nowUtc - _lastCpuSampleUtc).TotalMilliseconds);
+            double cpuDeltaMs = Math.Max(0.0, (curCpu - _lastCpuTime).TotalMilliseconds);
+            _lastCpuTime = curCpu;
+            _lastCpuSampleUtc = nowUtc;
+
+            double cpuPct = Math.Clamp(
+                cpuDeltaMs / (elapsedMs * Math.Max(1, Environment.ProcessorCount)) * 100.0,
+                0.0,
+                100.0);
+            return new
+            {
+                ramMb,
+                cpuPercent = Math.Round(cpuPct, 1),
+                gpuPercent = 0
+            };
+        }
+        catch
+        {
+            return new { ramMb = 24L, cpuPercent = 0.2, gpuPercent = 0 };
+        }
+    }
+
+    private void PushTelemetrySample()
+    {
+        if (_isUiSuspended || _activeTab != "settings") return;
+        PostToWeb("telemetry", SampleTelemetryDto());
+    }
+
+    private void PushWindowSettingsUpdate()
+    {
+        PostToWeb("windowSettings", BuildWindowSettingsDto());
+    }
+
+    private void PushResumeSnapshot()
+    {
+        var playlists = _library.GetPlaylists();
+        var (queueItems, _) = _player.GetQueueSnapshot();
+        var cur = _controller.IsLocalActive ? _player.CurrentTrack : (_externalActiveTrack ?? _player.CurrentTrack);
+
+        PostToWeb("resumeSnapshot", new
+        {
+            favorites = _favorites.Select(ToDto).ToList(),
+            playlists = playlists.Select(ToPlaylistDto).ToList(),
+            queue = queueItems.Select(ToDto).ToList(),
+            currentTrack = cur != null ? ToDto(cur) : null,
+            coverDataUrl = _lastCoverDataUrl,
+            isPlaying = _isPlaying,
+            currentMs = _currentMs,
+            totalMs = _totalMs,
+            volume = _player.Volume,
+            repeatMode = (int)_player.RepeatMode,
+            shuffle = _player.ShuffleEnabled,
+            windowSettings = BuildWindowSettingsDto(),
+            proxy = BuildProxyDto(_settings.Current),
+            youtubeCookiesConnected = YtDlpMusicProvider.HasYouTubeCookies,
+            bridgeConnected = _browserBridge?.IsExtensionConnected == true,
+            bridgeBrowserName = _browserBridge?.BrowserName ?? "Браузер",
+            bridgeExtUrl = _browserBridge?.ExtensionsUrl ?? "chrome://extensions",
+            externalSource = !_controller.IsLocalActive ? _controller.CurrentMediaState?.ActiveBrand : null,
+            proxyActive = ProxyService.IsActive
+        });
     }
 
     private void PushFullInitState()
@@ -651,32 +2676,37 @@ public partial class PlayerWindow : Window
         var cur = _controller.IsLocalActive ? _player.CurrentTrack : (_externalActiveTrack ?? _player.CurrentTrack);
         if (cur != null) RegisterTrack(cur);
 
-        var (accentHex, accentRgb, orb2Rgb, orb3Rgb) = ComputePalette(_lastAccentColor);
         var s = _settings.Current;
 
         PostToWeb("initState", new
         {
-            sidebarCollapsed = s.IsSidebarCollapsed,
             yandexConnected = _yandex.IsAuthenticated,
             yandexUserName = s.YandexUserName ?? "",
             vkConnected = _vk.IsAuthenticated,
             vkUserName = s.VkUserName ?? "",
             spotifyConnected = _spotify.IsAuthenticated,
             spotifyUserName = s.SpotifyUserName ?? "",
+            youtubeCookiesConnected = YtDlpMusicProvider.HasYouTubeCookies,
+            bridgeConnected = _browserBridge?.IsExtensionConnected == true,
+            bridgeBrowserName = _browserBridge?.BrowserName ?? "Браузер",
+            bridgeExtUrl = _browserBridge?.ExtensionsUrl ?? "chrome://extensions",
             favorites = _favorites.Select(ToDto).ToList(),
             playlists = playlists.Select(ToPlaylistDto).ToList(),
             queue = queueItems.Select(ToDto).ToList(),
             currentTrack = cur != null ? ToDto(cur) : null,
             coverDataUrl = _lastCoverDataUrl,
-            accentHex,
-            accentRgb,
-            orb2Rgb,
-            orb3Rgb,
             isPlaying = _isPlaying,
             currentMs = _currentMs,
             totalMs = _totalMs,
             volume = _player.Volume,
             repeatMode = (int)_player.RepeatMode,
+            shuffle = _player.ShuffleEnabled,
+            compact = _isCompactMode,
+            windowSettings = BuildWindowSettingsDto(),
+            proxy = BuildProxyDto(s),
+            telemetry = SampleTelemetryDto(),
+            externalSource = !_controller.IsLocalActive ? _controller.CurrentMediaState?.ActiveBrand : null,
+            proxyActive = ProxyService.IsActive,
             eq = new
             {
                 enabled = s.EqualizerEnabled,
@@ -688,11 +2718,11 @@ public partial class PlayerWindow : Window
                     kv => kv.Key,
                     kv => new { preamp = kv.Value.Preamp, bands = kv.Value.Bands })
             },
-            windowMaximized = WindowState == WindowState.Maximized
+            windowMaximized = false
         });
 
-        if (cur != null)
-            _ = LoadLyricsForTrackAsync(cur);
+        if (_isUiSuspended)
+            PostToWeb("uiVisibility", new { visible = false });
     }
 
     private void PushLibraryUpdate()
@@ -709,7 +2739,17 @@ public partial class PlayerWindow : Window
         }
 
         _library.SyncLikedFlags(_currentResults);
-        _downloads.SyncDownloadedFlags(_currentResults);
+        var allSearchVariants = _currentSearchGroups.SelectMany(g => g.Variants).ToList();
+        if (allSearchVariants.Count > 0)
+        {
+            _library.SyncLikedFlags(allSearchVariants);
+            _downloads.SyncDownloadedFlags(allSearchVariants);
+        }
+        else
+        {
+            _library.SyncLikedFlags(_currentResults);
+            _downloads.SyncDownloadedFlags(_currentResults);
+        }
 
         var cur = _controller.IsLocalActive ? _player.CurrentTrack : (_externalActiveTrack ?? _player.CurrentTrack);
         PostToWeb("libraryUpdate", new
@@ -731,7 +2771,12 @@ public partial class PlayerWindow : Window
             vkConnected = _vk.IsAuthenticated,
             vkUserName = s.VkUserName ?? "",
             spotifyConnected = _spotify.IsAuthenticated,
-            spotifyUserName = s.SpotifyUserName ?? ""
+            spotifyUserName = s.SpotifyUserName ?? "",
+            youtubeCookiesConnected = YtDlpMusicProvider.HasYouTubeCookies,
+            bridgeConnected = _browserBridge?.IsExtensionConnected == true,
+            bridgeBrowserName = _browserBridge?.BrowserName ?? "Браузер",
+            bridgeExtUrl = _browserBridge?.ExtensionsUrl ?? "chrome://extensions",
+            proxyActive = ProxyService.IsActive
         });
     }
 
@@ -759,7 +2804,8 @@ public partial class PlayerWindow : Window
 
     private void SyncAllDownloadedStates()
     {
-        _downloads.SyncDownloadedFlags(_currentResults);
+        var allSearchVariants = _currentSearchGroups.SelectMany(g => g.Variants).ToList();
+        _downloads.SyncDownloadedFlags(allSearchVariants.Count > 0 ? allSearchVariants : _currentResults);
         _downloads.SyncDownloadedFlags(_favorites);
         foreach (var pl in _library.GetPlaylists())
             _downloads.SyncDownloadedFlags(pl.Tracks);
@@ -813,12 +2859,18 @@ public partial class PlayerWindow : Window
                 _library.SyncLikedFlags(resolved.Tracks);
                 _downloads.SyncDownloadedFlags(resolved.Tracks);
                 RegisterTracks(resolved.Tracks);
+                _rawSearchTracks = resolved.Tracks.ToList();
+                _currentSearchGroups = resolved.Tracks.Select(t => new SearchTrackGroup
+                {
+                    GroupKey = t.UniqueKey,
+                    Variants = new List<TrackItem> { t }
+                }).ToList();
                 _currentResults = resolved.Tracks;
 
                 bool isCollection = resolved.Kind is "playlist" or "album" || resolved.Tracks.Count > 1;
                 PostToWeb("searchResults", new
                 {
-                    items = _currentResults.Select(ToDto).ToList(),
+                    items = _currentSearchGroups.Select(ToSearchGroupDto).ToList(),
                     status = isCollection
                         ? $"Spotify • {resolved.CollectionName ?? "Плейлист"} ({resolved.Tracks.Count} треков)"
                         : "Прямая ссылка • Spotify",
@@ -839,10 +2891,19 @@ public partial class PlayerWindow : Window
             _downloads.SyncDownloadedFlags(new[] { directTrack });
             RegisterTrack(directTrack);
 
+            _rawSearchTracks = new List<TrackItem> { directTrack };
+            _currentSearchGroups = new List<SearchTrackGroup>
+            {
+                new SearchTrackGroup
+                {
+                    GroupKey = directTrack.UniqueKey,
+                    Variants = new List<TrackItem> { directTrack }
+                }
+            };
             _currentResults = new List<TrackItem> { directTrack };
             PostToWeb("searchResults", new
             {
-                items = _currentResults.Select(ToDto).ToList(),
+                items = _currentSearchGroups.Select(ToSearchGroupDto).ToList(),
                 status = $"Прямая ссылка • {directTrack.Source}",
                 canLoadMore = false,
                 isLoading = false
@@ -856,7 +2917,7 @@ public partial class PlayerWindow : Window
         {
             PostToWeb("searchResults", new
             {
-                items = _currentResults.Select(ToDto).ToList(),
+                items = _currentSearchGroups.Select(ToSearchGroupDto).ToList(),
                 status = "Выберите хотя бы один источник",
                 canLoadMore = false,
                 isLoading = false
@@ -884,17 +2945,27 @@ public partial class PlayerWindow : Window
             var rawMerged = await QueryMergedAsync(query, _currentLimitPerProvider, activeProviders, ct);
             if (ct.IsCancellationRequested) return;
 
-            var structured = StructureAndRankSearchResults(query, rawMerged);
-            _library.SyncLikedFlags(structured);
-            _downloads.SyncDownloadedFlags(structured);
-            RegisterTracks(structured);
-            _currentResults = structured;
+            var groups = StructureAndGroupSearchResults(query, rawMerged);
+            var allVariants = groups.SelectMany(g => g.Variants).ToList();
+            _library.SyncLikedFlags(allVariants);
+            _downloads.SyncDownloadedFlags(allVariants);
+            RegisterTracks(allVariants);
+
+            _rawSearchTracks = rawMerged;
+            _currentSearchGroups = groups;
+            _currentResults = groups.Select(g => g.ActiveTrack).ToList();
+
+            string statusText = groups.Count > 0
+                ? (allVariants.Count > groups.Count
+                    ? $"Найдено: {groups.Count} (из {allVariants.Count} версий)"
+                    : $"Найдено: {groups.Count}. Клик — включить")
+                : "Ничего не найдено";
 
             PostToWeb("searchResults", new
             {
-                items = _currentResults.Select(ToDto).ToList(),
-                status = structured.Count > 0 ? $"Найдено: {structured.Count}. Двойной клик — включить" : "Ничего не найдено",
-                canLoadMore = structured.Count > 0 && _currentLimitPerProvider < 50,
+                items = _currentSearchGroups.Select(ToSearchGroupDto).ToList(),
+                status = statusText,
+                canLoadMore = groups.Count > 0 && _currentLimitPerProvider < 50,
                 isLoading = false
             });
         }
@@ -927,7 +2998,7 @@ public partial class PlayerWindow : Window
 
         PostToWeb("searchResults", new
         {
-            items = _currentResults.Select(ToDto).ToList(),
+            items = _currentSearchGroups.Select(ToSearchGroupDto).ToList(),
             status = "Загружаем ещё...",
             canLoadMore = false,
             isLoading = true
@@ -938,19 +3009,38 @@ public partial class PlayerWindow : Window
             var expanded = await QueryMergedAsync(_lastQuery, nextLimit, activeProviders, ct);
             if (ct.IsCancellationRequested) return;
 
-            int prevCount = _currentResults.Count;
-            var combined = StructureAndRankSearchResults(_lastQuery, _currentResults.Concat(expanded));
-            int addedCount = Math.Max(0, combined.Count - prevCount);
+            var prevChoiceByGroup = _currentSearchGroups.ToDictionary(
+                g => g.GroupKey,
+                g => g.ActiveTrack.BrandKey,
+                StringComparer.OrdinalIgnoreCase);
 
-            _library.SyncLikedFlags(combined);
-            _downloads.SyncDownloadedFlags(combined);
-            RegisterTracks(combined);
-            _currentResults = combined;
+            int prevCount = _currentSearchGroups.Count;
+            var mergedRaw = _rawSearchTracks.Concat(expanded).ToList();
+            var combinedGroups = StructureAndGroupSearchResults(_lastQuery, mergedRaw);
+
+            foreach (var grp in combinedGroups)
+            {
+                if (prevChoiceByGroup.TryGetValue(grp.GroupKey, out var chosenBrand))
+                {
+                    int idx = grp.Variants.FindIndex(v => string.Equals(v.BrandKey, chosenBrand, StringComparison.OrdinalIgnoreCase));
+                    if (idx >= 0) grp.SelectedIndex = idx;
+                }
+            }
+
+            int addedCount = Math.Max(0, combinedGroups.Count - prevCount);
+            var allVariants = combinedGroups.SelectMany(g => g.Variants).ToList();
+            _library.SyncLikedFlags(allVariants);
+            _downloads.SyncDownloadedFlags(allVariants);
+            RegisterTracks(allVariants);
+
+            _rawSearchTracks = mergedRaw;
+            _currentSearchGroups = combinedGroups;
+            _currentResults = combinedGroups.Select(g => g.ActiveTrack).ToList();
 
             PostToWeb("searchResults", new
             {
-                items = _currentResults.Select(ToDto).ToList(),
-                status = $"Показано треков: {_currentResults.Count}",
+                items = _currentSearchGroups.Select(ToSearchGroupDto).ToList(),
+                status = $"Показано треков: {_currentSearchGroups.Count}",
                 canLoadMore = nextLimit < 50 && addedCount > 0,
                 isLoading = false
             });
@@ -960,7 +3050,7 @@ public partial class PlayerWindow : Window
         {
             PostToWeb("searchResults", new
             {
-                items = _currentResults.Select(ToDto).ToList(),
+                items = _currentSearchGroups.Select(ToSearchGroupDto).ToList(),
                 status = ex.Message,
                 canLoadMore = false,
                 isLoading = false
@@ -1060,7 +3150,7 @@ public partial class PlayerWindow : Window
         _ => 9
     };
 
-    private static List<TrackItem> StructureAndRankSearchResults(string query, IEnumerable<TrackItem> rawItems)
+    private static List<SearchTrackGroup> StructureAndGroupSearchResults(string query, IEnumerable<TrackItem> rawItems)
     {
         var seenKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var deduped = new List<TrackItem>();
@@ -1070,7 +3160,14 @@ public partial class PlayerWindow : Window
                 deduped.Add(item);
         }
 
-        if (deduped.Count <= 1) return deduped;
+        if (deduped.Count <= 1)
+        {
+            return deduped.Select(t => new SearchTrackGroup
+            {
+                GroupKey = t.UniqueKey,
+                Variants = new List<TrackItem> { t }
+            }).ToList();
+        }
 
         string normQuery = TrackMatcher.NormalizeKey(SearchWordCleanRegex.Replace(TrackMatcher.NormalizeKey(query), " "));
         string queryNoStars = TrackMatcher.BuildCanonicalSongKey(query);
@@ -1343,13 +3440,26 @@ public partial class PlayerWindow : Window
             return a.MinOriginalIndex.CompareTo(b.MinOriginalIndex);
         });
 
-        var finalOrdered = new List<TrackItem>(deduped.Count);
+        var groups = new List<SearchTrackGroup>(clusters.Count);
+        var usedGroupKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var c in clusters)
         {
-            foreach (var m in c.Items)
-                finalOrdered.Add(m.Track);
+            var variants = c.Items.Select(m => m.Track).ToList();
+            if (variants.Count == 0) continue;
+
+            string primaryArt = TrackMatcher.NormalizeKey(TrackMatcher.GetPrimaryArtist(c.Items[0].EffectiveArtistString));
+            string baseKey = !string.IsNullOrWhiteSpace(c.CanonicalSongKey)
+                ? $"{c.CanonicalSongKey}|{c.VariantTag}|{primaryArt}"
+                : variants[0].UniqueKey;
+            string groupKey = usedGroupKeys.Add(baseKey) ? baseKey : $"{baseKey}|{variants[0].UniqueKey}";
+
+            groups.Add(new SearchTrackGroup
+            {
+                GroupKey = groupKey,
+                Variants = variants
+            });
         }
-        return finalOrdered;
+        return groups;
     }
 
     private static bool ClusterMatchesTrack(SongCluster cluster, SearchTrackMeta meta)
@@ -1682,7 +3792,7 @@ public partial class PlayerWindow : Window
         if (!_yandex.IsAuthenticated)
         {
             PostToWeb("status", new { message = "Подключите аккаунт Яндекс Музыки для переноса трека" });
-            _openAccountsAction();
+            ShowSettingsSection("accounts");
             return;
         }
 
@@ -1700,9 +3810,55 @@ public partial class PlayerWindow : Window
         }
     }
 
+    private async Task RemoveTrackFromPlaylistSyncedAsync(string playlistId, string trackKey)
+    {
+        var pl = _library.GetPlaylists().FirstOrDefault(p => p.Id == playlistId);
+        if (pl == null) return;
+
+        TrackItem? track = pl.Tracks.FirstOrDefault(t => string.Equals(t.UniqueKey, trackKey, StringComparison.OrdinalIgnoreCase));
+        if (track == null && TryResolveTrack(trackKey, out var resolved))
+            track = resolved;
+
+        if (!pl.IsExternal)
+        {
+            _library.RemoveTrackFromPlaylist(playlistId, trackKey);
+            PostToWeb("status", new { message = $"Удалено из «{pl.Name}»" });
+            return;
+        }
+
+        if (track == null)
+        {
+            PostToWeb("status", new { message = "Не найден трек для удаления." });
+            return;
+        }
+
+        PostToWeb("status", new { message = $"Удаление из {pl.PlatformBadgeText}..." });
+        (bool ok, string msg) res;
+        switch ((pl.PlatformBrand ?? "").ToLowerInvariant())
+        {
+            case "yandex":
+                res = await _yandex.RemoveTrackFromPlaylistAsync(pl.ExternalId, track);
+                break;
+            case "vk":
+                res = await _vk.RemoveTrackFromPlaylistAsync(pl.ExternalId, pl.Name, track);
+                break;
+            case "spotify":
+                res = await _spotify.RemoveTrackFromPlaylistAsync(pl.ExternalId, track);
+                break;
+            default:
+                _library.RemoveTrackFromPlaylist(playlistId, trackKey);
+                return;
+        }
+
+        if (res.ok)
+            _library.RemoveTrackFromPlaylist(playlistId, trackKey);
+
+        PostToWeb("status", new { message = res.msg });
+    }
+
     #endregion
 
-    #region События плеера, обложка и тексты
+    #region События плеера и обложка
 
     private void OnTrackChanged(TrackItem track)
     {
@@ -1714,65 +3870,39 @@ public partial class PlayerWindow : Window
         _downloads.TryGetLocalFile(track);
         _library.SyncLikedFlags(new[] { track });
 
-        var brandFallback = ColorUtils.ParseHex(track.BrandColor, Color.FromRgb(255, 204, 0));
-        _lastAccentColor = brandFallback;
         _lastCoverDataUrl = null;
-        var (accentHex, accentRgb, orb2Rgb, orb3Rgb) = ComputePalette(brandFallback);
 
         Dispatcher.BeginInvoke(() =>
         {
+            if (_isUiSuspended) return;
             PostToWeb("trackChanged", new
             {
                 track = ToDto(track),
-                coverDataUrl = (string?)null,
-                accentHex,
-                accentRgb,
-                orb2Rgb,
-                orb3Rgb
+                coverDataUrl = (string?)null
             });
         });
 
-        _ = LoadLyricsForTrackAsync(track);
-        _ = LoadCoverAndGlowAsync(track, brandFallback);
+        _ = LoadCoverDataUrlAsync(track);
     }
 
-    private async Task LoadCoverAndGlowAsync(TrackItem track, Color brandFallback)
+    private async Task LoadCoverDataUrlAsync(TrackItem track)
     {
         var bytes = await _controller.DownloadCoverAsync(track.CoverUrl);
         if (_player.CurrentTrack?.UniqueKey != track.UniqueKey) return;
 
         string? dataUrl = null;
-        Color glowColor = brandFallback;
-
-        if (bytes != null && bytes.Length > 0)
-        {
-            var bmp = ColorUtils.BytesToBitmap(bytes);
-            if (bmp != null)
-            {
-                glowColor = ColorUtils.ExtractAmbientColor(bmp, brandFallback);
-                int chroma = Math.Max(glowColor.R, Math.Max(glowColor.G, glowColor.B)) -
-                             Math.Min(glowColor.R, Math.Min(glowColor.G, glowColor.B));
-                if (chroma < 32)
-                    glowColor = brandFallback;
-            }
+        if (bytes != null && bytes.Length > 0 && bytes.Length <= 512 * 1024)
             dataUrl = "data:image/jpeg;base64," + Convert.ToBase64String(bytes);
-        }
 
-        _lastAccentColor = glowColor;
         _lastCoverDataUrl = dataUrl;
-        var (accentHex, accentRgb, orb2Rgb, orb3Rgb) = ComputePalette(glowColor);
 
         _ = Dispatcher.BeginInvoke(() =>
         {
-            if (_player.CurrentTrack?.UniqueKey != track.UniqueKey) return;
+            if (_isUiSuspended || _player.CurrentTrack?.UniqueKey != track.UniqueKey) return;
             PostToWeb("trackChanged", new
             {
                 track = ToDto(track),
-                coverDataUrl = dataUrl,
-                accentHex,
-                accentRgb,
-                orb2Rgb,
-                orb3Rgb
+                coverDataUrl = dataUrl
             });
         });
     }
@@ -1783,26 +3913,30 @@ public partial class PlayerWindow : Window
         _currentMs = currentMs;
         if (totalMs > 0) _totalMs = totalMs;
 
+        if (_isUiSuspended) return;
+
         long now = Environment.TickCount64;
         if (_player.IsPlaying && now - _lastPosPushTick < 180) return;
         _lastPosPushTick = now;
 
         Dispatcher.BeginInvoke(() =>
-            PostToWeb("position", new { currentMs = _currentMs, totalMs = _totalMs }));
+        {
+            if (!_isUiSuspended)
+                PostToWeb("position", new { currentMs = _currentMs, totalMs = _totalMs });
+        });
     }
 
-    public void NotifySeekVisual(long targetMs, long deltaMs)
-    {
-        if (!_webViewReady) return;
-        Dispatcher.BeginInvoke(() =>
-            PostToWeb("seekFeedback", new { targetMs, deltaMs }));
-    }
 
     private void OnPlaybackStateChanged(bool isPlaying)
     {
         if (!_controller.IsLocalActive && _externalActiveTrack != null) return;
         _isPlaying = isPlaying;
-        Dispatcher.BeginInvoke(() => PostToWeb("playbackState", new { isPlaying }));
+        if (_isUiSuspended) return;
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (!_isUiSuspended)
+                PostToWeb("playbackState", new { isPlaying });
+        });
     }
 
     private void OnControllerStateChanged(MediaState state)
@@ -1816,8 +3950,11 @@ public partial class PlayerWindow : Window
                 if (_player.CurrentTrack != null)
                 {
                     OnTrackChanged(_player.CurrentTrack);
-                    PostToWeb("playbackState", new { isPlaying = _player.IsPlaying });
-                    PostToWeb("position", new { currentMs = _player.CurrentTimeMs, totalMs = _player.TotalLengthMs });
+                    if (!_isUiSuspended)
+                    {
+                        PostToWeb("playbackState", new { isPlaying = _player.IsPlaying });
+                        PostToWeb("position", new { currentMs = _player.CurrentTimeMs, totalMs = _player.TotalLengthMs });
+                    }
                 }
             }
             return;
@@ -1848,41 +3985,24 @@ public partial class PlayerWindow : Window
         if (trackChanged || (state.CoverUpdated && state.CoverBytes != null && state.CoverBytes.Length > 0))
         {
             _lastExternalVisualKey = visualKey;
-            var brandFallback = ColorUtils.ParseHex(extTrack.BrandColor, Color.FromRgb(255, 204, 0));
 
             if (trackChanged)
-            {
-                _lastAccentColor = brandFallback;
                 _lastCoverDataUrl = null;
-            }
 
-            if (state.CoverBytes != null && state.CoverBytes.Length > 0)
-            {
-                var bmp = ColorUtils.BytesToBitmap(state.CoverBytes);
-                if (bmp != null)
-                {
-                    var glow = ColorUtils.ExtractAmbientColor(bmp, brandFallback);
-                    int chroma = Math.Max(glow.R, Math.Max(glow.G, glow.B)) -
-                                 Math.Min(glow.R, Math.Min(glow.G, glow.B));
-                    _lastAccentColor = chroma < 32 ? brandFallback : glow;
-                }
+            if (state.CoverBytes != null && state.CoverBytes.Length > 0 && state.CoverBytes.Length <= 512 * 1024)
                 _lastCoverDataUrl = "data:image/jpeg;base64," + Convert.ToBase64String(state.CoverBytes);
-            }
 
-            var (accentHex, accentRgb, orb2Rgb, orb3Rgb) = ComputePalette(_lastAccentColor);
-            PostToWeb("trackChanged", new
+            if (!_isUiSuspended)
             {
-                track = ToDto(extTrack),
-                coverDataUrl = _lastCoverDataUrl,
-                accentHex,
-                accentRgb,
-                orb2Rgb,
-                orb3Rgb
-            });
-
-            if (trackChanged)
-                _ = LoadLyricsForTrackAsync(extTrack);
+                PostToWeb("trackChanged", new
+                {
+                    track = ToDto(extTrack),
+                    coverDataUrl = _lastCoverDataUrl
+                });
+            }
         }
+
+        if (_isUiSuspended) return;
 
         PostToWeb("playbackState", new { isPlaying = _isPlaying });
         PostToWeb("position", new { currentMs = _currentMs, totalMs = _totalMs });
@@ -1917,7 +4037,7 @@ public partial class PlayerWindow : Window
         foreach (var t in waveItems) RegisterTrack(t);
 
         PushQueueUpdate();
-        PostToWeb("showDrawerTab", new { tab = 1 });
+        PostToWeb("showTab", new { tab = "queue" });
         PostToWeb("status", new { message = "Яндекс Музыка • Моя волна • Воспроизведение" });
     }
 
@@ -1946,7 +4066,7 @@ public partial class PlayerWindow : Window
         foreach (var t in mixItems) RegisterTrack(t);
 
         PushQueueUpdate();
-        PostToWeb("showDrawerTab", new { tab = 1 });
+        PostToWeb("showTab", new { tab = "queue" });
         PostToWeb("status", new { message = "ВК Музыка • VK Микс • Воспроизведение" });
     }
 
@@ -1979,55 +4099,6 @@ public partial class PlayerWindow : Window
         };
     }
 
-    private async Task LoadLyricsForTrackAsync(TrackItem track)
-    {
-        _lyricsCts?.Cancel();
-        _lyricsCts = new CancellationTokenSource();
-        var ct = _lyricsCts.Token;
-
-        _ = Dispatcher.BeginInvoke(() => PostToWeb("lyricsUpdate", new
-        {
-            title = track.Title,
-            sourceInfo = "Поиск текста на LRCLIB...",
-            hasSynced = false,
-            syncedLines = Array.Empty<object>(),
-            plainText = "",
-            emptyMessage = "Загружаем текст песни..."
-        }));
-
-        try
-        {
-            var res = await _lyrics.GetLyricsAsync(track, ct);
-            if (ct.IsCancellationRequested) return;
-
-            _ = Dispatcher.BeginInvoke(() => PostToWeb("lyricsUpdate", new
-            {
-                title = track.Title,
-                sourceInfo = res.SourceInfo,
-                hasSynced = res.HasSynced,
-                syncedLines = res.SyncedLines.Select(l => new
-                {
-                    timestampMs = (long)l.Timestamp.TotalMilliseconds,
-                    text = l.Text
-                }).ToList(),
-                plainText = res.PlainText ?? "",
-                emptyMessage = res.HasLyrics ? "" : "Текст песни для этого трека не найден."
-            }));
-        }
-        catch (OperationCanceledException) { }
-        catch
-        {
-            _ = Dispatcher.BeginInvoke(() => PostToWeb("lyricsUpdate", new
-            {
-                title = track.Title,
-                sourceInfo = "",
-                hasSynced = false,
-                syncedLines = Array.Empty<object>(),
-                plainText = "",
-                emptyMessage = "Не удалось загрузить текст песни."
-            }));
-        }
-    }
 
     #endregion
 
@@ -2061,17 +4132,32 @@ public partial class PlayerWindow : Window
         return false;
     }
 
-    private static (string Hex, string Rgb, string Orb2Rgb, string Orb3Rgb) ComputePalette(Color c)
+
+    private static object ToSearchGroupDto(SearchTrackGroup g)
     {
-        string hex = $"#{c.R:X2}{c.G:X2}{c.B:X2}";
-        string rgb = $"{c.R}, {c.G}, {c.B}";
-        int r2 = Math.Clamp((int)(c.B * 0.78 + 30), 30, 235);
-        int g2 = Math.Clamp((int)(c.R * 0.52 + 45), 35, 235);
-        int b2 = Math.Clamp((int)(c.G * 0.88 + 40), 50, 245);
-        int r3 = Math.Clamp((int)(c.G * 0.65 + 45), 40, 235);
-        int g3 = Math.Clamp((int)(c.B * 0.45 + 30), 30, 210);
-        int b3 = Math.Clamp((int)(c.R * 0.85 + 65), 60, 245);
-        return (hex, rgb, $"{r2}, {g2}, {b2}", $"{r3}, {g3}, {b3}");
+        var t = g.ActiveTrack;
+        return new
+        {
+            id = t.Id,
+            uniqueKey = t.UniqueKey,
+            source = t.Source,
+            brandKey = t.BrandKey,
+            brandColor = t.BrandColor,
+            title = t.Title,
+            artist = t.Artist,
+            pageUrl = t.PageUrl,
+            coverUrl = t.CoverUrl,
+            durationText = t.DurationText,
+            durationMs = t.Duration > TimeSpan.Zero ? (long)t.Duration.TotalMilliseconds : 0,
+            isLiked = t.IsLiked,
+            isCurrentlyPlaying = t.IsCurrentlyPlaying,
+            isDownloading = t.IsDownloading,
+            downloadProgress = t.DownloadProgress,
+            isDownloaded = t.IsDownloaded,
+            groupKey = g.GroupKey,
+            selectedIndex = g.SelectedIndex,
+            variants = g.Variants.Select(ToDto).ToList()
+        };
     }
 
     private static object ToDto(TrackItem t) => new
@@ -2088,6 +4174,7 @@ public partial class PlayerWindow : Window
         durationText = t.DurationText,
         durationMs = t.Duration > TimeSpan.Zero ? (long)t.Duration.TotalMilliseconds : 0,
         isLiked = t.IsLiked,
+        isCurrentlyPlaying = t.IsCurrentlyPlaying,
         isDownloading = t.IsDownloading,
         downloadProgress = t.DownloadProgress,
         isDownloaded = t.IsDownloaded

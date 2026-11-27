@@ -20,7 +20,7 @@ public sealed class VkMusicProvider : IMusicProvider, IDisposable
 {
     public const string BrandColorHex = "#0077FF";
     public const string OAuthAuthorizeUrl =
-        "https://oauth.vk.com/authorize?client_id=2685278&scope=audio,offline&redirect_uri=https://oauth.vk.com/blank.html&display=page&response_type=token&v=5.131&revoke=1";
+        "https://oauth.vk.ru/authorize?client_id=2685278&scope=audio,offline&redirect_uri=https://oauth.vk.ru/blank.html&display=mobile&response_type=token&v=5.199";
     public const string KateMobileUserAgent =
         "KateMobileAndroid/56.1 lite-462 (Android 10; SDK 29; arm64-v8a; samsung SM-G973F; ru)";
 
@@ -37,6 +37,10 @@ public sealed class VkMusicProvider : IMusicProvider, IDisposable
 
     private static readonly Regex UserIdInUrlRegex = new(
         @"[?#&]user_id=(\d+)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex AudiosRedirectUidRegex = new(
+        @"/audios(\d+)",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex RawTokenRegex = new(
@@ -199,32 +203,7 @@ public sealed class VkMusicProvider : IMusicProvider, IDisposable
         var normalizedCookie = NormalizeCookieInput(
             !string.IsNullOrWhiteSpace(cookieHeader) ? cookieHeader : (string.IsNullOrWhiteSpace(token) ? rawInput : ""));
 
-        // Если cookies ещё не переданы (например, после OAuth), подтягиваем их из профиля WebView2Auth
-        if (string.IsNullOrWhiteSpace(normalizedCookie))
-        {
-            var bridgeCookies = await _bridge.RefreshCookiesAsync(ct);
-            if (!string.IsNullOrWhiteSpace(bridgeCookies) &&
-                bridgeCookies.Contains("remix", StringComparison.OrdinalIgnoreCase))
-            {
-                normalizedCookie = bridgeCookies;
-            }
-        }
-
-        if (userId <= 0 || string.IsNullOrWhiteSpace(userName))
-        {
-            var (probedId, probedName) = await ProbeUserIdentityAsync(normalizedCookie, ct);
-            if (userId <= 0 && probedId > 0) userId = probedId;
-            if (string.IsNullOrWhiteSpace(userName) && !string.IsNullOrWhiteSpace(probedName))
-                userName = probedName;
-
-            if (string.IsNullOrWhiteSpace(normalizedCookie))
-            {
-                var freshCookies = await _bridge.RefreshCookiesAsync(ct);
-                if (!string.IsNullOrWhiteSpace(freshCookies))
-                    normalizedCookie = freshCookies;
-            }
-        }
-
+        // Сначала проверяем официальный Kate Mobile OAuth-токен (без запуска WebView2, если вход выполнен через системный браузер)
         if (!string.IsNullOrWhiteSpace(token) && (userId <= 0 || string.IsNullOrWhiteSpace(userName)))
         {
             var userDoc = await CallVkApiAsync("users.get", new Dictionary<string, string>(), token, "5.131", ct);
@@ -244,6 +223,33 @@ public sealed class VkMusicProvider : IMusicProvider, IDisposable
                     if (!string.IsNullOrWhiteSpace(fullName))
                         userName = fullName;
                 }
+            }
+        }
+
+        // Если cookies нужны (cookie-режим без токена), подтягиваем их из профиля или зондируем
+        if (string.IsNullOrWhiteSpace(normalizedCookie) && string.IsNullOrWhiteSpace(token))
+        {
+            var bridgeCookies = await _bridge.RefreshCookiesAsync(ct);
+            if (!string.IsNullOrWhiteSpace(bridgeCookies) &&
+                bridgeCookies.Contains("remix", StringComparison.OrdinalIgnoreCase))
+            {
+                normalizedCookie = bridgeCookies;
+            }
+        }
+
+        if ((userId <= 0 || string.IsNullOrWhiteSpace(userName)) &&
+            (!string.IsNullOrWhiteSpace(normalizedCookie) || string.IsNullOrWhiteSpace(token)))
+        {
+            var (probedId, probedName) = await ProbeUserIdentityAsync(normalizedCookie, ct);
+            if (userId <= 0 && probedId > 0) userId = probedId;
+            if (string.IsNullOrWhiteSpace(userName) && !string.IsNullOrWhiteSpace(probedName))
+                userName = probedName;
+
+            if (string.IsNullOrWhiteSpace(normalizedCookie) && string.IsNullOrWhiteSpace(token))
+            {
+                var freshCookies = await _bridge.RefreshCookiesAsync(ct);
+                if (!string.IsNullOrWhiteSpace(freshCookies))
+                    normalizedCookie = freshCookies;
             }
         }
 
@@ -287,28 +293,58 @@ public sealed class VkMusicProvider : IMusicProvider, IDisposable
 
         var s = _settings.Current;
         var uid = s.VkUserId;
-        var cookie = await GetEffectiveCookieHeaderAsync(ct);
+        var token = s.VkAccessToken?.Trim();
+        var hasExplicitCookie = !string.IsNullOrWhiteSpace(s.VkCookieHeader);
 
-        try
+        if (hasExplicitCookie)
         {
-            string body = $"act=section&al=1&claim=0&is_layer=0&owner_id={uid}&q={Uri.EscapeDataString(query.Trim())}&section=search";
-            string? raw = await PostAlAudioRawAsync("?act=section", body, cookie, uid, allowBridge: true, ct);
-            if (!string.IsNullOrWhiteSpace(raw))
+            var cookie = await GetEffectiveCookieHeaderAsync(ct);
+            try
             {
-                var extracted = ExtractAllTracksFromRawText(raw, uid, Math.Max(limit * 2, 24));
-                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var tr in extracted)
+                string body = $"act=section&al=1&claim=0&is_layer=0&owner_id={uid}&q={Uri.EscapeDataString(query.Trim())}&section=search";
+                string? raw = await PostAlAudioRawAsync("?act=section", body, cookie, uid, allowBridge: true, ct);
+                if (!string.IsNullOrWhiteSpace(raw))
                 {
-                    if (seen.Add(tr.UniqueKey))
+                    var extracted = ExtractAllTracksFromRawText(raw, uid, Math.Max(limit * 2, 24));
+                    var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var tr in extracted)
                     {
-                        result.Add(tr);
-                        if (result.Count >= limit) break;
+                        if (seen.Add(tr.UniqueKey))
+                        {
+                            result.Add(tr);
+                            if (result.Count >= limit) return result;
+                        }
                     }
                 }
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch { }
         }
-        catch (OperationCanceledException) { }
-        catch { }
+
+        if (result.Count == 0 && !string.IsNullOrWhiteSpace(token))
+        {
+            try
+            {
+                using var doc = await CallVkApiAsync(
+                    "audio.search",
+                    new Dictionary<string, string>
+                    {
+                        ["q"] = query.Trim(),
+                        ["auto_complete"] = "1",
+                        ["count"] = Math.Clamp(limit, 1, 50).ToString()
+                    },
+                    token,
+                    "5.131",
+                    ct);
+                if (doc != null && !TryGetVkApiError(doc.RootElement, out _))
+                {
+                    foreach (var tr in ExtractTracksFromVkApiResponse(doc.RootElement, limit))
+                        result.Add(tr);
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch { }
+        }
 
         return result;
     }
@@ -320,6 +356,17 @@ public sealed class VkMusicProvider : IMusicProvider, IDisposable
 
         var s = _settings.Current;
         var uid = s.VkUserId;
+        var token = s.VkAccessToken?.Trim();
+        var hasExplicitCookie = !string.IsNullOrWhiteSpace(s.VkCookieHeader);
+
+        // Если вход выполнен только через OAuth-токен (системный браузер), используем Kate Mobile API
+        if (!string.IsNullOrWhiteSpace(token) && !hasExplicitCookie)
+        {
+            playlists = await FetchPlaylistsViaApiAsync(uid, token, ct);
+            if (playlists.Count > 0)
+                return playlists;
+        }
+
         var cookie = await GetEffectiveCookieHeaderAsync(ct);
 
         // Слой 1: прямые HTTP-запросы к m.vk.ru/audio и vk.ru/al_audio.php (протокол python273/vk_api vk_audio.py)
@@ -328,8 +375,14 @@ public sealed class VkMusicProvider : IMusicProvider, IDisposable
             playlists = await FetchPlaylistsDirectHttpAsync(uid, cookie, ct);
         }
 
-        // Слой 2: живой сбор внутри браузерной сессии WebView2 (same-origin fetch + DOM data-audio/.audio_row)
-        if (playlists.Count == 0)
+        // Фоллбек на Kate Mobile API при наличии OAuth-токена
+        if (playlists.Count == 0 && !string.IsNullOrWhiteSpace(token))
+        {
+            playlists = await FetchPlaylistsViaApiAsync(uid, token, ct);
+        }
+
+        // Слой 2: живой сбор внутри браузерной сессии WebView2 (только если есть cookie-сессия или нет OAuth-токена)
+        if (playlists.Count == 0 && (hasExplicitCookie || string.IsNullOrWhiteSpace(token)))
         {
             var bridgeJson = await _bridge.FetchFullLibraryJsonAsync(uid, ct);
             if (!string.IsNullOrWhiteSpace(bridgeJson))
@@ -340,6 +393,115 @@ public sealed class VkMusicProvider : IMusicProvider, IDisposable
                     _settings.Update(st => st.VkCookieHeader = freshCookie, notify: false);
             }
         }
+
+        return playlists;
+    }
+
+    private async Task<List<UserPlaylist>> FetchPlaylistsViaApiAsync(long uid, string token, CancellationToken ct)
+    {
+        var playlists = new List<UserPlaylist>();
+
+        try
+        {
+            using var myDoc = await CallVkApiAsync(
+                "audio.get",
+                new Dictionary<string, string>
+                {
+                    ["owner_id"] = uid.ToString(),
+                    ["count"] = "500"
+                },
+                token,
+                "5.131",
+                ct);
+            if (myDoc != null && !TryGetVkApiError(myDoc.RootElement, out _))
+            {
+                var myTracks = ExtractTracksFromVkApiResponse(myDoc.RootElement, 500);
+                if (myTracks.Count > 0)
+                {
+                    playlists.Add(new UserPlaylist
+                    {
+                        Name = "ВК • Моя музыка",
+                        IsExternal = true,
+                        PlatformBrand = "vk",
+                        ExternalId = $"{uid}_-1",
+                        CoverUrl = myTracks.FirstOrDefault(t => !string.IsNullOrWhiteSpace(t.CoverUrl))?.CoverUrl ?? "",
+                        Tracks = myTracks
+                    });
+                }
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch { }
+
+        try
+        {
+            using var plsDoc = await CallVkApiAsync(
+                "audio.getPlaylists",
+                new Dictionary<string, string>
+                {
+                    ["owner_id"] = uid.ToString(),
+                    ["count"] = "50"
+                },
+                token,
+                "5.131",
+                ct);
+
+            if (plsDoc != null &&
+                !TryGetVkApiError(plsDoc.RootElement, out _) &&
+                plsDoc.RootElement.TryGetProperty("response", out var respObj) &&
+                respObj.TryGetProperty("items", out var plItems) &&
+                plItems.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var plEl in plItems.EnumerateArray())
+                {
+                    ct.ThrowIfCancellationRequested();
+                    if (!long.TryParse(ReadStringOrNumber(plEl, "owner_id"), out long pOwner)) pOwner = uid;
+                    if (!long.TryParse(ReadStringOrNumber(plEl, "id"), out long pId) || pId <= 0) continue;
+
+                    string title = ReadStringOrNumber(plEl, "title") ?? $"Плейлист #{pId}";
+                    string accessKey = ReadStringOrNumber(plEl, "access_key") ?? "";
+                    string plCover = "";
+                    if (plEl.TryGetProperty("photo", out var phEl))
+                    {
+                        plCover = ReadStringOrNumber(phEl, "photo_600")
+                               ?? ReadStringOrNumber(phEl, "photo_300")
+                               ?? ReadStringOrNumber(phEl, "photo_270")
+                               ?? ReadStringOrNumber(phEl, "photo_1200")
+                               ?? "";
+                    }
+
+                    var p = new Dictionary<string, string>
+                    {
+                        ["owner_id"] = pOwner.ToString(),
+                        ["album_id"] = pId.ToString(),
+                        ["count"] = "400"
+                    };
+                    if (!string.IsNullOrWhiteSpace(accessKey))
+                        p["access_key"] = accessKey;
+
+                    using var trDoc = await CallVkApiAsync("audio.get", p, token, "5.131", ct);
+                    var tracks = trDoc != null && !TryGetVkApiError(trDoc.RootElement, out _)
+                        ? ExtractTracksFromVkApiResponse(trDoc.RootElement, 400)
+                        : new List<TrackItem>();
+
+                    playlists.Add(new UserPlaylist
+                    {
+                        Name = title.Trim(),
+                        IsExternal = true,
+                        PlatformBrand = "vk",
+                        ExternalId = string.IsNullOrWhiteSpace(accessKey)
+                            ? $"{pOwner}_{pId}"
+                            : $"{pOwner}_{pId}_{accessKey}",
+                        CoverUrl = !string.IsNullOrWhiteSpace(plCover)
+                            ? plCover
+                            : (tracks.FirstOrDefault(t => !string.IsNullOrWhiteSpace(t.CoverUrl))?.CoverUrl ?? ""),
+                        Tracks = tracks
+                    });
+                }
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch { }
 
         return playlists;
     }
@@ -365,56 +527,8 @@ public sealed class VkMusicProvider : IMusicProvider, IDisposable
                     "5.131",
                     ct);
 
-                if (doc != null &&
-                    doc.RootElement.TryGetProperty("response", out var respArr) &&
-                    respArr.ValueKind == JsonValueKind.Array)
-                {
-                    foreach (var item in respArr.EnumerateArray())
-                    {
-                        var oidStr = ReadStringOrNumber(item, "owner_id") ?? "";
-                        var idStr = ReadStringOrNumber(item, "id") ?? "";
-                        if (!long.TryParse(oidStr, out var ownerId) || !long.TryParse(idStr, out var audioId))
-                            continue;
-
-                        string artist = ReadStringOrNumber(item, "artist") ?? "ВК Музыка";
-                        string title = ReadStringOrNumber(item, "title") ?? "Без названия";
-                        int durSec = int.TryParse(ReadStringOrNumber(item, "duration"), out var d) ? d : 0;
-                        string url = NormalizePlayableVkStreamUrl(ReadStringOrNumber(item, "url")) ?? "";
-                        string ak = ReadStringOrNumber(item, "access_key") ?? "";
-
-                        string cover = "";
-                        if (item.TryGetProperty("album", out var alb) &&
-                            alb.TryGetProperty("thumb", out var thumb))
-                        {
-                            cover = ReadStringOrNumber(thumb, "photo_600")
-                                 ?? ReadStringOrNumber(thumb, "photo_300")
-                                 ?? ReadStringOrNumber(thumb, "photo_270")
-                                 ?? ReadStringOrNumber(thumb, "photo_1200")
-                                 ?? "";
-                        }
-
-                        _metaCache[$"{ownerId}_{audioId}"] = new VkAudioMeta
-                        {
-                            OwnerId = ownerId,
-                            AudioId = audioId,
-                            AccessKey = ak,
-                            RawUrl = url
-                        };
-
-                        tracks.Add(new TrackItem
-                        {
-                            Id = $"{ownerId}_{audioId}",
-                            Source = "ВК",
-                            BrandKey = "vk",
-                            BrandColor = BrandColorHex,
-                            Title = title,
-                            Artist = artist,
-                            PageUrl = $"https://vk.com/audio{ownerId}_{audioId}",
-                            CoverUrl = cover,
-                            Duration = durSec > 0 ? TimeSpan.FromSeconds(durSec) : TimeSpan.Zero
-                        });
-                    }
-                }
+                if (doc != null && !TryGetVkApiError(doc.RootElement, out _))
+                    tracks.AddRange(ExtractTracksFromVkApiResponse(doc.RootElement, 15));
             }
             catch (OperationCanceledException) { throw; }
             catch { }
@@ -434,6 +548,94 @@ public sealed class VkMusicProvider : IMusicProvider, IDisposable
         }
 
         return tracks;
+    }
+
+    private TrackItem? ParseVkApiAudioItem(JsonElement item)
+    {
+        var oidStr = ReadStringOrNumber(item, "owner_id") ?? "";
+        var idStr = ReadStringOrNumber(item, "id") ?? "";
+        if (!long.TryParse(oidStr, out var ownerId) || !long.TryParse(idStr, out var audioId))
+            return null;
+
+        string artist = ReadStringOrNumber(item, "artist") ?? "ВК Музыка";
+        string title = ReadStringOrNumber(item, "title") ?? "Без названия";
+        int durSec = int.TryParse(ReadStringOrNumber(item, "duration"), out var d) ? d : 0;
+        string url = NormalizePlayableVkStreamUrl(ReadStringOrNumber(item, "url")) ?? "";
+        string ak = ReadStringOrNumber(item, "access_key") ?? "";
+
+        string cover = "";
+        if (item.TryGetProperty("album", out var alb) &&
+            alb.TryGetProperty("thumb", out var thumb))
+        {
+            cover = ReadStringOrNumber(thumb, "photo_600")
+                 ?? ReadStringOrNumber(thumb, "photo_300")
+                 ?? ReadStringOrNumber(thumb, "photo_270")
+                 ?? ReadStringOrNumber(thumb, "photo_1200")
+                 ?? "";
+        }
+
+        string idKey = $"{ownerId}_{audioId}";
+        _metaCache[idKey] = new VkAudioMeta
+        {
+            OwnerId = ownerId,
+            AudioId = audioId,
+            AccessKey = ak,
+            RawUrl = url
+        };
+
+        string pageUrl = string.IsNullOrWhiteSpace(ak)
+            ? $"https://vk.com/audio{ownerId}_{audioId}"
+            : $"https://vk.com/audio{ownerId}_{audioId}?ak={Uri.EscapeDataString(ak)}";
+
+        return new TrackItem
+        {
+            Id = idKey,
+            Source = "ВК",
+            BrandKey = "vk",
+            BrandColor = BrandColorHex,
+            Title = title,
+            Artist = artist,
+            PageUrl = pageUrl,
+            CoverUrl = cover,
+            Duration = durSec > 0 ? TimeSpan.FromSeconds(durSec) : TimeSpan.Zero
+        };
+    }
+
+    private List<TrackItem> ExtractTracksFromVkApiResponse(JsonElement root, int maxCount)
+    {
+        var list = new List<TrackItem>();
+        if (!root.TryGetProperty("response", out var resp)) return list;
+
+        JsonElement arr = default;
+        if (resp.ValueKind == JsonValueKind.Array)
+            arr = resp;
+        else if (resp.ValueKind == JsonValueKind.Object && resp.TryGetProperty("items", out var itemsEl) && itemsEl.ValueKind == JsonValueKind.Array)
+            arr = itemsEl;
+        else
+            return list;
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in arr.EnumerateArray())
+        {
+            var tr = ParseVkApiAudioItem(item);
+            if (tr != null && seen.Add(tr.UniqueKey))
+            {
+                list.Add(tr);
+                if (list.Count >= maxCount) break;
+            }
+        }
+        return list;
+    }
+
+    private static bool TryGetVkApiError(JsonElement root, out string? errorMsg)
+    {
+        errorMsg = null;
+        if (root.TryGetProperty("error", out var errEl) && errEl.ValueKind == JsonValueKind.Object)
+        {
+            errorMsg = ReadStringOrNumber(errEl, "error_msg") ?? "Ошибка VK API";
+            return true;
+        }
+        return false;
     }
 
     private async Task<string> GetEffectiveCookieHeaderAsync(CancellationToken ct)
@@ -843,48 +1045,84 @@ public sealed class VkMusicProvider : IMusicProvider, IDisposable
                         return cachedUnmasked;
                 }
 
-                var cookie = await GetEffectiveCookieHeaderAsync(ct);
-                string fullId = (!string.IsNullOrWhiteSpace(meta.ActionHash) && !string.IsNullOrWhiteSpace(meta.UrlHash))
-                    ? $"{meta.OwnerId}_{meta.AudioId}_{meta.ActionHash}_{meta.UrlHash}"
-                    : $"{meta.OwnerId}_{meta.AudioId}";
-
-                // 1а. Протокол vk_audio.py (line 660): POST https://m.vk.ru/audio (act=reload_audio&ids=...)
-                string mobileReloadForm = $"act=reload_audio&ids={Uri.EscapeDataString(fullId)}";
-                string? mobileRaw = await PostMobileAudioDirectAsync(mobileReloadForm, cookie, ct)
-                                    ?? await _bridge.PostMobileAudioAsync(mobileReloadForm, uid, ct);
-
-                if (!string.IsNullOrWhiteSpace(mobileRaw))
+                var token = s.VkAccessToken?.Trim();
+                if (!string.IsNullOrWhiteSpace(token))
                 {
-                    using var mDoc = ParseAlJson(mobileRaw);
-                    if (mDoc != null)
+                    try
                     {
-                        foreach (var cand in ExtractRawUrlsFromElement(mDoc.RootElement))
+                        string audioArg = !string.IsNullOrWhiteSpace(meta.AccessKey)
+                            ? $"{meta.OwnerId}_{meta.AudioId}_{meta.AccessKey}"
+                            : $"{meta.OwnerId}_{meta.AudioId}";
+                        using var byIdDoc = await CallVkApiAsync(
+                            "audio.getById",
+                            new Dictionary<string, string> { ["audios"] = audioArg },
+                            token,
+                            "5.131",
+                            ct);
+                        if (byIdDoc != null && !TryGetVkApiError(byIdDoc.RootElement, out _))
                         {
-                            var unmasked = NormalizePlayableVkStreamUrl(UnmaskAudioUrl(cand.RawUrl, uid));
-                            if (IsPlayableUrl(unmasked))
+                            var fetched = ExtractTracksFromVkApiResponse(byIdDoc.RootElement, 1);
+                            if (fetched.Count > 0 && _metaCache.TryGetValue(fetched[0].Id, out var freshMeta))
                             {
-                                meta.RawUrl = cand.RawUrl;
-                                return unmasked;
+                                var apiUrl = NormalizePlayableVkStreamUrl(freshMeta.RawUrl);
+                                if (IsPlayableUrl(apiUrl))
+                                {
+                                    meta.RawUrl = freshMeta.RawUrl;
+                                    return apiUrl;
+                                }
                             }
                         }
                     }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                    catch { }
                 }
 
-                // 1б. Desktop al_audio.php (act=reload_audios)
-                string body = $"act=reload_audios&al=1&ids={Uri.EscapeDataString(fullId)}";
-                string? raw = await PostAlAudioRawAsync("?act=reload_audios", body, cookie, uid, allowBridge: true, ct);
-                if (!string.IsNullOrWhiteSpace(raw))
+                bool hasExplicitCookie = !string.IsNullOrWhiteSpace(s.VkCookieHeader);
+                if (hasExplicitCookie || string.IsNullOrWhiteSpace(token))
                 {
-                    using var doc = ParseAlJson(raw);
-                    if (doc != null)
+                    var cookie = await GetEffectiveCookieHeaderAsync(ct);
+                    string fullId = (!string.IsNullOrWhiteSpace(meta.ActionHash) && !string.IsNullOrWhiteSpace(meta.UrlHash))
+                        ? $"{meta.OwnerId}_{meta.AudioId}_{meta.ActionHash}_{meta.UrlHash}"
+                        : $"{meta.OwnerId}_{meta.AudioId}";
+
+                    // 1а. Протокол vk_audio.py (line 660): POST https://m.vk.ru/audio (act=reload_audio&ids=...)
+                    string mobileReloadForm = $"act=reload_audio&ids={Uri.EscapeDataString(fullId)}";
+                    string? mobileRaw = await PostMobileAudioDirectAsync(mobileReloadForm, cookie, ct)
+                                        ?? (hasExplicitCookie ? await _bridge.PostMobileAudioAsync(mobileReloadForm, uid, ct) : null);
+
+                    if (!string.IsNullOrWhiteSpace(mobileRaw))
                     {
-                        foreach (var candidate in ExtractRawUrlsFromElement(doc.RootElement))
+                        using var mDoc = ParseAlJson(mobileRaw);
+                        if (mDoc != null)
                         {
-                            var unmasked = NormalizePlayableVkStreamUrl(UnmaskAudioUrl(candidate.RawUrl, uid));
-                            if (IsPlayableUrl(unmasked))
+                            foreach (var cand in ExtractRawUrlsFromElement(mDoc.RootElement))
                             {
-                                meta.RawUrl = candidate.RawUrl;
-                                return unmasked;
+                                var unmasked = NormalizePlayableVkStreamUrl(UnmaskAudioUrl(cand.RawUrl, uid));
+                                if (IsPlayableUrl(unmasked))
+                                {
+                                    meta.RawUrl = cand.RawUrl;
+                                    return unmasked;
+                                }
+                            }
+                        }
+                    }
+
+                    // 1б. Desktop al_audio.php (act=reload_audios)
+                    string body = $"act=reload_audios&al=1&ids={Uri.EscapeDataString(fullId)}";
+                    string? raw = await PostAlAudioRawAsync("?act=reload_audios", body, cookie, uid, allowBridge: hasExplicitCookie, ct);
+                    if (!string.IsNullOrWhiteSpace(raw))
+                    {
+                        using var doc = ParseAlJson(raw);
+                        if (doc != null)
+                        {
+                            foreach (var candidate in ExtractRawUrlsFromElement(doc.RootElement))
+                            {
+                                var unmasked = NormalizePlayableVkStreamUrl(UnmaskAudioUrl(candidate.RawUrl, uid));
+                                if (IsPlayableUrl(unmasked))
+                                {
+                                    meta.RawUrl = candidate.RawUrl;
+                                    return unmasked;
+                                }
                             }
                         }
                     }
@@ -894,6 +1132,133 @@ public sealed class VkMusicProvider : IMusicProvider, IDisposable
 
         // Этап 2: верифицированный подбор как в BuevichRoman/yandex2spotify (TrackMatcher ±3 с + артист)
         return await ResolveViaVerifiedMatchAsync(track, ct);
+    }
+
+    public async Task<(bool Ok, string Message)> RemoveTrackFromPlaylistAsync(
+        string externalPlaylistId,
+        string playlistTitle,
+        TrackItem track,
+        CancellationToken ct = default)
+    {
+        if (!IsAuthenticated)
+            return (false, "Подключите аккаунт ВКонтакте в Настройках.");
+
+        var meta = ResolveTrackMeta(track);
+        if (meta == null)
+            return (false, "Не удалось определить ID аудиозаписи ВКонтакте.");
+
+        var s = _settings.Current;
+        var uid = s.VkUserId;
+        var token = s.VkAccessToken?.Trim();
+
+        try
+        {
+            if (externalPlaylistId.EndsWith("_-1", StringComparison.Ordinal))
+            {
+                if (!string.IsNullOrWhiteSpace(token))
+                {
+                    using var doc = await CallVkApiAsync(
+                        "audio.delete",
+                        new Dictionary<string, string>
+                        {
+                            ["audio_id"] = meta.AudioId.ToString(),
+                            ["owner_id"] = meta.OwnerId.ToString()
+                        },
+                        token,
+                        "5.131",
+                        ct);
+
+                    string? apiErr = null;
+                    if (doc != null && !TryGetVkApiError(doc.RootElement, out apiErr))
+                        return (true, $"Удалено из «Моей музыки» ВК: {track.Title}");
+
+                    if (!string.IsNullOrWhiteSpace(apiErr))
+                        return (false, $"ВК: {apiErr}");
+                }
+
+                if (!string.IsNullOrWhiteSpace(meta.ActionHash) && !string.IsNullOrWhiteSpace(s.VkCookieHeader))
+                {
+                    var cookie = await GetEffectiveCookieHeaderAsync(ct);
+                    string form = $"act=delete_audio&aid={meta.AudioId}&al=1&hash={Uri.EscapeDataString(meta.ActionHash)}&oid={meta.OwnerId}&restore=1";
+                    string? raw = await PostAlAudioRawAsync("?act=delete_audio", form, cookie, uid, allowBridge: true, ct);
+                    if (!string.IsNullOrWhiteSpace(raw) && !LooksUnauthenticated(raw))
+                        return (true, $"Удалено из «Моей музыки» ВК: {track.Title}");
+                }
+
+                return (false, "Не удалось удалить трек из ВК (переподключите ВК через браузер по OAuth).");
+            }
+
+            var parts = (externalPlaylistId ?? "").Split('_', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2 ||
+                !long.TryParse(parts[0], out long plOwnerId) ||
+                !long.TryParse(parts[1], out long plId))
+            {
+                return (false, "Некорректный идентификатор плейлиста ВК.");
+            }
+
+            if (plOwnerId != uid)
+                return (false, "Нельзя изменять чужой плейлист ВКонтакте.");
+
+            string accessKey = parts.Length >= 3 ? parts[2] : "";
+            if (string.IsNullOrWhiteSpace(token))
+                return (false, "Для удаления из плейлистов ВК переподключите аккаунт через браузер (OAuth).");
+
+            var getParams = new Dictionary<string, string>
+            {
+                ["owner_id"] = plOwnerId.ToString(),
+                ["album_id"] = plId.ToString(),
+                ["count"] = "1000"
+            };
+            if (!string.IsNullOrWhiteSpace(accessKey))
+                getParams["access_key"] = accessKey;
+
+            using var listDoc = await CallVkApiAsync("audio.get", getParams, token, "5.131", ct);
+            string? listErr = null;
+            if (listDoc == null || TryGetVkApiError(listDoc.RootElement, out listErr))
+                return (false, $"Не удалось загрузить состав плейлиста ВК: {(string.IsNullOrWhiteSpace(listErr) ? "ошибка API" : listErr)}");
+
+            var currentTracks = ExtractTracksFromVkApiResponse(listDoc.RootElement, 1000);
+            var remainingIds = new List<string>();
+            bool removedFound = false;
+
+            foreach (var cur in currentTracks)
+            {
+                var curMeta = ResolveTrackMeta(cur);
+                if (curMeta != null && curMeta.OwnerId == meta.OwnerId && curMeta.AudioId == meta.AudioId)
+                {
+                    removedFound = true;
+                    continue;
+                }
+                if (curMeta != null)
+                    remainingIds.Add($"{curMeta.OwnerId}_{curMeta.AudioId}");
+            }
+
+            if (!removedFound)
+                return (true, $"Трек «{track.Title}» уже отсутствует в плейлисте ВК.");
+
+            var editParams = new Dictionary<string, string>
+            {
+                ["owner_id"] = plOwnerId.ToString(),
+                ["playlist_id"] = plId.ToString(),
+                ["title"] = string.IsNullOrWhiteSpace(playlistTitle) ? "Плейлист ВК" : playlistTitle,
+                ["audio_ids"] = string.Join(",", remainingIds)
+            };
+
+            using var editDoc = await CallVkApiAsync("audio.editPlaylist", editParams, token, "5.131", ct);
+            string? editErr = null;
+            if (editDoc != null && !TryGetVkApiError(editDoc.RootElement, out editErr))
+                return (true, $"Удалено из плейлиста ВК: {track.Title}");
+
+            return (false, !string.IsNullOrWhiteSpace(editErr) ? $"ВК: {editErr}" : "Не удалось обновить плейлист ВК.");
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return (false, $"Ошибка синхронизации удаления с ВК: {ex.Message}");
+        }
     }
 
     private static string? NormalizePlayableVkStreamUrl(string? url)
@@ -1250,13 +1615,28 @@ public sealed class VkMusicProvider : IMusicProvider, IDisposable
         if (!string.IsNullOrWhiteSpace(cookieHeader))
         {
             var fullCookie = EnsureRequiredAudioCookies(cookieHeader);
-            foreach (var domain in new[] { "https://vk.ru", "https://vk.com", "https://m.vk.ru" })
+            var probeUrls = new[]
+            {
+                "https://vk.ru/audios",
+                "https://vk.com/audios",
+                "https://m.vk.ru/audio"
+            };
+            foreach (var url in probeUrls)
             {
                 try
                 {
-                    using var req = new HttpRequestMessage(HttpMethod.Get, domain + "/audios");
+                    using var req = new HttpRequestMessage(HttpMethod.Get, url);
                     req.Headers.TryAddWithoutValidation("Cookie", fullCookie);
                     using var resp = await _http.SendAsync(req, ct);
+
+                    var loc = resp.Headers.Location?.ToString();
+                    if (!string.IsNullOrWhiteSpace(loc))
+                    {
+                        var mLoc = AudiosRedirectUidRegex.Match(loc);
+                        if (mLoc.Success && long.TryParse(mLoc.Groups[1].Value, out long locUid) && locUid > 0)
+                            return (locUid, null);
+                    }
+
                     var bytes = await resp.Content.ReadAsByteArrayAsync(ct);
                     var html = DecodeResponseBytes(bytes, resp.Content.Headers.ContentType?.CharSet);
 

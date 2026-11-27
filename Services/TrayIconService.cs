@@ -82,7 +82,7 @@ public class TrayIconService : IDisposable
             uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP,
             uCallbackMessage = WM_TRAYICON,
             hIcon = _hIcon,
-            szTip = "OmniWave + Dynamic Island"
+            szTip = "OmniWave"
         };
 
         _iconAdded = Shell_NotifyIconW(NIM_ADD, ref nid);

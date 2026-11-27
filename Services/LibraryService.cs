@@ -423,7 +423,7 @@ public class LibraryService
             {
                 var src = _data.Playlists[srcIdx];
                 var dst = _data.Playlists[dstIdx];
-                if (src.IsPinned || dst.IsPinned) return;
+                if (src.IsPinned != dst.IsPinned) return;
                 _data.Playlists.RemoveAt(srcIdx);
                 int insertIdx = Math.Clamp(dstIdx, 0, _data.Playlists.Count);
                 _data.Playlists.Insert(insertIdx, src);

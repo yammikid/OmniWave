@@ -22,8 +22,16 @@ public class MediaControllerService : IDisposable
     private readonly AudioPlayerService _localPlayer;
     private readonly SettingsService _settings;
     private readonly IReadOnlyList<IMusicProvider> _providers;
-    private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(5) };
+    private readonly HttpClient _http = new(new SocketsHttpHandler
+    {
+        UseProxy = true,
+        PooledConnectionLifetime = TimeSpan.FromMinutes(2)
+    })
+    {
+        Timeout = TimeSpan.FromSeconds(5)
+    };
     private readonly CancellationTokenSource _cts = new();
+    private readonly SemaphoreSlim _pollWakeup = new(0, 1);
     private readonly ConcurrentDictionary<string, byte[]> _coverCache = new();
     private readonly ConcurrentDictionary<string, string> _resolvedCoverUrlCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, (long AnchorMs, long AnchorTick, bool WasPlaying)> _gsmtcTimelineFallbackAnchors = new(StringComparer.OrdinalIgnoreCase);
@@ -32,7 +40,9 @@ public class MediaControllerService : IDisposable
     private string? _selectedId;
     private string? _lastTrackKey;
     private string _lastCoverUrl = "";
+    private string? _lastEmittedStateSig;
     private DateTime _manualSelectLockUntilUtc = DateTime.MinValue;
+    private volatile bool _disposed;
 
     public bool IsLocalActive => _selectedId == LocalSourceId;
     public MediaState? CurrentMediaState { get; private set; }
@@ -87,8 +97,7 @@ public class MediaControllerService : IDisposable
             try
             {
                 var s = await FetchStateAsync(_cts.Token);
-                CurrentMediaState = s;
-                StateChanged?.Invoke(s);
+                PublishState(s, force: true);
             }
             catch { }
         });
@@ -299,25 +308,84 @@ public class MediaControllerService : IDisposable
         _settings.Update(s => s.Volume = clamped, notify: false);
     }
 
+    private volatile bool _isUiVisible = true;
+    private Windows.Foundation.TypedEventHandler<GlobalSystemMediaTransportControlsSessionManager, SessionsChangedEventArgs>? _sessionsChangedHandler;
+
+    public void SetUiVisible(bool visible)
+    {
+        _isUiVisible = visible;
+        if (visible)
+            WakePollLoop();
+    }
+
+    private void WakePollLoop()
+    {
+        if (_disposed) return;
+        try
+        {
+            if (_pollWakeup.CurrentCount == 0)
+                _pollWakeup.Release();
+        }
+        catch { }
+    }
+
+    private void PublishState(MediaState state, bool force)
+    {
+        CurrentMediaState = state;
+
+        bool hasCoverBytes = state.CoverUpdated && state.CoverBytes != null && state.CoverBytes.Length > 0;
+        string sourcesSig = state.Sources.Count == 0
+            ? ""
+            : string.Join(",", state.Sources.Select(x => x.SourceId));
+
+        string sig = string.IsNullOrEmpty(state.ActiveId)
+            ? $"EMPTY|{sourcesSig}"
+            : state.ActiveId == LocalSourceId
+                ? $"LOCAL|{state.ActiveBrand}|{state.SourceBadgeText}|{state.Title}|{state.Artist}|{state.IsPlaying}|{sourcesSig}"
+                : $"EXT|{state.ActiveId}|{state.ActiveBrand}|{state.Title}|{state.Artist}|{state.IsPlaying}|{state.CurrentMs}|{state.TotalMs}|{sourcesSig}";
+
+        if (!force && !hasCoverBytes && string.Equals(sig, _lastEmittedStateSig, StringComparison.Ordinal))
+            return;
+
+        _lastEmittedStateSig = sig;
+        StateChanged?.Invoke(state);
+    }
+
     private async Task PollLoopAsync(CancellationToken ct)
     {
         try
         {
             _manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
+            if (_manager != null)
+            {
+                _sessionsChangedHandler = (_, _) => WakePollLoop();
+                _manager.SessionsChanged += _sessionsChangedHandler;
+            }
         }
         catch { }
 
         while (!ct.IsCancellationRequested)
         {
+            MediaState? state = null;
             try
             {
-                var state = await FetchStateAsync(ct);
-                CurrentMediaState = state;
-                StateChanged?.Invoke(state);
+                state = await FetchStateAsync(ct);
+                PublishState(state, force: false);
             }
             catch { }
 
-            try { await Task.Delay(380, ct); } catch { break; }
+            int delayMs;
+            if (!_isUiVisible)
+                delayMs = IsLocalActive ? 5000 : 3000;
+            else if (IsLocalActive && _localPlayer.IsActiveOrLoading)
+                delayMs = 2000;
+            else if (state != null && !string.IsNullOrEmpty(state.ActiveId) && state.ActiveId != LocalSourceId && state.IsPlaying)
+                delayMs = 450;
+            else
+                delayMs = 1200;
+
+            try { await _pollWakeup.WaitAsync(delayMs, ct); }
+            catch { break; }
         }
     }
 
@@ -399,13 +467,10 @@ public class MediaControllerService : IDisposable
         if (_selectedId == LocalSourceId && localTrack != null)
         {
             var key = $"{LocalSourceId}|{localTrack.Id}|{localTrack.CoverUrl}";
-            byte[]? cover = null;
-            bool updated = false;
-            if (key != _lastTrackKey)
+            bool updated = key != _lastTrackKey;
+            if (updated)
             {
                 _lastTrackKey = key;
-                updated = true;
-                cover = await DownloadCoverAsync(localTrack.CoverUrl);
                 _lastCoverUrl = localTrack.CoverUrl;
             }
 
@@ -423,7 +488,7 @@ public class MediaControllerService : IDisposable
                 Artist = localTrack.Artist,
                 IsPlaying = _localPlayer.IsPlaying,
                 CoverUrl = localTrack.CoverUrl,
-                CoverBytes = cover,
+                CoverBytes = null,
                 CoverUpdated = updated,
                 CurrentMs = _localPlayer.CurrentTimeMs,
                 TotalMs = _localPlayer.TotalLengthMs
@@ -543,6 +608,11 @@ public class MediaControllerService : IDisposable
             else
             {
                 string key = $"{session.SourceAppUserModelId}|{totalMs}|{rawPosMs}";
+                if (_gsmtcTimelineFallbackAnchors.Count >= 32 && !_gsmtcTimelineFallbackAnchors.ContainsKey(key))
+                {
+                    foreach (var oldKey in _gsmtcTimelineFallbackAnchors.Keys.Take(16))
+                        _gsmtcTimelineFallbackAnchors.TryRemove(oldKey, out _);
+                }
                 var prev = _gsmtcTimelineFallbackAnchors.GetOrAdd(key, _ => (rawPosMs, nowTick, isPlaying));
                 if (isPlaying)
                 {
@@ -628,7 +698,7 @@ public class MediaControllerService : IDisposable
         var (url, durationMs) = await ResolveTrackMetaFromProvidersAsync(brand, artist, title, ct);
         if (!string.IsNullOrWhiteSpace(url))
         {
-            _resolvedCoverUrlCache[cacheKey] = url;
+            CacheResolvedCoverUrl(cacheKey, url);
             var bytes = await DownloadCoverAsync(url);
             return (bytes, url, durationMs);
         }
@@ -645,9 +715,19 @@ public class MediaControllerService : IDisposable
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
             var (url, _) = await ResolveTrackMetaFromProvidersAsync(brand, artist, title, cts.Token);
             if (!string.IsNullOrWhiteSpace(url))
-                _resolvedCoverUrlCache[cacheKey] = url;
+                CacheResolvedCoverUrl(cacheKey, url);
         }
         catch { }
+    }
+
+    private void CacheResolvedCoverUrl(string cacheKey, string url)
+    {
+        if (_resolvedCoverUrlCache.Count >= 128 && !_resolvedCoverUrlCache.ContainsKey(cacheKey))
+        {
+            foreach (var oldKey in _resolvedCoverUrlCache.Keys.Take(64))
+                _resolvedCoverUrlCache.TryRemove(oldKey, out _);
+        }
+        _resolvedCoverUrlCache[cacheKey] = url;
     }
 
     private async Task<(string CoverUrl, long DurationMs)> ResolveTrackMetaFromProvidersAsync(
@@ -708,12 +788,35 @@ public class MediaControllerService : IDisposable
         if (_coverCache.TryGetValue(url, out var cached)) return cached;
         try
         {
-            var data = await _http.GetByteArrayAsync(url);
-            if (_coverCache.Count > 120) _coverCache.Clear();
+            using var resp = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, _cts.Token);
+            if (!resp.IsSuccessStatusCode) return null;
+            if (resp.Content.Headers.ContentLength is > 512 * 1024)
+                return null;
+
+            var data = await resp.Content.ReadAsByteArrayAsync(_cts.Token);
+            if (data.Length == 0 || data.Length > 512 * 1024)
+                return null;
+
+            if (_coverCache.Count >= 40)
+            {
+                foreach (var oldKey in _coverCache.Keys.Take(20))
+                    _coverCache.TryRemove(oldKey, out _);
+            }
             _coverCache[url] = data;
             return data;
         }
         catch { return null; }
+    }
+
+    public void TrimCaches()
+    {
+        _coverCache.Clear();
+        if (_resolvedCoverUrlCache.Count > 64)
+        {
+            foreach (var oldKey in _resolvedCoverUrlCache.Keys.Take(_resolvedCoverUrlCache.Count - 64))
+                _resolvedCoverUrlCache.TryRemove(oldKey, out _);
+        }
+        _gsmtcTimelineFallbackAnchors.Clear();
     }
 
     private static bool IsBrowser(string appId)
@@ -767,7 +870,18 @@ public class MediaControllerService : IDisposable
 
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
+        if (_manager != null && _sessionsChangedHandler != null)
+        {
+            try { _manager.SessionsChanged -= _sessionsChangedHandler; } catch { }
+            _sessionsChangedHandler = null;
+        }
         _cts.Cancel();
+        try { _pollWakeup.Release(); } catch { }
+        _coverCache.Clear();
+        _resolvedCoverUrlCache.Clear();
+        _gsmtcTimelineFallbackAnchors.Clear();
         _http.Dispose();
     }
 }

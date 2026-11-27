@@ -45,6 +45,7 @@ public class AudioPlayerService : IDisposable
     private Media? _currentMedia;
     private CancellationTokenSource? _loadCts;
     private CancellationTokenSource? _preResolveCts;
+    private Action? _onProxyChanged;
     private Func<string?, Task<List<TrackItem>>>? _waveReplenishProvider;
     private Func<Task<List<TrackItem>>>? _vkMixReplenishProvider;
     private int _waveReplenishing;
@@ -93,7 +94,10 @@ public class AudioPlayerService : IDisposable
     public event Action<string>? StatusMessage;
     public event Action? QueueChanged;
     public event Action<RepeatMode>? RepeatModeChanged;
+    public event Action<bool>? ShuffleChanged;
     public event Action<int>? VolumeChanged;
+
+    public bool ShuffleEnabled { get; private set; }
 
     public AudioPlayerService(IEnumerable<IMusicProvider> providers, DownloadService downloads)
     {
@@ -106,10 +110,19 @@ public class AudioPlayerService : IDisposable
         else
             Core.Initialize();
 
-        _libVlc = new LibVLC("--no-video", "--quiet", "--aout=directsound");
+        _libVlc = new LibVLC(
+            "--no-video",
+            "--no-spu",
+            "--no-osd",
+            "--no-stats",
+            "--no-sub-autodetect-file",
+            "--no-snapshot-preview",
+            "--quiet",
+            "--aout=directsound");
         _player = new MediaPlayer(_libVlc) { Volume = _softwareVolume };
         ApplyAudioFxToPlayer();
-        ProxyService.ProxyChanged += () => _streamUrlCache.Clear();
+        _onProxyChanged = () => _streamUrlCache.Clear();
+        ProxyService.ProxyChanged += _onProxyChanged;
 
         // Не вызываем методы/свойства MediaPlayer синхронно внутри нативных коллбэков LibVLC
         _player.LengthChanged += (_, e) =>
@@ -511,6 +524,15 @@ public class AudioPlayerService : IDisposable
         return RepeatMode;
     }
 
+    public bool ToggleShuffle()
+    {
+        ShuffleEnabled = !ShuffleEnabled;
+        if (ShuffleEnabled)
+            ShuffleQueue();
+        ShuffleChanged?.Invoke(ShuffleEnabled);
+        return ShuffleEnabled;
+    }
+
     private async Task HandleEndReachedAsync()
     {
         await EnsureWaveReplenishedIfNeededAsync();
@@ -523,6 +545,14 @@ public class AudioPlayerService : IDisposable
             if (RepeatMode == RepeatMode.One)
             {
                 if (_currentIndex < 0 || _currentIndex >= _queue.Count) _currentIndex = 0;
+                target = _queue[_currentIndex];
+            }
+            else if (ShuffleEnabled && _queue.Count > 1)
+            {
+                int rnd;
+                do { rnd = Random.Shared.Next(_queue.Count); }
+                while (rnd == _currentIndex);
+                _currentIndex = rnd;
                 target = _queue[_currentIndex];
             }
             else if (RepeatMode == RepeatMode.All)
@@ -557,7 +587,17 @@ public class AudioPlayerService : IDisposable
         lock (_queueLock)
         {
             if (_queue.Count == 0) return;
-            _currentIndex = (_currentIndex + 1) % _queue.Count;
+            if (ShuffleEnabled && _queue.Count > 1)
+            {
+                int rnd;
+                do { rnd = Random.Shared.Next(_queue.Count); }
+                while (rnd == _currentIndex);
+                _currentIndex = rnd;
+            }
+            else
+            {
+                _currentIndex = (_currentIndex + 1) % _queue.Count;
+            }
             UpdatePlayingFlagsUnlocked();
             nextTrack = _queue[_currentIndex];
         }
@@ -592,9 +632,7 @@ public class AudioPlayerService : IDisposable
     private async Task LoadAndPlayAsync(TrackItem track, long startPositionMs = 0)
     {
         SaveCurrentBrandState();
-        _loadCts?.Cancel();
-        _loadCts = new CancellationTokenSource();
-        var ct = _loadCts.Token;
+        var ct = SwapCts(ref _loadCts);
 
         _isLoadingTrack = true;
         _pendingSeekMs = startPositionMs > 0 ? startPositionMs : -1;
@@ -694,6 +732,7 @@ public class AudioPlayerService : IDisposable
             _ = Task.Run(PreResolveNextAsync);
         }
         catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }
         catch (Exception ex)
         {
             StatusMessage?.Invoke(ex.Message);
@@ -784,7 +823,20 @@ public class AudioPlayerService : IDisposable
         }
 
         if (!string.IsNullOrWhiteSpace(url))
+        {
+            if (_streamUrlCache.Count >= 64 && !_streamUrlCache.ContainsKey(track.UniqueKey))
+            {
+                var nowUtc = now;
+                foreach (var k in _streamUrlCache.Where(kv => kv.Value.ExpiresUtc <= nowUtc).Select(kv => kv.Key).ToList())
+                    _streamUrlCache.TryRemove(k, out _);
+                if (_streamUrlCache.Count >= 64)
+                {
+                    foreach (var k in _streamUrlCache.Keys.Take(_streamUrlCache.Count - 48))
+                        _streamUrlCache.TryRemove(k, out _);
+                }
+            }
             _streamUrlCache[track.UniqueKey] = (url, now.Add(StreamCacheTtl));
+        }
 
         return url;
     }
@@ -792,10 +844,7 @@ public class AudioPlayerService : IDisposable
     private async Task PreResolveNextAsync()
     {
         _ = EnsureWaveReplenishedIfNeededAsync();
-        _preResolveCts?.Cancel();
-        var cts = new CancellationTokenSource();
-        _preResolveCts = cts;
-        var ct = cts.Token;
+        var ct = SwapCts(ref _preResolveCts);
 
         TrackItem? nextTrack = null;
         lock (_queueLock)
@@ -991,10 +1040,28 @@ public class AudioPlayerService : IDisposable
         }
     }
 
+    private static CancellationToken SwapCts(ref CancellationTokenSource? slot)
+    {
+        var next = new CancellationTokenSource();
+        var prev = Interlocked.Exchange(ref slot, next);
+        if (prev != null)
+        {
+            try { prev.Cancel(); } catch { }
+            try { prev.Dispose(); } catch { }
+        }
+        return next.Token;
+    }
+
     public void Dispose()
     {
-        _loadCts?.Cancel();
-        _preResolveCts?.Cancel();
+        if (_onProxyChanged != null)
+            ProxyService.ProxyChanged -= _onProxyChanged;
+
+        var lc = Interlocked.Exchange(ref _loadCts, null);
+        if (lc != null) { try { lc.Cancel(); } catch { } try { lc.Dispose(); } catch { } }
+        var pc = Interlocked.Exchange(ref _preResolveCts, null);
+        if (pc != null) { try { pc.Cancel(); } catch { } try { pc.Dispose(); } catch { } }
+
         _streamUrlCache.Clear();
         try { _player.Stop(); } catch { }
         _currentMedia?.Dispose();

@@ -15,18 +15,24 @@ public sealed class VkWebSessionBridge : IDisposable
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly ConcurrentDictionary<string, TaskCompletionSource<string?>> _pending = new();
+    private System.Threading.Timer? _idleTimer;
 
     private Window? _hostWindow;
     private WebView2? _webView;
     private TaskCompletionSource<bool>? _navWaiter;
-    private bool _initialized;
+    private volatile bool _initialized;
     private string _currentOrigin = "";
-    private bool _disposed;
+    private volatile bool _disposed;
+
+    public VkWebSessionBridge()
+    {
+        _idleTimer = new System.Threading.Timer(OnIdleTimerFired, null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+    }
 
     public async Task<string?> PostAlAudioAsync(string queryString, string formBody, long userId, CancellationToken ct)
     {
         if (_disposed) return null;
-        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        await EnterGateAsync(ct).ConfigureAwait(false);
         try
         {
             if (_disposed) return null;
@@ -62,14 +68,14 @@ public sealed class VkWebSessionBridge : IDisposable
         }
         finally
         {
-            _gate.Release();
+            ExitGate();
         }
     }
 
     public async Task<string?> PostMobileAudioAsync(string formBody, long userId, CancellationToken ct)
     {
         if (_disposed) return null;
-        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        await EnterGateAsync(ct).ConfigureAwait(false);
         try
         {
             if (_disposed) return null;
@@ -103,7 +109,7 @@ public sealed class VkWebSessionBridge : IDisposable
         }
         finally
         {
-            _gate.Release();
+            ExitGate();
         }
     }
 
@@ -114,7 +120,7 @@ public sealed class VkWebSessionBridge : IDisposable
     public async Task<string?> FetchFullLibraryJsonAsync(long userId, CancellationToken ct)
     {
         if (_disposed) return null;
-        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        await EnterGateAsync(ct).ConfigureAwait(false);
         try
         {
             if (_disposed) return null;
@@ -349,7 +355,7 @@ public sealed class VkWebSessionBridge : IDisposable
         }
         finally
         {
-            _gate.Release();
+            ExitGate();
         }
     }
 
@@ -388,7 +394,7 @@ public sealed class VkWebSessionBridge : IDisposable
     public async Task<string?> RefreshCookiesAsync(CancellationToken ct)
     {
         if (_disposed) return null;
-        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        await EnterGateAsync(ct).ConfigureAwait(false);
         try
         {
             if (_disposed) return null;
@@ -430,14 +436,14 @@ public sealed class VkWebSessionBridge : IDisposable
         }
         finally
         {
-            _gate.Release();
+            ExitGate();
         }
     }
 
     public async Task<(long UserId, string? UserName)> ProbeIdentityAsync(CancellationToken ct)
     {
         if (_disposed) return (0, null);
-        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        await EnterGateAsync(ct).ConfigureAwait(false);
         try
         {
             if (_disposed) return (0, null);
@@ -488,7 +494,7 @@ public sealed class VkWebSessionBridge : IDisposable
         }
         finally
         {
-            _gate.Release();
+            ExitGate();
         }
     }
 
@@ -536,8 +542,6 @@ public sealed class VkWebSessionBridge : IDisposable
                     WindowStyle = WindowStyle.None,
                     ShowInTaskbar = false,
                     ShowActivated = false,
-                    AllowsTransparency = true,
-                    Opacity = 0.0,
                     Content = _webView
                 };
                 _hostWindow.Show();
@@ -714,6 +718,47 @@ public sealed class VkWebSessionBridge : IDisposable
         }
     }
 
+    private async Task EnterGateAsync(CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try { _idleTimer?.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan); } catch { }
+    }
+
+    private void ExitGate()
+    {
+        if (!_disposed && _initialized)
+        {
+            try { _idleTimer?.Change(TimeSpan.FromSeconds(90), Timeout.InfiniteTimeSpan); } catch { }
+        }
+        _gate.Release();
+    }
+
+    private void OnIdleTimerFired(object? _)
+    {
+        if (_disposed || !_initialized || _gate.CurrentCount == 0) return;
+        var disp = Application.Current?.Dispatcher;
+        if (disp == null || disp.HasShutdownStarted) return;
+
+        _ = disp.BeginInvoke(async () =>
+        {
+            if (_disposed || !_initialized || _gate.CurrentCount == 0) return;
+            bool entered = false;
+            try { entered = await _gate.WaitAsync(0); }
+            catch (ObjectDisposedException) { return; }
+            if (!entered) return;
+
+            try
+            {
+                if (!_disposed && _initialized)
+                    CleanupUiResources();
+            }
+            finally
+            {
+                try { _gate.Release(); } catch { }
+            }
+        });
+    }
+
     private void CleanupUiResources()
     {
         _initialized = false;
@@ -728,6 +773,8 @@ public sealed class VkWebSessionBridge : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        try { _idleTimer?.Dispose(); } catch { }
+        _idleTimer = null;
         ResetSession();
         _gate.Dispose();
     }

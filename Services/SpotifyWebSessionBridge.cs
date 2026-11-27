@@ -235,6 +235,7 @@ public sealed class SpotifyWebSessionBridge : IDisposable
 
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly bool _isGuestProfile;
+    private System.Threading.Timer? _idleTimer;
 
     private Window? _hostWindow;
     private WebView2? _webView;
@@ -245,12 +246,13 @@ public sealed class SpotifyWebSessionBridge : IDisposable
     private TaskCompletionSource<List<TrackItem>>? _likedTracksWaiter;
     private TaskCompletionSource<List<(string Id, string Name, string CoverUrl)>>? _libraryWaiter;
     private TaskCompletionSource<List<TrackItem>>? _playlistTracksWaiter;
+    private TaskCompletionSource<int>? _deleteWaiter;
     private int _searchLimit = 12;
     private string? _expectedSearchQuery;
     private string? _lastDomSignature;
     private bool _navCompletedFlag;
-    private bool _initialized;
-    private bool _disposed;
+    private volatile bool _initialized;
+    private volatile bool _disposed;
 
     public string? LastAccessToken { get; private set; }
     public long LastTokenExpiresMs { get; private set; }
@@ -261,6 +263,7 @@ public sealed class SpotifyWebSessionBridge : IDisposable
     public SpotifyWebSessionBridge(bool isGuestProfile = false)
     {
         _isGuestProfile = isGuestProfile;
+        _idleTimer = new System.Threading.Timer(OnIdleTimerFired, null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         ProxyService.ProxyChanged += ResetSession;
     }
 
@@ -283,7 +286,7 @@ public sealed class SpotifyWebSessionBridge : IDisposable
         CancellationToken ct = default)
     {
         if (_disposed) return (null, 0, null, null, true);
-        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        await EnterGateAsync(ct).ConfigureAwait(false);
         try
         {
             if (_disposed) return (null, 0, null, null, true);
@@ -334,14 +337,14 @@ public sealed class SpotifyWebSessionBridge : IDisposable
         }
         finally
         {
-            _gate.Release();
+            ExitGate();
         }
     }
 
     public async Task<List<TrackItem>> SearchGuestTracksAsync(string query, int limit = 12, CancellationToken ct = default)
     {
         if (_disposed || string.IsNullOrWhiteSpace(query)) return new List<TrackItem>();
-        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        await EnterGateAsync(ct).ConfigureAwait(false);
         try
         {
             if (_disposed) return new List<TrackItem>();
@@ -398,7 +401,7 @@ public sealed class SpotifyWebSessionBridge : IDisposable
         }
         finally
         {
-            _gate.Release();
+            ExitGate();
         }
     }
 
@@ -508,8 +511,6 @@ public sealed class SpotifyWebSessionBridge : IDisposable
                 WindowStyle = WindowStyle.None,
                 ShowInTaskbar = false,
                 ShowActivated = false,
-                AllowsTransparency = true,
-                Opacity = 0.0,
                 Content = _webView
             };
             _hostWindow.Show();
@@ -591,6 +592,15 @@ public sealed class SpotifyWebSessionBridge : IDisposable
                             if (found.Count > 0)
                                 _playlistTracksWaiter?.TrySetResult(found);
                         }
+                        return;
+                    }
+
+                    if (kind == "apiDeleteResult")
+                    {
+                        int status = root.TryGetProperty("status", out var stEl) && stEl.ValueKind == JsonValueKind.Number
+                            ? stEl.GetInt32()
+                            : 0;
+                        _deleteWaiter?.TrySetResult(status);
                         return;
                     }
 
@@ -973,7 +983,7 @@ public sealed class SpotifyWebSessionBridge : IDisposable
         if (_disposed || string.IsNullOrWhiteSpace(spDcCookie))
             return (false, null, 0, null, null, null, null);
 
-        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        await EnterGateAsync(ct).ConfigureAwait(false);
         try
         {
             if (_disposed) return (false, null, 0, null, null, null, null);
@@ -1072,7 +1082,7 @@ public sealed class SpotifyWebSessionBridge : IDisposable
         }
         finally
         {
-            _gate.Release();
+            ExitGate();
         }
     }
 
@@ -1082,7 +1092,7 @@ public sealed class SpotifyWebSessionBridge : IDisposable
         if (_disposed || string.IsNullOrWhiteSpace(spDcCookie))
             return (new List<TrackItem>(), new List<(string, string, string)>());
 
-        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        await EnterGateAsync(ct).ConfigureAwait(false);
         try
         {
             if (_disposed)
@@ -1189,7 +1199,7 @@ public sealed class SpotifyWebSessionBridge : IDisposable
         }
         finally
         {
-            _gate.Release();
+            ExitGate();
         }
     }
 
@@ -1201,7 +1211,7 @@ public sealed class SpotifyWebSessionBridge : IDisposable
         if (_disposed || string.IsNullOrWhiteSpace(spDcCookie) || string.IsNullOrWhiteSpace(playlistId))
             return new List<TrackItem>();
 
-        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        await EnterGateAsync(ct).ConfigureAwait(false);
         try
         {
             if (_disposed) return new List<TrackItem>();
@@ -1270,7 +1280,107 @@ public sealed class SpotifyWebSessionBridge : IDisposable
         }
         finally
         {
-            _gate.Release();
+            ExitGate();
+        }
+    }
+
+    public async Task<int> SendAuthenticatedDeleteAsync(
+        string apiUrl,
+        string? jsonBody,
+        string spDcCookie,
+        CancellationToken ct = default)
+    {
+        if (_disposed || string.IsNullOrWhiteSpace(spDcCookie) || string.IsNullOrWhiteSpace(apiUrl))
+            return 0;
+
+        await EnterGateAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_disposed) return 0;
+            var disp = Application.Current?.Dispatcher;
+            if (disp == null || disp.HasShutdownStarted) return 0;
+
+            return await await disp.InvokeAsync(async () =>
+            {
+                if (!await EnsureInitializedOnUiAsync(ct) || _webView?.CoreWebView2 == null)
+                    return 0;
+
+                ApplySpDcCookieCore(spDcCookie.Trim());
+
+                if (string.IsNullOrWhiteSpace(LastAccessToken))
+                {
+                    var tokWaiter = new TaskCompletionSource<(string? Token, long ExpiresMs, bool IsAnonymous)>(
+                        TaskCreationOptions.RunContinuationsAsynchronously);
+                    _tokenWaiterAllowAnonymous = false;
+                    _tokenWaiter = tokWaiter;
+                    try
+                    {
+                        _webView.CoreWebView2.Navigate("https://open.spotify.com/");
+                        using var tCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                        tCts.CancelAfter(TimeSpan.FromSeconds(12));
+                        await using var r = tCts.Token.Register(() => tokWaiter.TrySetResult((null, 0, true)));
+                        await tokWaiter.Task;
+                    }
+                    finally
+                    {
+                        if (ReferenceEquals(_tokenWaiter, tokWaiter))
+                            _tokenWaiter = null;
+                    }
+                }
+
+                if (string.IsNullOrWhiteSpace(LastAccessToken))
+                    return 0;
+
+                var waiter = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _deleteWaiter = waiter;
+                try
+                {
+                    string jsUrl = JsonSerializer.Serialize(apiUrl);
+                    string jsTok = JsonSerializer.Serialize(LastAccessToken);
+                    string jsCt = JsonSerializer.Serialize(LastClientToken ?? "");
+                    string jsBody = jsonBody != null ? JsonSerializer.Serialize(jsonBody) : "null";
+
+                    string script = $@"(async function() {{
+  try {{
+    var headers = {{
+      'Authorization': 'Bearer ' + {jsTok},
+      'app-platform': 'WebPlayer'
+    }};
+    var ct = {jsCt};
+    if (ct) headers['client-token'] = ct;
+    var bodyStr = {jsBody};
+    if (bodyStr !== null) headers['Content-Type'] = 'application/json';
+    var resp = await fetch({jsUrl}, {{ method: 'DELETE', headers: headers, body: bodyStr }});
+    window.chrome.webview.postMessage(JSON.stringify({{ kind: 'apiDeleteResult', status: resp ? resp.status : 0 }}));
+  }} catch (e) {{
+    window.chrome.webview.postMessage(JSON.stringify({{ kind: 'apiDeleteResult', status: 0 }}));
+  }}
+}})();";
+
+                    await _webView.ExecuteScriptAsync(script);
+                    using var dCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    dCts.CancelAfter(TimeSpan.FromSeconds(10));
+                    await using var dReg = dCts.Token.Register(() => waiter.TrySetResult(0));
+                    return await waiter.Task;
+                }
+                finally
+                {
+                    if (ReferenceEquals(_deleteWaiter, waiter))
+                        _deleteWaiter = null;
+                }
+            }).Task.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return 0;
+        }
+        finally
+        {
+            ExitGate();
         }
     }
 
@@ -1301,6 +1411,7 @@ public sealed class SpotifyWebSessionBridge : IDisposable
         _likedTracksWaiter?.TrySetResult(new List<TrackItem>());
         _libraryWaiter?.TrySetResult(new List<(string, string, string)>());
         _playlistTracksWaiter?.TrySetResult(new List<TrackItem>());
+        _deleteWaiter?.TrySetResult(0);
         LastAccessToken = null;
         LastTokenExpiresMs = 0;
         LastClientToken = null;
@@ -1323,6 +1434,47 @@ public sealed class SpotifyWebSessionBridge : IDisposable
         }
     }
 
+    private async Task EnterGateAsync(CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try { _idleTimer?.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan); } catch { }
+    }
+
+    private void ExitGate()
+    {
+        if (!_disposed && _initialized)
+        {
+            try { _idleTimer?.Change(TimeSpan.FromSeconds(90), Timeout.InfiniteTimeSpan); } catch { }
+        }
+        _gate.Release();
+    }
+
+    private void OnIdleTimerFired(object? _)
+    {
+        if (_disposed || !_initialized || _gate.CurrentCount == 0) return;
+        var disp = Application.Current?.Dispatcher;
+        if (disp == null || disp.HasShutdownStarted) return;
+
+        _ = disp.BeginInvoke(async () =>
+        {
+            if (_disposed || !_initialized || _gate.CurrentCount == 0) return;
+            bool entered = false;
+            try { entered = await _gate.WaitAsync(0); }
+            catch (ObjectDisposedException) { return; }
+            if (!entered) return;
+
+            try
+            {
+                if (!_disposed && _initialized)
+                    CleanupUiResources();
+            }
+            finally
+            {
+                try { _gate.Release(); } catch { }
+            }
+        });
+    }
+
     private void CleanupUiResources()
     {
         _initialized = false;
@@ -1338,6 +1490,8 @@ public sealed class SpotifyWebSessionBridge : IDisposable
         if (_disposed) return;
         _disposed = true;
         ProxyService.ProxyChanged -= ResetSession;
+        try { _idleTimer?.Dispose(); } catch { }
+        _idleTimer = null;
         ResetSession();
         _gate.Dispose();
     }

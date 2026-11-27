@@ -4,31 +4,31 @@
         xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
         Title="OmniWave"
         Icon="pack://application:,,,/Assets/omniwave.ico"
-        Width="1220" Height="730"
-        MinWidth="760" MinHeight="540"
+        Width="400" Height="604"
         WindowStyle="None"
         AllowsTransparency="False"
-        ResizeMode="CanResizeWithGrip"
-        WindowStartupLocation="CenterScreen"
-        Background="Transparent"
+        ResizeMode="NoResize"
+        WindowStartupLocation="Manual"
+        Background="#111216"
+        ShowInTaskbar="True"
         TextOptions.TextFormattingMode="Ideal"
         TextOptions.TextRenderingMode="ClearType">
 
     <WindowChrome.WindowChrome>
         <WindowChrome CaptionHeight="0"
-                      ResizeBorderThickness="6"
-                      GlassFrameThickness="-1"
+                      ResizeBorderThickness="0"
+                      GlassFrameThickness="0"
                       CornerRadius="0"/>
     </WindowChrome.WindowChrome>
 
-    <Grid Background="Transparent">
+    <Grid Background="#111216">
         <TextBlock x:Name="FallbackLoadingText"
-                   Text="✦ OmniWave — загрузка Clear Glass..."
-                   Foreground="#88FFFFFF"
-                   FontSize="13"
+                   Text="OmniWave — загрузка Chroma Card..."
+                   Foreground="#9CA3AF"
+                   FontSize="12"
                    FontWeight="SemiBold"
                    HorizontalAlignment="Center"
                    VerticalAlignment="Center"/>
-        <wv2:WebView2 x:Name="PlayerWebView"/>
+        <wv2:WebView2 x:Name="PlayerWebView" DefaultBackgroundColor="#111216"/>
     </Grid>
 </Window>
