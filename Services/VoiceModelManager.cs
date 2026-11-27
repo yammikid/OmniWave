@@ -24,10 +24,14 @@ public sealed class VoiceModelManager
     public const string VoskBinUrl = "https://github.com/alphacep/vosk-api/releases/download/v0.3.45/vosk-win64-0.3.45.zip";
     public const string VoskModelRuUrl = "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip";
     public const string WhisperBinUrl = "https://github.com/ggml-org/whisper.cpp/releases/download/b5907/whisper-bin-x64.zip";
+    public const string WhisperModelLargeV3TurboUrl = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin";
     public const string WhisperModelSmallQ5Url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin";
     public const string WhisperModelBaseUrl = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin";
     public const string OnnxRuntimeNuPkgUrl = "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/1.20.1/microsoft.ml.onnxruntime.directml.1.20.1.nupkg";
     public const string SupertonicBaseUrl = "https://huggingface.co/Supertone/supertonic-3/resolve/main/";
+    public const string SileroVadOnnxUrl = "https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx";
+    public const string SileroVadOnnxFallbackUrl = "https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx";
+    public const string WhisperVadGgmlUrl = "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin";
 
     private const int ParallelChunkBytes = 2 * 1024 * 1024;
     private const int ParallelConcurrency = 4;
@@ -58,6 +62,9 @@ public sealed class VoiceModelManager
     public string WhisperBinDir => Path.Combine(RootDir, "whisper-bin");
     public string WhisperModelDir => Path.Combine(RootDir, "whisper-model");
     public string OnnxRuntimeDir => Path.Combine(RootDir, "onnxruntime");
+    public string VadDir => Path.Combine(RootDir, "vad");
+    public string SileroVadOnnxPath => Path.Combine(VadDir, "silero_vad.onnx");
+    public string WhisperVadBinPath => Path.Combine(VadDir, "ggml-silero-v5.1.2.bin");
     public string SupertonicDir => Path.Combine(RootDir, "tts-supertonic");
     public string SupertonicOnnxDir => Path.Combine(SupertonicDir, "onnx");
     public string SupertonicVoicesDir => Path.Combine(SupertonicDir, "voice_styles");
@@ -96,9 +103,12 @@ public sealed class VoiceModelManager
 
     public string GetWhisperModelPath(string variant)
     {
-        string file = string.Equals(variant, "base", StringComparison.OrdinalIgnoreCase)
-            ? "ggml-base.bin"
-            : "ggml-small-q5_1.bin";
+        string file = variant?.Trim().ToLowerInvariant() switch
+        {
+            "turbo-q5" => "ggml-large-v3-turbo-q5_0.bin",
+            "base" => "ggml-base.bin",
+            _ => "ggml-small-q5_1.bin"
+        };
         return Path.Combine(WhisperModelDir, file);
     }
 
@@ -118,6 +128,12 @@ public sealed class VoiceModelManager
 
     public bool IsOnnxRuntimeReady()
         => File.Exists(Path.Combine(OnnxRuntimeDir, "onnxruntime.dll"));
+
+    public bool IsSileroVadReady()
+        => IsOnnxRuntimeReady() && HasMinFileSize(SileroVadOnnxPath, 500 * 1024);
+
+    public bool IsWhisperVadReady()
+        => HasMinFileSize(WhisperVadBinPath, 400 * 1024) && HasValidGgmlHeader(WhisperVadBinPath);
 
     public bool IsNeuralTtsReady()
     {
@@ -169,6 +185,7 @@ public sealed class VoiceModelManager
             bool needVosk = mode is "hybrid" or "vosk";
             bool needWhisper = mode is "hybrid" or "whisper";
             bool needTts = mode is "hybrid" or "tts";
+            bool needVad = mode is "hybrid" or "whisper" or "vosk" or "vad";
 
             if (needVosk)
             {
@@ -191,6 +208,11 @@ public sealed class VoiceModelManager
                 {
                     await DownloadWhisperModelAsync(whisperVariant, cts.Token);
                 }
+            }
+
+            if (needVad && (!IsSileroVadReady() || !IsWhisperVadReady()))
+            {
+                await DownloadVadModelsAsync(cts.Token);
             }
 
             if (needTts && !IsNeuralTtsReady())
@@ -313,8 +335,10 @@ public sealed class VoiceModelManager
 
             try
             {
-                using var za = ZipFile.OpenRead(tmpZip);
-                extractAction(za);
+                using (var za = ZipFile.OpenRead(tmpZip))
+                {
+                    extractAction(za);
+                }
                 TryDeleteFile(tmpZip);
                 return;
             }
@@ -327,10 +351,15 @@ public sealed class VoiceModelManager
 
     private async Task DownloadWhisperModelAsync(string variant, CancellationToken ct)
     {
-        bool isBase = string.Equals(variant, "base", StringComparison.OrdinalIgnoreCase);
-        string url = isBase ? WhisperModelBaseUrl : WhisperModelSmallQ5Url;
-        string label = isBase ? "Скачивание модели Whisper Base (141 МБ)..." : "Скачивание модели Whisper Small RU+EN (181 МБ)...";
-        string dest = GetWhisperModelPath(variant);
+        string norm = (variant ?? "").Trim().ToLowerInvariant();
+        (string url, string label) = norm switch
+        {
+            "turbo-q5" => (WhisperModelLargeV3TurboUrl, "Скачивание Whisper Large v3 Turbo RU+EN (547 МБ)..."),
+            "base" => (WhisperModelBaseUrl, "Скачивание модели Whisper Base (141 МБ)..."),
+            _ => (WhisperModelSmallQ5Url, "Скачивание модели Whisper Small RU+EN (181 МБ)...")
+        };
+
+        string dest = GetWhisperModelPath(variant!);
         Directory.CreateDirectory(WhisperModelDir);
         string part = dest + ".part";
 
@@ -343,6 +372,47 @@ public sealed class VoiceModelManager
         }
 
         File.Move(part, dest, overwrite: true);
+    }
+
+    private async Task DownloadVadModelsAsync(CancellationToken ct)
+    {
+        if (!IsOnnxRuntimeReady())
+            await DownloadAndExtractOnnxRuntimeAsync(ct);
+
+        Directory.CreateDirectory(VadDir);
+
+        if (!IsSileroVadReady())
+        {
+            string part = SileroVadOnnxPath + ".part";
+            try
+            {
+                await DownloadFileWithProgressAsync(SileroVadOnnxUrl, part, "Скачивание Silero VAD v5 ONNX (2.2 МБ)...", ct, HasNonHtmlHeader);
+            }
+            catch when (!ct.IsCancellationRequested)
+            {
+                TryDeleteFile(part);
+                await DownloadFileWithProgressAsync(SileroVadOnnxFallbackUrl, part, "Скачивание Silero VAD v5 ONNX (зеркало)...", ct, HasNonHtmlHeader);
+            }
+
+            if (!HasMinFileSize(part, 500 * 1024) || !HasNonHtmlHeader(part))
+            {
+                TryDeleteFile(part);
+                throw new InvalidDataException("Повреждённый файл Silero VAD ONNX");
+            }
+            File.Move(part, SileroVadOnnxPath, overwrite: true);
+        }
+
+        if (!IsWhisperVadReady())
+        {
+            string part = WhisperVadBinPath + ".part";
+            await DownloadFileWithProgressAsync(WhisperVadGgmlUrl, part, "Скачивание Whisper Silero VAD (0.9 МБ)...", ct, HasValidGgmlHeader);
+            if (!HasMinFileSize(part, 400 * 1024) || !HasValidGgmlHeader(part))
+            {
+                TryDeleteFile(part);
+                throw new InvalidDataException("Повреждённый файл Whisper VAD GGML");
+            }
+            File.Move(part, WhisperVadBinPath, overwrite: true);
+        }
     }
 
     private Task DownloadAndExtractOnnxRuntimeAsync(CancellationToken ct)

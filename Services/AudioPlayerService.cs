@@ -118,6 +118,11 @@ public class AudioPlayerService : IDisposable
             "--no-stats",
             "--no-sub-autodetect-file",
             "--no-snapshot-preview",
+            "--no-metadata-network-access",
+            "--no-lua",
+            "--no-media-library",
+            "--file-caching=300",
+            "--network-caching=800",
             "--quiet",
             "--aout=directsound");
         _player = new MediaPlayer(_libVlc) { Volume = _softwareVolume };

@@ -12,25 +12,51 @@ using System.Text.RegularExpressions;
 namespace DynamicIsland.Services;
 
 /// <summary>
-/// Управляет тёплым локальным процессом whisper-server.exe на loopback 127.0.0.1
-/// и распознаёт смешанную RU+EN речь (названия треков/артистов) через HTTP POST /inference.
+/// Управляет тёплым локальным процессом whisper-server.exe на loopback 127.0.0.1,
+/// выполняет 16 кГц DSP-предобработку, фильтрацию галлюцинаций и автоостановку при простое.
 /// </summary>
 public sealed class WhisperLocalClient : IDisposable
 {
     private const int JobObjectExtendedLimitInformation = 9;
     private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+    private const int IdleStopMs = 75_000;
 
     private static readonly Regex NoiseTagRegex = new(@"\[[^\]]*\]|\([^\)]*\)", RegexOptions.Compiled);
     private static readonly Regex MultiSpaceRegex = new(@"\s+", RegexOptions.Compiled);
 
+    private static readonly string[] HallucinationSubstrings =
+    {
+        "редактор субтитров",
+        "корректор",
+        "субтитры сделал",
+        "субтитры создавал",
+        "продолжение следует",
+        "спасибо за просмотр",
+        "подписывайтесь на канал",
+        "ставьте лайки",
+        "не забудьте подписаться",
+        "динамичная музыка",
+        "музыкальная заставка",
+        "веселая музыка",
+        "грустная музыка",
+        "аплодисменты",
+        "dima torzok",
+        "amara.org",
+        "www.",
+        "http://"
+    };
+
     private readonly VoiceModelManager _models;
     private readonly SemaphoreSlim _serverLock = new(1, 1);
     private readonly HttpClient _http;
+    private readonly System.Threading.Timer _idleStopTimer;
 
     private IntPtr _jobHandle;
     private Process? _process;
     private int _port;
     private string _activeVariant = "";
+    private int _activeRequests;
+    private long _lastUsedTick;
     private bool _disposed;
 
     public bool IsRunning => _process is { HasExited: false } && _port > 0;
@@ -46,6 +72,7 @@ public sealed class WhisperLocalClient : IDisposable
         {
             Timeout = TimeSpan.FromSeconds(30)
         };
+        _idleStopTimer = new System.Threading.Timer(OnIdleStopTimer, null, Timeout.Infinite, Timeout.Infinite);
     }
 
     public async Task<bool> EnsureStartedAsync(string modelVariant, CancellationToken ct = default)
@@ -99,8 +126,36 @@ public sealed class WhisperLocalClient : IDisposable
             psi.ArgumentList.Add("/inference");
             psi.ArgumentList.Add("-sns");
             psi.ArgumentList.Add("-nt");
+            psi.ArgumentList.Add("-fa");
+            psi.ArgumentList.Add("-ng");
+            psi.ArgumentList.Add("-bs");
+            psi.ArgumentList.Add("3");
+            psi.ArgumentList.Add("-bo");
+            psi.ArgumentList.Add("3");
+            psi.ArgumentList.Add("-nth");
+            psi.ArgumentList.Add("0.55");
+            psi.ArgumentList.Add("-et");
+            psi.ArgumentList.Add("2.4");
+            psi.ArgumentList.Add("-lpt");
+            psi.ArgumentList.Add("-1.0");
+            psi.ArgumentList.Add("--carry-initial-prompt");
             psi.ArgumentList.Add("--prompt");
             psi.ArgumentList.Add(prompt);
+
+            if (_models.IsWhisperVadReady())
+            {
+                psi.ArgumentList.Add("--vad");
+                psi.ArgumentList.Add("-vm");
+                psi.ArgumentList.Add(_models.WhisperVadBinPath);
+                psi.ArgumentList.Add("-vt");
+                psi.ArgumentList.Add("0.45");
+                psi.ArgumentList.Add("-vspd");
+                psi.ArgumentList.Add("180");
+                psi.ArgumentList.Add("-vsd");
+                psi.ArgumentList.Add("180");
+                psi.ArgumentList.Add("-vp");
+                psi.ArgumentList.Add("120");
+            }
 
             var proc = Process.Start(psi);
             if (proc == null)
@@ -113,6 +168,7 @@ public sealed class WhisperLocalClient : IDisposable
             _process = proc;
             _port = port;
             _activeVariant = modelVariant;
+            Volatile.Write(ref _lastUsedTick, Environment.TickCount64);
 
             var deadline = DateTime.UtcNow.AddSeconds(25);
             while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
@@ -128,7 +184,11 @@ public sealed class WhisperLocalClient : IDisposable
                     using var req = new HttpRequestMessage(HttpMethod.Get, $"http://127.0.0.1:{port}/");
                     using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
                     if ((int)resp.StatusCode < 500)
+                    {
+                        Volatile.Write(ref _lastUsedTick, Environment.TickCount64);
+                        ScheduleIdleStop();
                         return true;
+                    }
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
@@ -154,27 +214,40 @@ public sealed class WhisperLocalClient : IDisposable
         }
     }
 
-    public async Task<string> TranscribePcm16kAsync(byte[] pcmBytes, string modelVariant, CancellationToken ct = default)
+    public Task<string> TranscribePcm16kAsync(byte[] pcmBytes, string modelVariant, CancellationToken ct = default)
+        => TranscribePcm16kAsync(pcmBytes, modelVariant, dynamicPrompt: null, ct);
+
+    public async Task<string> TranscribePcm16kAsync(
+        byte[] pcmBytes,
+        string modelVariant,
+        string? dynamicPrompt,
+        CancellationToken ct = default)
     {
         if (pcmBytes == null || pcmBytes.Length < 1600)
             return "";
 
-        if (!await EnsureStartedAsync(modelVariant, ct).ConfigureAwait(false))
-            return "";
-
-        byte[] wav = WrapPcm16kAsWav(pcmBytes);
-        int port = _port;
-        if (port <= 0) return "";
-
+        Interlocked.Increment(ref _activeRequests);
         try
         {
+            Volatile.Write(ref _lastUsedTick, Environment.TickCount64);
+            if (!await EnsureStartedAsync(modelVariant, ct).ConfigureAwait(false))
+                return "";
+
+            byte[] processed = PreprocessPcm16k(pcmBytes);
+            byte[] wav = WrapPcm16kAsWav(processed);
+            int port = _port;
+            if (port <= 0) return "";
+
             using var form = new MultipartFormDataContent();
             var fileContent = new ByteArrayContent(wav);
             fileContent.Headers.ContentType = new MediaTypeHeaderValue("audio/wav");
             form.Add(fileContent, "file", "command.wav");
             form.Add(new StringContent("json"), "response_format");
             form.Add(new StringContent("0.0"), "temperature");
+            form.Add(new StringContent("0.2"), "temperature_inc");
             form.Add(new StringContent("ru"), "language");
+            if (!string.IsNullOrWhiteSpace(dynamicPrompt))
+                form.Add(new StringContent(dynamicPrompt), "prompt");
 
             using var resp = await _http.PostAsync($"http://127.0.0.1:{port}/inference", form, ct).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode)
@@ -188,11 +261,135 @@ public sealed class WhisperLocalClient : IDisposable
             string cleaned = txtEl.GetString() ?? "";
             cleaned = NoiseTagRegex.Replace(cleaned, " ");
             cleaned = MultiSpaceRegex.Replace(cleaned, " ").Trim();
+            if (IsKnownHallucination(cleaned))
+                return "";
             return cleaned;
         }
         catch
         {
             return "";
+        }
+        finally
+        {
+            Volatile.Write(ref _lastUsedTick, Environment.TickCount64);
+            Interlocked.Decrement(ref _activeRequests);
+            ScheduleIdleStop();
+        }
+    }
+
+    private static byte[] PreprocessPcm16k(byte[] pcm)
+    {
+        int sampleCount = pcm.Length / 2;
+        if (sampleCount < 160)
+            return pcm;
+
+        var floats = new float[sampleCount];
+        double mean = 0;
+        for (int i = 0; i < sampleCount; i++)
+        {
+            short s = (short)(pcm[i * 2] | (pcm[i * 2 + 1] << 8));
+            float v = s / 32768f;
+            floats[i] = v;
+            mean += v;
+        }
+        float dc = (float)(mean / sampleCount);
+
+        // Высокочастотный фильтр 1-го порядка ~85 Гц (убирает гул вентиляторов/стола и DC-смещение)
+        const float alpha = 0.9677f;
+        float prevIn = 0f;
+        float prevOut = 0f;
+        double activeSqSum = 0;
+        int activeCount = 0;
+        double allSqSum = 0;
+
+        for (int i = 0; i < sampleCount; i++)
+        {
+            float x = floats[i] - dc;
+            float y = alpha * (prevOut + x - prevIn);
+            prevIn = x;
+            prevOut = y;
+            floats[i] = y;
+
+            float abs = MathF.Abs(y);
+            double sq = (double)y * y;
+            allSqSum += sq;
+            if (abs > 0.008f)
+            {
+                activeSqSum += sq;
+                activeCount++;
+            }
+        }
+
+        float rms = activeCount >= 80
+            ? (float)Math.Sqrt(activeSqSum / activeCount)
+            : (float)Math.Sqrt(allSqSum / sampleCount);
+
+        float gain = (rms >= 0.004f && rms < 0.14f)
+            ? Math.Clamp(0.12f / rms, 1.0f, 5.5f)
+            : 1.0f;
+
+        byte[] outBytes = new byte[sampleCount * 2];
+        for (int i = 0; i < sampleCount; i++)
+        {
+            float v = floats[i] * gain;
+            float abs = MathF.Abs(v);
+            if (abs > 0.92f)
+                v = MathF.Sign(v) * (0.92f + 0.08f * MathF.Tanh((abs - 0.92f) / 0.08f));
+
+            short s = (short)Math.Clamp((int)MathF.Round(v * 32767f), -32768, 32767);
+            outBytes[i * 2] = (byte)(s & 0xFF);
+            outBytes[i * 2 + 1] = (byte)((s >> 8) & 0xFF);
+        }
+        return outBytes;
+    }
+
+    private static bool IsKnownHallucination(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return true;
+
+        string norm = text.Trim().ToLowerInvariant().Replace('ё', 'е');
+        foreach (var h in HallucinationSubstrings)
+        {
+            if (norm.Contains(h, StringComparison.Ordinal))
+                return true;
+        }
+
+        // Отсекаем цикличные повторы одного слова ("да да да да")
+        var words = norm.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (words.Length >= 4 && words.All(w => string.Equals(w, words[0], StringComparison.Ordinal)))
+            return true;
+
+        return false;
+    }
+
+    private void ScheduleIdleStop()
+    {
+        if (_disposed) return;
+        try { _idleStopTimer.Change(IdleStopMs, Timeout.Infinite); } catch { }
+    }
+
+    private void OnIdleStopTimer(object? _)
+    {
+        if (_disposed || !IsRunning) return;
+        if (Volatile.Read(ref _activeRequests) > 0) return;
+        if (Environment.TickCount64 - Volatile.Read(ref _lastUsedTick) < IdleStopMs - 500)
+            return;
+
+        if (!_serverLock.Wait(0))
+            return;
+
+        try
+        {
+            if (!_disposed && Volatile.Read(ref _activeRequests) == 0 &&
+                Environment.TickCount64 - Volatile.Read(ref _lastUsedTick) >= IdleStopMs - 500)
+            {
+                StopProcessLocked();
+            }
+        }
+        finally
+        {
+            _serverLock.Release();
         }
     }
 
@@ -303,6 +500,7 @@ public sealed class WhisperLocalClient : IDisposable
     public void Dispose()
     {
         _disposed = true;
+        try { _idleStopTimer.Dispose(); } catch { }
         Stop();
         if (_jobHandle != IntPtr.Zero)
         {

@@ -206,6 +206,23 @@ public sealed class VoskNativeEngine : IDisposable
         return "";
     }
 
+    public void Unload()
+    {
+        lock (_engineLock)
+        {
+            if (_recognizerPtr != IntPtr.Zero)
+            {
+                try { _recFree?.Invoke(_recognizerPtr); } catch { }
+                _recognizerPtr = IntPtr.Zero;
+            }
+            if (_modelPtr != IntPtr.Zero)
+            {
+                try { _modelFree?.Invoke(_modelPtr); } catch { }
+                _modelPtr = IntPtr.Zero;
+            }
+        }
+    }
+
     public void Dispose()
     {
         lock (_engineLock)

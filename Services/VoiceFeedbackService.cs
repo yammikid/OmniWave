@@ -1,14 +1,13 @@
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
-using Windows.Media.SpeechSynthesis;
 
 namespace DynamicIsland.Services;
 
 public sealed record TtsVoiceInfo(string Id, string DisplayName, string ShortName);
 
 /// <summary>
-/// Локальные голосовые ответы: нейросетевая женская модель Supertonic 3 (RU+EN) с фоллбеком на WinRT SpeechSynthesizer OneCore + звуковые отклики.
+/// Локальные голосовые ответы: только нейросетевая женская модель Supertonic 3 (F1–F5, RU+EN) и звуковые отклики.
 /// </summary>
 public sealed class VoiceFeedbackService : IDisposable
 {
@@ -26,6 +25,8 @@ public sealed class VoiceFeedbackService : IDisposable
     private CancellationTokenSource? _speakCts;
     private bool _disposed;
 
+    public bool IsNeuralLoaded => _neuralEngine?.IsLoaded == true;
+
     public VoiceFeedbackService(VoiceModelManager? models = null)
     {
         _models = models;
@@ -35,35 +36,9 @@ public sealed class VoiceFeedbackService : IDisposable
 
     public static List<TtsVoiceInfo> GetAvailableVoices(VoiceModelManager? models)
     {
-        var result = new List<TtsVoiceInfo>();
-        if (models?.IsNeuralTtsReady() == true)
-        {
-            foreach (var preset in SupertonicTtsEngine.FemaleVoices)
-                result.Add(new(preset.Id, preset.DisplayName, preset.ShortName));
-        }
-        result.AddRange(GetRussianVoices());
-        return result;
-    }
-
-    public static List<TtsVoiceInfo> GetRussianVoices()
-    {
-        var result = new List<TtsVoiceInfo>();
-        try
-        {
-            foreach (var v in SpeechSynthesizer.AllVoices)
-            {
-                if (!v.Language.StartsWith("ru", StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                string shortName = v.DisplayName
-                    .Replace("Microsoft ", "", StringComparison.OrdinalIgnoreCase)
-                    .Replace(" - Russian (Russia)", "", StringComparison.OrdinalIgnoreCase)
-                    .Replace(" Desktop", "", StringComparison.OrdinalIgnoreCase)
-                    .Trim();
-                result.Add(new(v.Id, v.DisplayName, string.IsNullOrWhiteSpace(shortName) ? v.DisplayName : shortName));
-            }
-        }
-        catch { }
+        var result = new List<TtsVoiceInfo>(SupertonicTtsEngine.FemaleVoices.Count);
+        foreach (var preset in SupertonicTtsEngine.FemaleVoices)
+            result.Add(new(preset.Id, preset.DisplayName, preset.ShortName));
         return result;
     }
 
@@ -72,9 +47,7 @@ public sealed class VoiceFeedbackService : IDisposable
         if (_disposed || _neuralEngine == null || _models?.IsNeuralTtsReady() != true)
             return Task.CompletedTask;
 
-        bool wantsNeural = string.IsNullOrWhiteSpace(preferredVoiceName) ||
-                           preferredVoiceName.StartsWith("supertonic:", StringComparison.OrdinalIgnoreCase);
-        return wantsNeural ? _neuralEngine.WarmUpAsync(preferredVoiceName, ct) : Task.CompletedTask;
+        return _neuralEngine.WarmUpAsync(preferredVoiceName, ct);
     }
 
     public void UnloadNeuralModels()
@@ -101,6 +74,8 @@ public sealed class VoiceFeedbackService : IDisposable
     public async Task SpeakAsync(string text, string preferredVoiceName = "", CancellationToken outerCt = default)
     {
         if (_disposed || string.IsNullOrWhiteSpace(text)) return;
+        if (_neuralEngine == null || _models?.IsNeuralTtsReady() != true)
+            return;
 
         var cts = CancellationTokenSource.CreateLinkedTokenSource(outerCt);
         var prev = Interlocked.Exchange(ref _speakCts, cts);
@@ -111,65 +86,18 @@ public sealed class VoiceFeedbackService : IDisposable
         }
         try { _ = PlaySoundW(IntPtr.Zero, IntPtr.Zero, 0); } catch { }
 
-        byte[]? wavBytes = null;
-
-        bool useNeural = _neuralEngine != null &&
-                         _models?.IsNeuralTtsReady() == true &&
-                         (string.IsNullOrWhiteSpace(preferredVoiceName) ||
-                          preferredVoiceName.StartsWith("supertonic:", StringComparison.OrdinalIgnoreCase));
-
-        if (useNeural)
+        byte[]? wavBytes;
+        try
         {
-            try
-            {
-                wavBytes = await _neuralEngine!.SynthesizeWavAsync(text, preferredVoiceName, cts.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-            catch
-            {
-                wavBytes = null;
-            }
+            wavBytes = await _neuralEngine.SynthesizeWavAsync(text, preferredVoiceName, cts.Token).ConfigureAwait(false);
         }
-
-        if (wavBytes == null || wavBytes.Length < 44)
+        catch (OperationCanceledException)
         {
-            try
-            {
-                using var synth = new SpeechSynthesizer();
-                var ruVoices = SpeechSynthesizer.AllVoices
-                    .Where(v => v.Language.StartsWith("ru", StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-
-                if (ruVoices.Count > 0)
-                {
-                    VoiceInformation? chosen = null;
-                    if (!string.IsNullOrWhiteSpace(preferredVoiceName) &&
-                        !preferredVoiceName.StartsWith("supertonic:", StringComparison.OrdinalIgnoreCase))
-                    {
-                        chosen = ruVoices.FirstOrDefault(v =>
-                            v.DisplayName.Contains(preferredVoiceName, StringComparison.OrdinalIgnoreCase) ||
-                            string.Equals(v.Id, preferredVoiceName, StringComparison.OrdinalIgnoreCase));
-                    }
-                    synth.Voice = chosen ?? ruVoices.FirstOrDefault(v => v.DisplayName.Contains("Irina", StringComparison.OrdinalIgnoreCase)) ?? ruVoices[0];
-                }
-
-                using var stream = await synth.SynthesizeTextToStreamAsync(text).AsTask(cts.Token);
-                using var readStream = stream.AsStreamForRead();
-                using var ms = new MemoryStream((int)Math.Min(stream.Size, 4 * 1024 * 1024));
-                await readStream.CopyToAsync(ms, cts.Token);
-                wavBytes = ms.ToArray();
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-            catch
-            {
-                return;
-            }
+            return;
+        }
+        catch
+        {
+            return;
         }
 
         if (wavBytes == null || wavBytes.Length < 44 || cts.IsCancellationRequested)

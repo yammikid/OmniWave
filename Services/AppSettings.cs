@@ -54,7 +54,7 @@ public class AppSettings
     public bool VoiceWhisperEnabled { get; set; } = true;
     public string VoiceWhisperModel { get; set; } = "small-q5";
     public bool VoiceTtsEnabled { get; set; } = true;
-    public string VoiceTtsVoiceName { get; set; } = "";
+    public string VoiceTtsVoiceName { get; set; } = "supertonic:F1";
     public bool VoiceDuckMusic { get; set; } = true;
     public bool VoiceHotkeyEnabled { get; set; } = true;
     public int VoiceInputDeviceIndex { get; set; } = -1;
@@ -101,8 +101,22 @@ public class AppSettings
         if (string.IsNullOrWhiteSpace(VoiceWakeWords))
             VoiceWakeWords = "омни, волна";
         var wModel = (VoiceWhisperModel ?? "").Trim().ToLowerInvariant();
-        VoiceWhisperModel = wModel == "base" ? "base" : "small-q5";
-        VoiceTtsVoiceName ??= "";
+        VoiceWhisperModel = wModel switch
+        {
+            "base" => "base",
+            "turbo-q5" => "turbo-q5",
+            _ => "small-q5"
+        };
+
+        var tts = (VoiceTtsVoiceName ?? "").Trim().ToUpperInvariant();
+        VoiceTtsVoiceName = tts switch
+        {
+            "SUPERTONIC:F2" => "supertonic:F2",
+            "SUPERTONIC:F3" => "supertonic:F3",
+            "SUPERTONIC:F4" => "supertonic:F4",
+            "SUPERTONIC:F5" => "supertonic:F5",
+            _ => "supertonic:F1"
+        };
         VoiceInputDeviceIndex = Math.Max(-1, VoiceInputDeviceIndex);
     }
 }

@@ -2,6 +2,7 @@ using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -18,7 +19,7 @@ public sealed record NeuralTtsVoicePreset(
 
 /// <summary>
 /// Офлайн-движок нейросетевого синтеза речи Supertonic 3 (ONNX Runtime, женские голоса F1–F5, RU + EN, 44.1 кГц).
-/// Включает нормализацию чисел/времени/процентов, авторазделение RU/EN сегментов и LRU-кэш WAV.
+/// Включает нормализацию чисел/времени/процентов, авторазделение RU/EN сегментов, дисковый WAV-кэш и автовыгрузку ONNX при простое.
 /// </summary>
 public sealed class SupertonicTtsEngine : IDisposable
 {
@@ -26,15 +27,18 @@ public sealed class SupertonicTtsEngine : IDisposable
     private const float SpeechSpeed = 1.06f;
     private const float PauseBetweenSegmentsSec = 0.065f;
     private const float PauseBetweenChunksSec = 0.14f;
-    private const int MaxWavCacheEntries = 64;
+    private const int MaxWavCacheEntries = 12;
+    private const int MaxDiskCacheFiles = 160;
+    private const long MaxDiskCacheBytes = 25L * 1024 * 1024;
+    private const int IdleUnloadMs = 30_000;
 
     public static readonly IReadOnlyList<NeuralTtsVoicePreset> FemaleVoices = new NeuralTtsVoicePreset[]
     {
-        new("supertonic:F1", "Омни F1 • Нейро RU+EN", "F1 (мягкий)", "F1.json"),
-        new("supertonic:F2", "Омни F2 • Нейро RU+EN", "F2 (яркий)", "F2.json"),
-        new("supertonic:F3", "Омни F3 • Нейро RU+EN", "F3 (спокойный)", "F3.json"),
-        new("supertonic:F4", "Омни F4 • Нейро RU+EN", "F4 (тёплый)", "F4.json"),
-        new("supertonic:F5", "Омни F5 • Нейро RU+EN", "F5 (живой)", "F5.json"),
+        new("supertonic:F1", "Омни F1 • Нейро RU+EN", "F1 Мягкий", "F1.json"),
+        new("supertonic:F2", "Омни F2 • Нейро RU+EN", "F2 Яркий", "F2.json"),
+        new("supertonic:F3", "Омни F3 • Нейро RU+EN", "F3 Спокойный", "F3.json"),
+        new("supertonic:F4", "Омни F4 • Нейро RU+EN", "F4 Тёплый", "F4.json"),
+        new("supertonic:F5", "Омни F5 • Нейро RU+EN", "F5 Живой", "F5.json"),
     };
 
     private static readonly Regex EmojiRangeRegex = new(
@@ -72,12 +76,18 @@ public sealed class SupertonicTtsEngine : IDisposable
     private int _latentDim = 24;
     private bool _loaded;
     private bool _disposed;
+    private int _activeOps;
+    private long _lastUseTick;
+    private readonly System.Threading.Timer _idleUnloadTimer;
+
+    public bool IsLoaded => Volatile.Read(ref _loaded);
 
     private sealed record StyleData(float[] Ttl, int[] TtlShape, float[] Dp, int[] DpShape);
 
     public SupertonicTtsEngine(VoiceModelManager models)
     {
         _models = models;
+        _idleUnloadTimer = new System.Threading.Timer(OnIdleUnloadTimer, null, Timeout.Infinite, Timeout.Infinite);
     }
 
     public static void EnsureNativeResolverRegistered(string onnxRuntimeDir)
@@ -145,10 +155,18 @@ public sealed class SupertonicTtsEngine : IDisposable
         if (TryGetCachedWav(cacheKey, out var cached))
             return cached;
 
+        var diskWav = await TryReadDiskCachedWavAsync(cacheKey, ct).ConfigureAwait(false);
+        if (diskWav != null)
+        {
+            StoreCachedWav(cacheKey, diskWav);
+            return diskWav;
+        }
+
         var segments = SplitIntoLanguageSegments(cleanedInput);
         if (segments.Count == 0)
             return null;
 
+        Interlocked.Increment(ref _activeOps);
         await _inferLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -156,6 +174,7 @@ public sealed class SupertonicTtsEngine : IDisposable
             if (_disposed || !_models.IsNeuralTtsReady())
                 return null;
 
+            Volatile.Write(ref _lastUseTick, Environment.TickCount64);
             EnsureLoadedLocked();
             var style = LoadVoiceStyleLocked(preset);
             int sampleRate = _sampleRate;
@@ -197,11 +216,15 @@ public sealed class SupertonicTtsEngine : IDisposable
 
             byte[] wav = EncodeNormalizedPcm16Wav(combinedSamples, sampleRate);
             StoreCachedWav(cacheKey, wav);
+            TrySaveDiskCachedWav(cacheKey, wav);
             return wav;
         }
         finally
         {
+            Volatile.Write(ref _lastUseTick, Environment.TickCount64);
             _inferLock.Release();
+            Interlocked.Decrement(ref _activeOps);
+            ScheduleIdleUnload();
         }
     }
 
@@ -244,11 +267,14 @@ public sealed class SupertonicTtsEngine : IDisposable
         {
             GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
             ExecutionMode = ExecutionMode.ORT_SEQUENTIAL,
-            IntraOpNumThreads = Math.Clamp(Environment.ProcessorCount / 2, 2, 8),
+            IntraOpNumThreads = Math.Clamp(Environment.ProcessorCount / 2, 2, 6),
             InterOpNumThreads = 1,
-            EnableMemoryPattern = true,
-            EnableCpuMemArena = true
+            EnableMemoryPattern = false,
+            EnableCpuMemArena = false
         };
+        TryAddSessionConfig(opts, "session.intra_op.allow_spinning", "0");
+        TryAddSessionConfig(opts, "session.inter_op.allow_spinning", "0");
+        TryAddSessionConfig(opts, "session.set_denormal_as_zero", "1");
 
         try
         {
@@ -852,10 +878,132 @@ public sealed class SupertonicTtsEngine : IDisposable
         return string.Join(" ", parts);
     }
 
+    private string GetDiskCacheDir() => Path.Combine(_models.RootDir, "tts-cache");
+
+    private string GetDiskCachePath(string cacheKey)
+    {
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes("v2|" + cacheKey));
+        string hex = Convert.ToHexString(hash.AsSpan(0, 12)).ToLowerInvariant();
+        return Path.Combine(GetDiskCacheDir(), hex + ".wav");
+    }
+
+    private async Task<byte[]?> TryReadDiskCachedWavAsync(string cacheKey, CancellationToken ct)
+    {
+        try
+        {
+            string path = GetDiskCachePath(cacheKey);
+            if (!File.Exists(path))
+                return null;
+
+            byte[] bytes = await File.ReadAllBytesAsync(path, ct).ConfigureAwait(false);
+            if (bytes.Length < 44 || bytes[0] != (byte)'R' || bytes[1] != (byte)'I' || bytes[2] != (byte)'F' || bytes[3] != (byte)'F')
+                return null;
+
+            try { File.SetLastWriteTimeUtc(path, DateTime.UtcNow); } catch { }
+            return bytes;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private void TrySaveDiskCachedWav(string cacheKey, byte[] wav)
+    {
+        if (wav.Length < 44 || wav.Length > 2 * 1024 * 1024)
+            return;
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                string dir = GetDiskCacheDir();
+                Directory.CreateDirectory(dir);
+                string dest = GetDiskCachePath(cacheKey);
+                string tmp = dest + ".tmp";
+                File.WriteAllBytes(tmp, wav);
+                File.Move(tmp, dest, overwrite: true);
+                PruneDiskCache(dir);
+            }
+            catch { }
+        });
+    }
+
+    private static void PruneDiskCache(string dir)
+    {
+        try
+        {
+            var files = new DirectoryInfo(dir)
+                .EnumerateFiles("*.wav", SearchOption.TopDirectoryOnly)
+                .OrderByDescending(f => f.LastWriteTimeUtc)
+                .ToList();
+
+            long totalBytes = files.Sum(f => f.Length);
+            for (int i = files.Count - 1; i >= 0 && (files.Count > MaxDiskCacheFiles || totalBytes > MaxDiskCacheBytes); i--)
+            {
+                long sz = files[i].Length;
+                try
+                {
+                    files[i].Delete();
+                    totalBytes -= sz;
+                    files.RemoveAt(i);
+                }
+                catch { }
+            }
+        }
+        catch { }
+    }
+
+    private void ScheduleIdleUnload()
+    {
+        if (_disposed) return;
+        try { _idleUnloadTimer.Change(IdleUnloadMs, Timeout.Infinite); } catch { }
+    }
+
+    private void OnIdleUnloadTimer(object? _)
+    {
+        if (_disposed || !Volatile.Read(ref _loaded))
+            return;
+        if (Volatile.Read(ref _activeOps) > 0)
+            return;
+        if (Environment.TickCount64 - Volatile.Read(ref _lastUseTick) < IdleUnloadMs - 500)
+            return;
+
+        if (!_inferLock.Wait(0))
+            return;
+
+        bool unloaded = false;
+        try
+        {
+            if (!_disposed && _loaded && Volatile.Read(ref _activeOps) == 0 &&
+                Environment.TickCount64 - Volatile.Read(ref _lastUseTick) >= IdleUnloadMs - 500)
+            {
+                UnloadLocked();
+                unloaded = true;
+            }
+        }
+        finally
+        {
+            _inferLock.Release();
+        }
+
+        if (unloaded)
+        {
+            try { GC.Collect(2, GCCollectionMode.Aggressive, blocking: false, compacting: true); } catch { }
+            WindowBlurHelper.TrimWorkingSet();
+        }
+    }
+
+    private static void TryAddSessionConfig(SessionOptions opts, string key, string value)
+    {
+        try { opts.AddSessionConfigEntry(key, value); } catch { }
+    }
+
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
+        try { _idleUnloadTimer.Dispose(); } catch { }
         try { Unload(); } catch { }
         _inferLock.Dispose();
     }

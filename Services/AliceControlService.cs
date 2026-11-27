@@ -128,17 +128,29 @@ public static class AliceCommandParser
                     list.Add("омне");
                     list.Add("оми");
                     list.Add("умни");
+                    list.Add("помни");
+                    list.Add("он мне");
+                    list.Add("о мне");
+                    list.Add("комна");
+                    list.Add("комни");
+                    list.Add("амни");
+                    list.Add("хомни");
+                    list.Add("ом ни");
                     list.Add("омнивейв");
                 }
                 else if (w == "волна")
                 {
                     list.Add("волны");
                     list.Add("волну");
+                    list.Add("вална");
+                    list.Add("волно");
                 }
                 else if (w == "алиса")
                 {
                     list.Add("алисы");
                     list.Add("алису");
+                    list.Add("алис");
+                    list.Add("олиса");
                 }
             }
         }
@@ -191,7 +203,8 @@ public static class AliceCommandParser
         if (MatchesAny(text, "перемешай избранное", "перемешать избранное", "избранное вперемешку", "случайное избранное", "shuffle favorites"))
             return new(AliceCommandType.ShuffleFavorites);
 
-        if (MatchesAny(text, "включи избранное", "играй избранное", "любимые треки", "избранное", "мои треки", "play favorites"))
+        if (MatchesAny(text, "включи избранное", "включи избранные", "играй избранное", "любимые треки", "избранное", "мои треки", "play favorites") ||
+            IsCloseSingleWord(text, "избранное"))
             return new(AliceCommandType.PlayFavorites);
 
         if (MatchesAny(text, "моя волна", "мою волну", "включи мою волну", "запусти мою волну", "включи волну", "запусти волну", "волна", "yandex wave"))
@@ -218,7 +231,8 @@ public static class AliceCommandParser
         if (MatchesAny(text, "выключи перемешивание", "отключи перемешивание", "без перемешивания", "по порядку", "шафл выкл", "shuffle off"))
             return new(AliceCommandType.ShuffleOff);
 
-        if (MatchesAny(text, "перемешай", "перемешать", "включи перемешивание", "вперемешку", "случайный порядок", "шафл", "shuffle", "shuffle on"))
+        if (MatchesAny(text, "перемешай", "перемешать", "перемешать треки", "включи перемешивание", "вперемешку", "случайный порядок", "шафл", "shuffle", "shuffle on") ||
+            IsCloseSingleWord(text, "перемешай"))
             return new(AliceCommandType.ShuffleOn);
 
         if (MatchesAny(text, "выключи повтор", "отключи повтор", "без повтора", "не повторяй", "repeat off"))
@@ -230,13 +244,14 @@ public static class AliceCommandParser
         if (MatchesAny(text, "повтор очереди", "повтор всех", "включи повтор", "повторяй все", "repeat all"))
             return new(AliceCommandType.RepeatAll);
 
-        if (MatchesAny(text, "повтор", "режим повтора", "зацикли", "repeat"))
+        if (MatchesAny(text, "повтор", "режим повтора", "зацикли", "repeat") ||
+            IsCloseSingleWord(text, "повтор"))
             return new(AliceCommandType.RepeatCycle);
 
-        if (MatchesAny(text, "убери лайк", "сними лайк", "удали из избранного", "не нравится", "дизлайк", "unlike"))
+        if (MatchesAny(text, "убери лайк", "сними лайк", "удали лайк", "удали из избранного", "не нравится", "дизлайк", "unlike"))
             return new(AliceCommandType.Unlike);
 
-        if (MatchesAny(text, "лайк", "лайкни", "поставь лайк", "нравится", "добавь в избранное", "в избранное", "сохрани трек", "like"))
+        if (MatchesAny(text, "лайк", "лайкни", "поставь лайк", "добавь лайк", "нравится", "добавь в избранное", "в избранное", "сохрани трек", "like"))
             return new(AliceCommandType.Like);
 
         if (MatchesAny(text, "компактный режим", "включи компактный режим", "пилюля", "режим пилюли", "мини режим", "сверни в пилюлю", "compact"))
@@ -258,10 +273,13 @@ public static class AliceCommandParser
 
         if (text.StartsWith("громче", StringComparison.Ordinal) ||
             text.StartsWith("погромче", StringComparison.Ordinal) ||
+            text.StartsWith("сделай громче", StringComparison.Ordinal) ||
+            text.StartsWith("сделай погромче", StringComparison.Ordinal) ||
             text.StartsWith("прибавь", StringComparison.Ordinal) ||
             text.StartsWith("добавь громк", StringComparison.Ordinal) ||
             text.StartsWith("добавь звук", StringComparison.Ordinal) ||
             text.StartsWith("увеличь громк", StringComparison.Ordinal) ||
+            IsCloseSingleWord(text, "громче") ||
             text == "volume up")
         {
             int delta = ExtractNumber0To100(text, out int num) ? Math.Clamp(num, 1, 100) : 15;
@@ -270,10 +288,12 @@ public static class AliceCommandParser
 
         if (text.StartsWith("тише", StringComparison.Ordinal) ||
             text.StartsWith("потише", StringComparison.Ordinal) ||
+            text.StartsWith("сделай потише", StringComparison.Ordinal) ||
             text.StartsWith("убавь", StringComparison.Ordinal) ||
             text.StartsWith("уменьши громк", StringComparison.Ordinal) ||
             text.StartsWith("уменьши звук", StringComparison.Ordinal) ||
             text.StartsWith("сделай тише", StringComparison.Ordinal) ||
+            IsCloseSingleWord(text, "тише") ||
             text == "volume down")
         {
             int delta = ExtractNumber0To100(text, out int num) ? Math.Clamp(num, 1, 100) : 15;
@@ -288,16 +308,20 @@ public static class AliceCommandParser
                 return new(AliceCommandType.SetVolume, NumberValue: Math.Clamp(vol, 0, 100));
         }
 
-        if (MatchesAny(text, "следующий", "следующий трек", "следующая песня", "дальше", "пропусти", "пропусти трек", "скип", "next", "skip"))
+        if (MatchesAny(text, "следующий", "следующий трек", "следующая песня", "следущая", "следущий", "дальше", "дальше трек", "пропусти", "пропусти трек", "скип", "next", "skip") ||
+            IsCloseSingleWord(text, "следующий"))
             return new(AliceCommandType.Next);
 
-        if (MatchesAny(text, "предыдущий", "предыдущий трек", "предыдущая песня", "назад", "верни", "верни трек", "предыдущая", "prev", "previous"))
+        if (MatchesAny(text, "предыдущий", "предыдущий трек", "предыдущая песня", "предыдущая", "назад", "верни", "верни трек", "prev", "previous") ||
+            IsCloseSingleWord(text, "предыдущий"))
             return new(AliceCommandType.Prev);
 
-        if (MatchesAny(text, "пауза", "поставь на паузу", "стоп", "останови", "останови музыку", "приостанови", "выключи музыку", "тишина", "хватит", "pause", "stop"))
+        if (MatchesAny(text, "пауза", "паузу", "паузе", "на паузу", "поставь на паузу", "стоп", "останови", "останови музыку", "приостанови", "выключи музыку", "выключить музыку", "тишина", "хватит", "pause", "stop") ||
+            IsCloseSingleWord(text, "пауза"))
             return new(AliceCommandType.Pause);
 
-        if (MatchesAny(text, "продолжи", "продолжить", "играй", "пуск", "возобнови", "включи музыку", "включить музыку", "play", "resume"))
+        if (MatchesAny(text, "продолжи", "продолжай", "продолжить", "сними с паузы", "играй", "пуск", "возобнови", "включи музыку", "включить музыку", "play", "resume") ||
+            IsCloseSingleWord(text, "продолжи"))
             return new(AliceCommandType.Play);
 
         if (MatchesAny(text, "пауза или пуск", "переключи паузу", "toggle"))
@@ -405,6 +429,33 @@ public static class AliceCommandParser
                 return true;
         }
         return false;
+    }
+
+    private static bool IsCloseSingleWord(string text, string target)
+    {
+        if (string.IsNullOrEmpty(text) || text.Contains(' ', StringComparison.Ordinal) || text.Length < 5)
+            return false;
+        if (Math.Abs(text.Length - target.Length) > 1)
+            return false;
+
+        int n = text.Length;
+        int m = target.Length;
+        var d = new int[n + 1, m + 1];
+        for (int i = 0; i <= n; i++) d[i, 0] = i;
+        for (int j = 0; j <= m; j++) d[0, j] = j;
+
+        for (int i = 1; i <= n; i++)
+        {
+            for (int j = 1; j <= m; j++)
+            {
+                int cost = text[i - 1] == target[j - 1] ? 0 : 1;
+                int val = Math.Min(Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1), d[i - 1, j - 1] + cost);
+                if (i > 1 && j > 1 && text[i - 1] == target[j - 2] && text[i - 2] == target[j - 1])
+                    val = Math.Min(val, d[i - 2, j - 2] + 1);
+                d[i, j] = val;
+            }
+        }
+        return d[n, m] <= 1;
     }
 
     private static bool ContainsWordPrefix(string text, params string[] prefixes)

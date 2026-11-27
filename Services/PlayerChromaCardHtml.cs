@@ -393,8 +393,11 @@ public static class PlayerChromaCardHtml
       background-color: rgb(var(--chroma-r), var(--chroma-g), var(--chroma-b));
       transform-origin: left center;
       transform: scaleX(0);
-      will-change: transform;
       transition: background-color var(--ow-t-chroma);
+    }
+    .ow-scrub-zone.is-scrubbing .ow-scrub-fill,
+    .ow-pill-prog-zone.is-scrubbing .ow-scrub-fill {
+      will-change: transform;
     }
 
     .ow-scrub-tooltip {
@@ -786,6 +789,61 @@ public static class PlayerChromaCardHtml
     }
     .ow-chips-nav:hover { color: #FFFFFF; }
     .ow-chips-nav.is-hidden { opacity: 0; pointer-events: none; }
+
+    .ow-chips-wrap {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 5px;
+    }
+    .ow-btn-grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 5px;
+    }
+    .ow-presets-box {
+      border-radius: 8px;
+      border: 1px solid var(--ow-hairline);
+      background: #13151B;
+      padding: 8px 9px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .ow-presets-cat {
+      font-size: 9.5px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--ow-text-muted);
+    }
+    .ow-preset-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: var(--ow-bg-elevated);
+      border: 1px solid var(--ow-hairline);
+      color: #D1D5DB;
+      font-size: 10.5px;
+      line-height: 1.25;
+      transition: border-color var(--ow-t-micro), color var(--ow-t-micro), background-color var(--ow-t-micro);
+    }
+    .ow-preset-pill:hover {
+      border-color: rgba(var(--chroma-r), var(--chroma-g), var(--chroma-b), 0.55);
+      background: rgba(var(--chroma-r), var(--chroma-g), var(--chroma-b), 0.12);
+      color: #FFFFFF;
+    }
+    .ow-preset-pill.is-hint {
+      border-style: dashed;
+      color: var(--ow-text-secondary);
+      cursor: default;
+    }
+    .ow-preset-pill.is-hint:hover {
+      border-color: var(--ow-hairline);
+      background: var(--ow-bg-elevated);
+      color: var(--ow-text-secondary);
+    }
 
     .ow-chip {
       display: inline-flex;
@@ -1634,7 +1692,6 @@ public static class PlayerChromaCardHtml
         eq: { enabled: false, preset: 'Flat', preamp: 0, bands: [], rate: 1.0, presets: {} },
         aliceBarOpen: false,
         aliceInput: '',
-        aliceSettingsInput: '',
         pendingFocusAliceInput: false,
         alice: {
           speechPackAvailable: false,
@@ -1653,6 +1710,7 @@ public static class PlayerChromaCardHtml
           whisperReady: false,
           whisperRunning: false,
           neuralTtsReady: false,
+          vadReady: false,
           downloadBusy: false,
           downloadPercent: 0,
           downloadStage: '',
@@ -1664,7 +1722,7 @@ public static class PlayerChromaCardHtml
           whisperEnabled: true,
           whisperModel: 'small-q5',
           ttsEnabled: true,
-          ttsVoiceName: '',
+          ttsVoiceName: 'supertonic:F1',
           duckMusic: true,
           hotkeyEnabled: true,
           inputDeviceIndex: -1,
@@ -1680,7 +1738,7 @@ public static class PlayerChromaCardHtml
           whisperEnabled: true,
           whisperModel: 'small-q5',
           ttsEnabled: true,
-          ttsVoiceName: '',
+          ttsVoiceName: 'supertonic:F1',
           duckMusic: true,
           hotkeyEnabled: true,
           inputDeviceIndex: -1
@@ -2258,7 +2316,7 @@ public static class PlayerChromaCardHtml
           whisperEnabled: v.whisperEnabled !== false,
           whisperModel: v.whisperModel || 'small-q5',
           ttsEnabled: v.ttsEnabled !== false,
-          ttsVoiceName: v.ttsVoiceName || '',
+          ttsVoiceName: v.ttsVoiceName || 'supertonic:F1',
           duckMusic: v.duckMusic !== false,
           hotkeyEnabled: v.hotkeyEnabled !== false,
           inputDeviceIndex: typeof v.inputDeviceIndex === 'number' ? v.inputDeviceIndex : -1
@@ -2339,8 +2397,14 @@ public static class PlayerChromaCardHtml
         const al = state.alice || {};
         const vc = state.voice || {};
         const vd = state.voiceDraft || {};
-        const mic = getVoiceMicMeta();
         const ruVoices = Array.isArray(vc.russianVoices) ? vc.russianVoices : [];
+        const activeTtsVoice = (vd.ttsVoiceName && vd.ttsVoiceName.startsWith('supertonic:'))
+          ? vd.ttsVoiceName
+          : (ruVoices[0] ? ruVoices[0].id : 'supertonic:F1');
+        const activeWhisperModel = vd.whisperModel || 'small-q5';
+        const whisperInstallLabel = activeWhisperModel === 'turbo-q5'
+          ? 'Скачать Turbo v3 (547 МБ)'
+          : (activeWhisperModel === 'base' ? 'Скачать Base (141 МБ)' : 'Докачать Whisper');
         const micDevs = Array.isArray(vc.inputDevices) && vc.inputDevices.length > 0
           ? vc.inputDevices
           : [{ index: -1, name: 'Микрофон по умолчанию' }];
@@ -2435,15 +2499,16 @@ public static class PlayerChromaCardHtml
             '<button data-action="pl-sync" class="ow-btn-secondary">↻ Синхронизировать все плейлисты</button>' +
           '</div>' +
 
-          /* 2. Голосовой помощник (Vosk + Whisper + Supertonic 3) */
+          /* 2. Голосовой помощник (Silero VAD v5 + Vosk + Whisper + Supertonic 3) */
           '<div class="ow-card-block" data-section="alice">' +
             '<div class="ow-section-head" style="margin-bottom:0">' +
               '<span class="ow-section-label">Голосовой помощник</span>' +
               '<span class="ow-badge-btn ' + ((vc.voskReady || vc.whisperReady || vc.neuralTtsReady) ? 'is-ok' : '') + '" style="cursor:default">' + esc(vc.activeEngineLabel || 'Не установлен') + '</span>' +
             '</div>' +
 
-            '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
-              '<span class="ow-badge-btn ' + (vc.voskReady ? 'is-ok' : '') + '" style="cursor:default">' + (vc.voskReady ? '✓ Vosk RU' : 'Vosk RU: нет') + '</span>' +
+            '<div class="ow-chips-wrap">' +
+              '<span class="ow-badge-btn ' + (vc.voskReady ? 'is-ok' : '') + '" style="cursor:default">' + (vc.voskReady ? '✓ Vosk RU' : 'Vosk: нет') + '</span>' +
+              '<span class="ow-badge-btn ' + (vc.vadReady ? 'is-ok' : '') + '" style="cursor:default">' + (vc.vadReady ? '✓ Silero VAD' : 'VAD: нет') + '</span>' +
               '<span class="ow-badge-btn ' + (vc.whisperReady ? 'is-ok' : '') + '" style="cursor:default">' + (vc.whisperReady ? '✓ Whisper RU+EN' : 'Whisper: нет') + '</span>' +
               '<span class="ow-badge-btn ' + (vc.neuralTtsReady ? 'is-ok' : '') + '" style="cursor:default">' + (vc.neuralTtsReady ? '✓ Нейро-голос' : 'Нейро-голос: нет') + '</span>' +
               (vc.diskUsageMb > 0 ? '<span class="ow-mono" style="font-size:10px;color:var(--ow-text-muted);margin-left:auto">' + vc.diskUsageMb + ' МБ</span>' : '') +
@@ -2461,15 +2526,16 @@ public static class PlayerChromaCardHtml
               : ((!vc.voskReady && !vc.whisperReady && !vc.neuralTtsReady)
                   ? '<div style="display:flex;flex-direction:column;gap:6px">' +
                       '<div class="ow-btn-grid">' +
-                        '<button data-action="voice-install-hybrid" class="ow-btn-secondary" style="border-color:rgba(var(--chroma-r),var(--chroma-g),var(--chroma-b),0.5);color:#FFFFFF">Установить всё (Гибрид)</button>' +
-                        '<button data-action="voice-install-vosk" class="ow-btn-secondary">Только Vosk (58 МБ)</button>' +
+                        '<button data-action="voice-install-hybrid" class="ow-btn-secondary" style="border-color:rgba(var(--chroma-r),var(--chroma-g),var(--chroma-b),0.5);color:#FFFFFF">Установить всё (Гибрид + VAD)</button>' +
+                        '<button data-action="voice-install-vosk" class="ow-btn-secondary">Vosk + VAD (61 МБ)</button>' +
                       '</div>' +
                       '<button data-action="voice-install-tts" class="ow-btn-secondary">Только нейро-голос (женский RU+EN)</button>' +
                     '</div>'
-                  : ((!vc.whisperReady || !vc.voskReady || !vc.neuralTtsReady)
+                  : ((!vc.whisperReady || !vc.voskReady || !vc.neuralTtsReady || !vc.vadReady)
                       ? '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
-                          (!vc.neuralTtsReady ? '<button data-action="voice-install-tts" class="ow-btn-secondary" style="flex:1;min-width:150px;border-color:rgba(var(--chroma-r),var(--chroma-g),var(--chroma-b),0.5);color:#FFFFFF">Скачать нейро-голос (женский RU+EN)</button>' : '') +
-                          (!vc.whisperReady ? '<button data-action="voice-install-whisper" class="ow-btn-secondary" style="flex:1;min-width:120px">Докачать Whisper</button>' : '') +
+                          (!vc.vadReady ? '<button data-action="voice-install-vad" class="ow-btn-secondary" style="flex:1;min-width:130px;border-color:rgba(var(--chroma-r),var(--chroma-g),var(--chroma-b),0.5);color:#FFFFFF">Докачать Silero VAD (3 МБ)</button>' : '') +
+                          (!vc.neuralTtsReady ? '<button data-action="voice-install-tts" class="ow-btn-secondary" style="flex:1;min-width:150px;border-color:rgba(var(--chroma-r),var(--chroma-g),var(--chroma-b),0.5);color:#FFFFFF">Скачать нейро-голос (женский)</button>' : '') +
+                          (!vc.whisperReady ? '<button data-action="voice-install-whisper" class="ow-btn-secondary" style="flex:1;min-width:130px">' + esc(whisperInstallLabel) + '</button>' : '') +
                           (!vc.voskReady ? '<button data-action="voice-install-vosk" class="ow-btn-secondary" style="flex:1;min-width:110px">Докачать Vosk</button>' : '') +
                           '<button data-action="voice-delete-models" class="ow-btn-secondary" style="flex:0 0 auto;padding:6px 10px">Удалить</button>' +
                         '</div>'
@@ -2492,19 +2558,26 @@ public static class PlayerChromaCardHtml
             '</div>' +
 
             renderToggleRow('voiceWhisperEnabled', 'Уточнять треки через Whisper (RU+EN)', vd.whisperEnabled !== false) +
-            '<div class="ow-btn-grid">' +
-              '<button data-voice-model="small-q5" class="ow-chip ' + ((vd.whisperModel || 'small-q5') === 'small-q5' ? 'is-active' : '') + '" style="justify-content:center">Small Q5 (точнее)</button>' +
-              '<button data-voice-model="base" class="ow-chip ' + (vd.whisperModel === 'base' ? 'is-active' : '') + '" style="justify-content:center">Base (быстрее)</button>' +
+            '<div class="ow-btn-grid-3">' +
+              '<button data-voice-model="turbo-q5" class="ow-chip ' + (activeWhisperModel === 'turbo-q5' ? 'is-active' : '') + '" style="justify-content:center" title="Whisper Large v3 Turbo Q5 (547 МБ, максимальная точность RU+EN)">Turbo v3</button>' +
+              '<button data-voice-model="small-q5" class="ow-chip ' + (activeWhisperModel === 'small-q5' ? 'is-active' : '') + '" style="justify-content:center" title="Whisper Small Q5 (181 МБ, оптимальный баланс)">Small Q5</button>' +
+              '<button data-voice-model="base" class="ow-chip ' + (activeWhisperModel === 'base' ? 'is-active' : '') + '" style="justify-content:center" title="Whisper Base (141 МБ, минимальная задержка)">Base</button>' +
             '</div>' +
 
-            renderToggleRow('voiceTtsEnabled', 'Голосовые ответы (TTS)', vd.ttsEnabled !== false) +
-            '<div class="ow-chips-row">' +
-              '<button data-tts-voice="" class="ow-chip ' + (!vd.ttsVoiceName ? 'is-active' : '') + '">Авто</button>' +
-              ruVoices.map(rv => {
-                const vVal = (rv.id && rv.id.startsWith('supertonic:')) ? rv.id : rv.displayName;
-                return '<button data-tts-voice="' + esc(vVal) + '" class="ow-chip ' + (vd.ttsVoiceName === vVal ? 'is-active' : '') + '">' + esc(rv.shortName) + '</button>';
-              }).join('') +
-              '<button data-action="voice-test-tts" class="ow-badge-btn" style="margin-left:auto">Тест</button>' +
+            '<div style="display:flex;flex-direction:column;gap:6px">' +
+              '<div class="ow-setting-row">' +
+                '<span style="font-size:12px;color:#E5E7EB">Голосовые ответы (Supertonic 3)</span>' +
+                '<div style="display:flex;align-items:center;gap:6px;flex-shrink:0">' +
+                  '<button data-action="voice-test-tts" class="ow-badge-btn">Тест</button>' +
+                  '<button data-setting-toggle="voiceTtsEnabled" role="switch" aria-checked="' + (vd.ttsEnabled !== false ? 'true' : 'false') + '" class="ow-switch" title="Голосовые ответы (Supertonic 3)"></button>' +
+                '</div>' +
+              '</div>' +
+              '<div class="ow-chips-wrap">' +
+                ruVoices.map(rv => {
+                  const vVal = rv.id || 'supertonic:F1';
+                  return '<button data-tts-voice="' + esc(vVal) + '" class="ow-chip ' + (activeTtsVoice === vVal ? 'is-active' : '') + '">' + esc(rv.shortName) + '</button>';
+                }).join('') +
+              '</div>' +
             '</div>' +
 
             renderToggleRow('voiceDuckMusic', 'Приглушать музыку во время речи', vd.duckMusic !== false) +
@@ -2523,10 +2596,44 @@ public static class PlayerChromaCardHtml
               ? '<div class="ow-status-line is-warn">⏱ Таймер сна активен: ~' + vc.sleepTimerMinutes + ' мин</div>'
               : '') +
 
-            '<div class="ow-input-row">' +
-              '<input data-role="alice-settings-input" type="text" value="' + esc(state.aliceSettingsInput || '') + '" placeholder="Команда: «включи Кино» / «таймер 20 мин»" class="ow-input" />' +
-              '<button data-action="alice-voice" data-role="mic-btn" class="ow-icon-btn sz-26 ow-mic-btn ' + mic.cls + '" title="' + esc(mic.title) + '">' + ICONS.mic + '</button>' +
-              '<button data-action="alice-run-settings" class="ow-badge-btn is-ok" title="Выполнить">▶</button>' +
+            '<div class="ow-presets-box">' +
+              '<div class="ow-setting-row">' +
+                '<span class="ow-section-label" style="font-size:10px">Пресеты команд</span>' +
+                '<span style="font-size:9.5px;color:var(--ow-text-muted)">нажмите или скажите</span>' +
+              '</div>' +
+              '<div class="ow-presets-cat">Музыка и потоки</div>' +
+              '<div class="ow-chips-wrap">' +
+                '<span class="ow-preset-pill is-hint">Включи [трек / артиста]</span>' +
+                '<span class="ow-preset-pill is-hint">Плейлист [название]</span>' +
+                '<span class="ow-preset-pill is-hint">Радио [станция]</span>' +
+                '<button type="button" data-voice-preset="моя волна" class="ow-preset-pill">Моя волна</button>' +
+                '<button type="button" data-voice-preset="вк микс" class="ow-preset-pill">VK Микс</button>' +
+                '<button type="button" data-voice-preset="включи избранное" class="ow-preset-pill">Избранное</button>' +
+                '<button type="button" data-voice-preset="перемешай избранное" class="ow-preset-pill">Перемешай избранное</button>' +
+              '</div>' +
+              '<div class="ow-presets-cat">Плеер</div>' +
+              '<div class="ow-chips-wrap">' +
+                '<button type="button" data-voice-preset="пауза" class="ow-preset-pill">Пауза</button>' +
+                '<button type="button" data-voice-preset="продолжи" class="ow-preset-pill">Продолжи</button>' +
+                '<button type="button" data-voice-preset="следующий" class="ow-preset-pill">Следующий</button>' +
+                '<button type="button" data-voice-preset="предыдущий" class="ow-preset-pill">Предыдущий</button>' +
+                '<button type="button" data-voice-preset="перемешай" class="ow-preset-pill">Перемешай</button>' +
+                '<button type="button" data-voice-preset="повтор трека" class="ow-preset-pill">Повтор трека</button>' +
+                '<button type="button" data-voice-preset="лайк" class="ow-preset-pill">Лайк</button>' +
+                '<button type="button" data-voice-preset="что играет" class="ow-preset-pill">Что играет</button>' +
+              '</div>' +
+              '<div class="ow-presets-cat">Звук, таймер и окно</div>' +
+              '<div class="ow-chips-wrap">' +
+                '<button type="button" data-voice-preset="громче" class="ow-preset-pill">Громче</button>' +
+                '<button type="button" data-voice-preset="тише" class="ow-preset-pill">Тише</button>' +
+                '<button type="button" data-voice-preset="громкость 50" class="ow-preset-pill">Громкость 50</button>' +
+                '<button type="button" data-voice-preset="без звука" class="ow-preset-pill">Без звука</button>' +
+                '<button type="button" data-voice-preset="перемотай вперед 30 сек" class="ow-preset-pill">+30 сек</button>' +
+                '<button type="button" data-voice-preset="таймер 20 мин" class="ow-preset-pill">Таймер 20 мин</button>' +
+                '<button type="button" data-voice-preset="отмени таймер" class="ow-preset-pill">Отмени таймер</button>' +
+                '<button type="button" data-voice-preset="компактный режим" class="ow-preset-pill">Компактный режим</button>' +
+                '<button type="button" data-voice-preset="сверни в трей" class="ow-preset-pill">Сверни в трей</button>' +
+              '</div>' +
             '</div>' +
             '<div data-role="alice-reply" class="ow-status-line" style="display:' + (al.lastReply ? 'block' : 'none') + '">' + esc(al.lastReply || '') + '</div>' +
           '</div>' +
@@ -2575,13 +2682,13 @@ public static class PlayerChromaCardHtml
               '<span class="ow-section-label">Эквалайзер и скорость</span>' +
               '<span class="ow-mono" style="font-size:10px;color:var(--ow-text-secondary)">' + (eq.rate || 1).toFixed(2).replace(/\.00$/, '.0') + 'x</span>' +
             '</div>' +
-            '<div class="ow-chips-row">' +
+            '<div class="ow-chips-wrap">' +
               '<button data-eq-off="true" class="ow-chip ' + (!eq.enabled ? 'is-active' : '') + '">Выкл</button>' +
               eqPresetNames.map(p =>
                 '<button data-eq-preset="' + esc(p) + '" class="ow-chip ' + (eq.enabled && eq.preset === p ? 'is-active' : '') + '">' + esc(p) + '</button>'
               ).join('') +
             '</div>' +
-            '<div class="ow-chips-row">' +
+            '<div class="ow-chips-wrap">' +
               [0.75, 1.0, 1.25, 1.5].map(r =>
                 '<button data-rate="' + r + '" class="ow-chip ' + (Math.abs((eq.rate || 1) - r) < 0.02 ? 'is-active' : '') + '">' + r + 'x</button>'
               ).join('') +
@@ -3036,18 +3143,6 @@ public static class PlayerChromaCardHtml
           };
         }
 
-        const aliceSetInp = appRoot.querySelector('[data-role="alice-settings-input"]');
-        if (aliceSetInp) {
-          aliceSetInp.oninput = (e) => {
-            state.aliceSettingsInput = e.target.value;
-          };
-          aliceSetInp.onkeydown = (e) => {
-            if (e.key === 'Enter' && (aliceSetInp.value || '').trim()) {
-              sendToHost('alice.runCommand', { command: aliceSetInp.value.trim() });
-            }
-          };
-        }
-
         const dlInp = appRoot.querySelector('[data-role="dl-folder-input"]');
         if (dlInp) {
           dlInp.onkeydown = (e) => {
@@ -3492,8 +3587,15 @@ public static class PlayerChromaCardHtml
 
           const ttsVoiceBtn = e.target.closest('[data-tts-voice]');
           if (ttsVoiceBtn) {
-            state.voiceDraft.ttsVoiceName = ttsVoiceBtn.getAttribute('data-tts-voice') || '';
+            state.voiceDraft.ttsVoiceName = ttsVoiceBtn.getAttribute('data-tts-voice') || 'supertonic:F1';
             sendVoiceSave();
+            return;
+          }
+
+          const presetBtn = e.target.closest('[data-voice-preset]');
+          if (presetBtn) {
+            const cmd = presetBtn.getAttribute('data-voice-preset') || '';
+            if (cmd) sendToHost('alice.runCommand', { command: cmd });
             return;
           }
 
@@ -3647,6 +3749,9 @@ public static class PlayerChromaCardHtml
             case 'voice-install-tts':
               sendToHost('voice.installModels', { mode: 'tts' });
               break;
+            case 'voice-install-vad':
+              sendToHost('voice.installModels', { mode: 'vad' });
+              break;
             case 'voice-cancel-install':
               sendToHost('voice.cancelInstall');
               break;
@@ -3675,11 +3780,6 @@ public static class PlayerChromaCardHtml
                 const cmdEl = document.getElementById('ow-alice-cmd-input');
                 if (cmdEl) cmdEl.value = '';
                 sendToHost('alice.runCommand', { command: phrase });
-              }
-              break;
-            case 'alice-run-settings':
-              if ((state.aliceSettingsInput || '').trim()) {
-                sendToHost('alice.runCommand', { command: state.aliceSettingsInput.trim() });
               }
               break;
           }
@@ -4366,21 +4466,16 @@ public static class PlayerChromaCardHtml
                     btn.title = mic.title;
                   });
                 }
-                if (msg.focusInput) {
-                  if (!state.compact && state.activeTab === 'settings') {
-                    const sInp = appRoot.querySelector('[data-role="alice-settings-input"]');
-                    if (sInp) sInp.focus();
+                if (msg.focusInput && !(!state.compact && state.activeTab === 'settings')) {
+                  state.activeTab = 'search';
+                  state.aliceBarOpen = true;
+                  state.pendingFocusAliceInput = true;
+                  sendToHost('ui.tabChanged', { tab: 'search' });
+                  appRoot.querySelectorAll('[data-tab]').forEach(b => b.classList.toggle('is-active', b.getAttribute('data-tab') === 'search'));
+                  if (state.compact) {
+                    renderApp();
                   } else {
-                    state.activeTab = 'search';
-                    state.aliceBarOpen = true;
-                    state.pendingFocusAliceInput = true;
-                    sendToHost('ui.tabChanged', { tab: 'search' });
-                    appRoot.querySelectorAll('[data-tab]').forEach(b => b.classList.toggle('is-active', b.getAttribute('data-tab') === 'search'));
-                    if (state.compact) {
-                      renderApp();
-                    } else {
-                      refreshWholeTabPanel();
-                    }
+                    refreshWholeTabPanel();
                   }
                 }
                 break;

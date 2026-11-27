@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Text;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Input;
@@ -165,7 +166,7 @@ public partial class PlayerWindow : Window
             SaveCurrentWindowPosition();
         };
 
-        _telemetryTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(3000) };
+        _telemetryTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(4000) };
         _telemetryTimer.Tick += (_, _) => PushTelemetrySample();
 
         _suspendTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
@@ -182,7 +183,7 @@ public partial class PlayerWindow : Window
 
         RestoreSavedGeometry();
         _voiceFeedback = new VoiceFeedbackService(_voiceModels);
-        _voiceAssistant = new VoiceAssistantService(_voiceModels, _voiceFeedback, ExecuteAliceCommandAsync);
+        _voiceAssistant = new VoiceAssistantService(_voiceModels, _voiceFeedback, ExecuteAliceCommandAsync, BuildVoiceContextPrompt);
         _voiceAssistant.DuckingRequested += ducked => _player.SetDucking(ducked);
         _voiceAssistant.StatusChanged += status => Dispatcher.BeginInvoke(() => PostVoiceStateUpdate(status));
         _voiceAssistant.AudioLevelChanged += (lvl, live) => Dispatcher.BeginInvoke(() =>
@@ -602,6 +603,10 @@ public partial class PlayerWindow : Window
         }
 
         _trayStateSyncAction();
+        if (compact || _isUiSuspended || _activeTab != "settings")
+            _telemetryTimer.Stop();
+        else
+            _telemetryTimer.Start();
         PostToWeb("windowMode", new { compact });
         PostToWeb("edgeDockState", new { dockedEdge = _dockedEdge, collapsed = _isEdgeCollapsed });
     }
@@ -1029,7 +1034,7 @@ public partial class PlayerWindow : Window
         bool nextSuspended = !visible;
         if (_isUiSuspended == nextSuspended)
         {
-            if (visible && _activeTab == "settings" && !_telemetryTimer.IsEnabled)
+            if (visible && !_isCompactMode && _activeTab == "settings" && !_telemetryTimer.IsEnabled)
                 _telemetryTimer.Start();
             return;
         }
@@ -1556,6 +1561,7 @@ public partial class PlayerWindow : Window
             if (_isUiSuspended)
             {
                 _isWebViewSuspended = ok;
+                _voiceAssistant?.ReleaseIdleMemory();
                 _controller.TrimCaches();
                 WindowBlurHelper.TrimWorkingSet();
             }
@@ -1579,7 +1585,7 @@ public partial class PlayerWindow : Window
             Directory.CreateDirectory(userDataFolder);
 
             PlayerWebView.DefaultBackgroundColor = System.Drawing.Color.FromArgb(255, 17, 18, 22);
-            const string perfArgs = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,Translate --disable-component-update --disable-domain-reliability --disable-background-networking";
+            const string perfArgs = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider --js-flags=\"--max-old-space-size=96 --optimize-for-size\" --renderer-process-limit=1 --disable-component-update --disable-domain-reliability --disable-background-networking --disable-extensions --disable-sync --disable-default-apps --disable-speech-api --disable-breakpad --disable-metrics --disable-metrics-reporting --no-pings --disable-gpu-shader-disk-cache --disk-cache-size=16777216";
 
             PlayerWebView.CreationProperties = new CoreWebView2CreationProperties
             {
@@ -1588,8 +1594,16 @@ public partial class PlayerWindow : Window
             };
 
             await PlayerWebView.EnsureCoreWebView2Async();
+            try
+            {
+                var core = PlayerWebView.CoreWebView2;
+                var memProp = core.GetType().GetProperty("MemoryUsageTargetLevel");
+                if (memProp != null)
+                    memProp.SetValue(core, Enum.Parse(memProp.PropertyType, "Low"));
+            }
+            catch { }
             _telemetry.SetWebViewBrowserProcessId(PlayerWebView.CoreWebView2.BrowserProcessId);
-            _ = Task.Run(() => _telemetry.Sample());
+            _ = Task.Delay(5000).ContinueWith(_ => WindowBlurHelper.TrimWorkingSet(), TaskScheduler.Default);
             PlayerWebView.DefaultBackgroundColor = System.Drawing.Color.FromArgb(255, 17, 18, 22);
             ApplyWebViewZoom();
             PlayerWebView.NavigationCompleted += (_, _) => ApplyWebViewZoom();
@@ -1753,7 +1767,7 @@ public partial class PlayerWindow : Window
 
             case "ui.tabChanged":
                 _activeTab = ReadStr(root, "tab") ?? "search";
-                if (_activeTab == "settings" && !_isUiSuspended)
+                if (_activeTab == "settings" && !_isUiSuspended && !_isCompactMode)
                 {
                     PushTelemetrySample();
                     _telemetryTimer.Start();
@@ -2562,7 +2576,7 @@ public partial class PlayerWindow : Window
 
     private void PushTelemetrySample()
     {
-        if (_isUiSuspended || _activeTab != "settings") return;
+        if (_isUiSuspended || _isCompactMode || _activeTab != "settings") return;
         if (Interlocked.CompareExchange(ref _telemetryBusy, 1, 0) != 0) return;
 
         _ = Task.Run(() =>
@@ -2572,7 +2586,7 @@ public partial class PlayerWindow : Window
                 var sample = _telemetry.Sample();
                 Dispatcher.BeginInvoke(() =>
                 {
-                    if (!_isUiSuspended && _activeTab == "settings")
+                    if (!_isUiSuspended && !_isCompactMode && _activeTab == "settings")
                         PostToWeb("telemetry", ToTelemetryDto(sample));
                 });
             }
@@ -4659,6 +4673,7 @@ public partial class PlayerWindow : Window
             whisperReady = st?.WhisperReady ?? _voiceModels.IsWhisperReady(s.VoiceWhisperModel),
             whisperRunning = st?.WhisperRunning ?? false,
             neuralTtsReady = st?.NeuralTtsReady ?? _voiceModels.IsNeuralTtsReady(),
+            vadReady = st?.VadReady ?? (_voiceModels.IsSileroVadReady() || _voiceModels.IsWhisperVadReady()),
             downloadBusy = st?.DownloadBusy ?? false,
             downloadPercent = st?.DownloadPercent ?? 0,
             downloadStage = st?.DownloadStage ?? "",
@@ -4751,6 +4766,12 @@ public partial class PlayerWindow : Window
 
     private async Task TestVoiceTtsAsync()
     {
+        if (!_voiceModels.IsNeuralTtsReady())
+        {
+            PostToWeb("status", new { message = "Сначала скачайте нейро-голос Supertonic 3 в настройках" });
+            return;
+        }
+
         bool duck = _settings.Current.VoiceDuckMusic;
         string voice = _settings.Current.VoiceTtsVoiceName;
         if (duck) _player.SetDucking(true);
@@ -4762,6 +4783,35 @@ public partial class PlayerWindow : Window
         {
             if (duck) _player.SetDucking(false);
         }
+    }
+
+    private string BuildVoiceContextPrompt()
+    {
+        var sb = new StringBuilder("Команда OmniWave: включи, поставь, пауза, следующий, громче, тише, моя волна, вк микс, плейлист, радио");
+        try
+        {
+            var hints = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var tr in _library.GetFavorites())
+            {
+                if (!string.IsNullOrWhiteSpace(tr.Artist))
+                    hints.Add(tr.Artist.Trim());
+                if (hints.Count >= 12) break;
+            }
+            foreach (var pl in _library.GetPlaylists())
+            {
+                if (!string.IsNullOrWhiteSpace(pl.Name))
+                    hints.Add(pl.Name.Trim());
+                if (hints.Count >= 18) break;
+            }
+            foreach (var h in hints)
+            {
+                if (sb.Length + h.Length + 2 > 280) break;
+                sb.Append(", ").Append(h);
+            }
+            sb.Append('.');
+        }
+        catch { }
+        return sb.ToString();
     }
 
     private async Task OnSleepTimerTickAsync()
