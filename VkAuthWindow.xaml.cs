@@ -30,7 +30,7 @@ public partial class VkAuthWindow : Window
         "https://accounts.google.com/ServiceLogin?service=youtube&uilel=3&passive=true&continue=https%3A%2F%2Fwww.youtube.com%2Fsignin%3Faction_handle_signin%3Dtrue%26next%3Dhttps%253A%252F%252Fwww.youtube.com%252F";
 
     private static readonly Regex AudiosPathUidRegex = new(
-        @"/audios(-?\d+)",
+        @"/audios([1-9]\d*)",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private readonly BrowserAuthMode _mode;
@@ -438,10 +438,14 @@ public partial class VkAuthWindow : Window
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return false;
 
         var host = uri.Host.ToLowerInvariant();
+        var path = uri.AbsolutePath.ToLowerInvariant();
+
+        if (host is "id.vk.ru" or "id.vk.com")
+            return path.StartsWith("/account");
+
         if (host is not ("vk.ru" or "www.vk.ru" or "m.vk.ru" or "vk.com" or "www.vk.com" or "m.vk.com"))
             return false;
 
-        var path = uri.AbsolutePath.ToLowerInvariant();
         if (path.StartsWith("/login") ||
             path.StartsWith("/restore") ||
             path.StartsWith("/join") ||
@@ -488,12 +492,13 @@ public partial class VkAuthWindow : Window
                 .Select(g => g.First())
                 .ToList();
 
-            bool hasSession = merged.Any(c =>
-                string.Equals(c.Name, "remixsid", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(c.Name, "remixnsid", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(c.Name, "remixstlid", StringComparison.OrdinalIgnoreCase));
+            bool hasAuthCookie = merged.Any(c =>
+                (string.Equals(c.Name, "remixsid", StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(c.Name, "remixnsid", StringComparison.OrdinalIgnoreCase)) &&
+                c.Value.Length > 12 &&
+                !c.Value.Equals("DELETED", StringComparison.OrdinalIgnoreCase));
 
-            if (!hasSession)
+            if (!hasAuthCookie && string.IsNullOrWhiteSpace(_pendingVkToken))
                 return;
 
             // Дублируем remix*-cookie и технические cookie на .vk.ru и .vk.com для VkWebSessionBridge
@@ -524,20 +529,25 @@ public partial class VkAuthWindow : Window
                     try {
                         document.cookie = 'remixaudio_show_alert_today=0; path=/; domain=.vk.ru';
                         document.cookie = 'remixmdevice=1920/1080/2/!!-!!!!; path=/; domain=.vk.ru';
-                        var id = (window.vk && Number(window.vk.id)) || 0;
-                        if (!id && window.cur && Number(window.cur.oid) > 0) id = Number(window.cur.oid);
-                        if (!id) {
-                            var pm = window.location.pathname.match(/\/audios(-?\d+)/);
-                            if (pm && Number(pm[1]) > 0) id = Number(pm[1]);
+                        var id = 0;
+                        if (window.vk && typeof window.vk.id !== 'undefined') {
+                            id = Number(window.vk.id) || 0;
                         }
                         if (!id) {
-                            var m = document.documentElement.innerHTML.match(/""(?:id|uid)""\s*:\s*(\d{3,15})/);
-                            if (m) id = Number(m[1]);
+                            var pm = window.location.pathname.match(/^\/audios([1-9]\d*)/);
+                            if (pm) id = Number(pm[1]) || 0;
+                        }
+                        if (!id) {
+                            var profLink = document.querySelector('#top_profile_link, a.TopNavBtn__profileLink, [data-testid=""header-profile-link""]');
+                            if (profLink) {
+                                var m = document.documentElement.innerHTML.match(/""(?:viewer_id|user_id)""\s*:\s*([1-9]\d{2,14})/);
+                                if (m) id = Number(m[1]) || 0;
+                            }
                         }
                         var nameEl = document.querySelector('.TopNavBtn__profileName, .top_profile_name, [data-testid=""top-profile-name""]');
                         var img = document.querySelector('img.TopNavBtn__profileImg');
                         var name = (nameEl && nameEl.textContent) || (img && img.getAttribute('alt')) || '';
-                        return JSON.stringify({ uid: id || 0, name: (name || '').trim() });
+                        return JSON.stringify({ uid: id > 0 ? id : 0, name: (name || '').trim() });
                     } catch(e) { return JSON.stringify({ uid: 0, name: '' }); }
                 })();");
 
@@ -563,13 +573,19 @@ public partial class VkAuthWindow : Window
                     uid = pathUid;
             }
 
-            if (uid <= 0 && !_redirectedToAudiosAfterAuth)
+            bool isAlreadyOnAudios = Uri.TryCreate(currentUrl, UriKind.Absolute, out var curUriObj) &&
+                curUriObj.AbsolutePath.StartsWith("/audios", StringComparison.OrdinalIgnoreCase);
+
+            if (uid <= 0 && hasAuthCookie && !_redirectedToAudiosAfterAuth && !isAlreadyOnAudios)
             {
                 _redirectedToAudiosAfterAuth = true;
                 TxtStatus.Text = "Сессия найдена, открываем раздел музыки ВКонтакте...";
                 AuthWebView.CoreWebView2.Navigate(VkWebAudiosUrl);
                 return;
             }
+
+            if (uid <= 0 && string.IsNullOrWhiteSpace(_pendingVkToken))
+                return;
 
             var cookieHeader = VkMusicProvider.EnsureRequiredAudioCookies(
                 string.Join("; ", merged.Select(c => $"{c.Name}={c.Value}")));
@@ -604,9 +620,10 @@ public partial class VkAuthWindow : Window
                 .ToList();
 
             bool signedIn = merged.Any(c =>
-                string.Equals(c.Name, "SAPISID", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(c.Name, "__Secure-3PAPISID", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(c.Name, "SID", StringComparison.OrdinalIgnoreCase));
+                (c.Value?.Length ?? 0) > 8 &&
+                (string.Equals(c.Name, "SAPISID", StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(c.Name, "__Secure-3PAPISID", StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(c.Name, "SID", StringComparison.OrdinalIgnoreCase)));
 
             if (!signedIn)
                 return;
