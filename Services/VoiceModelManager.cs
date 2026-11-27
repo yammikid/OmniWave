@@ -1,6 +1,9 @@
 using System.IO;
 using System.IO.Compression;
+using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Net.Sockets;
 
 namespace DynamicIsland.Services;
 
@@ -23,6 +26,14 @@ public sealed class VoiceModelManager
     public const string WhisperBinUrl = "https://github.com/ggml-org/whisper.cpp/releases/download/b5907/whisper-bin-x64.zip";
     public const string WhisperModelSmallQ5Url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin";
     public const string WhisperModelBaseUrl = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin";
+
+    private const int ParallelChunkBytes = 2 * 1024 * 1024;
+    private const int ParallelConcurrency = 4;
+    private const int ParallelThresholdBytes = 8 * 1024 * 1024;
+    private const int MaxChunkRetries = 10;
+    private const int MaxSequentialRetries = 10;
+    private static readonly TimeSpan HeaderTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan ReadStallTimeout = TimeSpan.FromSeconds(30);
 
     private static readonly string[] RequiredVoskDlls =
     {
@@ -95,7 +106,8 @@ public sealed class VoiceModelManager
         var modelPath = GetWhisperModelPath(variant);
         return IsWhisperBinaryReady() &&
                File.Exists(modelPath) &&
-               new FileInfo(modelPath).Length > 10 * 1024 * 1024;
+               new FileInfo(modelPath).Length > 10 * 1024 * 1024 &&
+               HasValidGgmlHeader(modelPath);
     }
 
     public double GetTotalDiskUsageMb()
@@ -148,8 +160,10 @@ public sealed class VoiceModelManager
                 if (!IsWhisperBinaryReady())
                     await DownloadAndExtractWhisperBinAsync(cts.Token);
 
-                if (!File.Exists(GetWhisperModelPath(whisperVariant)) ||
-                    new FileInfo(GetWhisperModelPath(whisperVariant)).Length < 10 * 1024 * 1024)
+                string modelPath = GetWhisperModelPath(whisperVariant);
+                if (!File.Exists(modelPath) ||
+                    new FileInfo(modelPath).Length < 10 * 1024 * 1024 ||
+                    !HasValidGgmlHeader(modelPath))
                 {
                     await DownloadWhisperModelAsync(whisperVariant, cts.Token);
                 }
@@ -158,15 +172,16 @@ public sealed class VoiceModelManager
             PublishProgress(new VoiceDownloadProgress(false, 100, "Готово к работе", 0, 0));
             return (true, "Голосовые модели успешно установлены");
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cts.IsCancellationRequested)
         {
             PublishProgress(new VoiceDownloadProgress(false, 0, "Установка отменена", 0, 0));
             return (false, "Загрузка моделей отменена");
         }
         catch (Exception ex)
         {
-            PublishProgress(new VoiceDownloadProgress(false, 0, $"Ошибка: {ex.Message}", 0, 0, ex.Message));
-            return (false, $"Ошибка установки: {ex.Message}");
+            string friendly = FormatDownloadError(ex);
+            PublishProgress(new VoiceDownloadProgress(false, 0, $"Ошибка: {friendly}", 0, 0, friendly));
+            return (false, $"Ошибка установки: {friendly}");
         }
         finally
         {
@@ -192,65 +207,93 @@ public sealed class VoiceModelManager
         }
     }
 
-    private async Task DownloadAndExtractVoskBinAsync(CancellationToken ct)
-    {
-        string tmpZip = Path.Combine(RootDir, "vosk-bin.zip.part");
-        await DownloadFileWithProgressAsync(VoskBinUrl, tmpZip, "Скачивание Vosk Runtime (14 МБ)...", ct);
-        PublishProgress(new VoiceDownloadProgress(true, 99, "Распаковка Vosk Runtime...", 0, 0));
-
-        Directory.CreateDirectory(VoskBinDir);
-        using (var za = ZipFile.OpenRead(tmpZip))
-        {
-            foreach (var entry in za.Entries)
+    private Task DownloadAndExtractVoskBinAsync(CancellationToken ct)
+        => DownloadAndExtractZipAsync(
+            VoskBinUrl,
+            "vosk-bin.zip.part",
+            "Скачивание Vosk Runtime (14 МБ)...",
+            "Распаковка Vosk Runtime...",
+            ct,
+            za =>
             {
-                if (string.IsNullOrEmpty(entry.Name)) continue;
-                if (!entry.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) continue;
-                string dest = Path.Combine(VoskBinDir, entry.Name);
-                entry.ExtractToFile(dest, overwrite: true);
+                Directory.CreateDirectory(VoskBinDir);
+                foreach (var entry in za.Entries)
+                {
+                    if (string.IsNullOrEmpty(entry.Name)) continue;
+                    if (!entry.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) continue;
+                    string dest = Path.Combine(VoskBinDir, entry.Name);
+                    entry.ExtractToFile(dest, overwrite: true);
+                }
+            });
+
+    private Task DownloadAndExtractVoskModelAsync(CancellationToken ct)
+        => DownloadAndExtractZipAsync(
+            VoskModelRuUrl,
+            "vosk-model-ru.zip.part",
+            "Скачивание русской модели Vosk (44 МБ)...",
+            "Распаковка русской модели Vosk...",
+            ct,
+            za =>
+            {
+                if (Directory.Exists(VoskModelDir))
+                {
+                    try { Directory.Delete(VoskModelDir, recursive: true); } catch { }
+                }
+                Directory.CreateDirectory(VoskModelDir);
+                za.ExtractToDirectory(VoskModelDir, overwriteFiles: true);
+            });
+
+    private Task DownloadAndExtractWhisperBinAsync(CancellationToken ct)
+        => DownloadAndExtractZipAsync(
+            WhisperBinUrl,
+            "whisper-bin.zip.part",
+            "Скачивание Whisper.cpp (9 МБ)...",
+            "Распаковка Whisper.cpp...",
+            ct,
+            za =>
+            {
+                Directory.CreateDirectory(WhisperBinDir);
+                foreach (var entry in za.Entries)
+                {
+                    if (string.IsNullOrEmpty(entry.Name)) continue;
+                    bool keep = string.Equals(entry.Name, "whisper-server.exe", StringComparison.OrdinalIgnoreCase) ||
+                                string.Equals(entry.Name, "whisper-cli.exe", StringComparison.OrdinalIgnoreCase) ||
+                                string.Equals(entry.Name, "whisper.dll", StringComparison.OrdinalIgnoreCase) ||
+                                (entry.Name.StartsWith("ggml", StringComparison.OrdinalIgnoreCase) &&
+                                 entry.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase));
+                    if (!keep) continue;
+
+                    string dest = Path.Combine(WhisperBinDir, entry.Name);
+                    entry.ExtractToFile(dest, overwrite: true);
+                }
+            });
+
+    private async Task DownloadAndExtractZipAsync(
+        string url,
+        string partFileName,
+        string downloadStage,
+        string extractStage,
+        CancellationToken ct,
+        Action<ZipArchive> extractAction)
+    {
+        string tmpZip = Path.Combine(RootDir, partFileName);
+        for (int attempt = 1; attempt <= 2; attempt++)
+        {
+            await DownloadFileWithProgressAsync(url, tmpZip, downloadStage, ct, HasValidZipHeader);
+            PublishProgress(new VoiceDownloadProgress(true, 99, extractStage, 0, 0));
+
+            try
+            {
+                using var za = ZipFile.OpenRead(tmpZip);
+                extractAction(za);
+                TryDeleteFile(tmpZip);
+                return;
+            }
+            catch (InvalidDataException) when (attempt == 1)
+            {
+                TryDeleteFile(tmpZip);
             }
         }
-        TryDeleteFile(tmpZip);
-    }
-
-    private async Task DownloadAndExtractVoskModelAsync(CancellationToken ct)
-    {
-        string tmpZip = Path.Combine(RootDir, "vosk-model-ru.zip.part");
-        await DownloadFileWithProgressAsync(VoskModelRuUrl, tmpZip, "Скачивание русской модели Vosk (44 МБ)...", ct);
-        PublishProgress(new VoiceDownloadProgress(true, 99, "Распаковка русской модели Vosk...", 0, 0));
-
-        if (Directory.Exists(VoskModelDir))
-        {
-            try { Directory.Delete(VoskModelDir, recursive: true); } catch { }
-        }
-        Directory.CreateDirectory(VoskModelDir);
-        ZipFile.ExtractToDirectory(tmpZip, VoskModelDir, overwriteFiles: true);
-        TryDeleteFile(tmpZip);
-    }
-
-    private async Task DownloadAndExtractWhisperBinAsync(CancellationToken ct)
-    {
-        string tmpZip = Path.Combine(RootDir, "whisper-bin.zip.part");
-        await DownloadFileWithProgressAsync(WhisperBinUrl, tmpZip, "Скачивание Whisper.cpp (9 МБ)...", ct);
-        PublishProgress(new VoiceDownloadProgress(true, 99, "Распаковка Whisper.cpp...", 0, 0));
-
-        Directory.CreateDirectory(WhisperBinDir);
-        using (var za = ZipFile.OpenRead(tmpZip))
-        {
-            foreach (var entry in za.Entries)
-            {
-                if (string.IsNullOrEmpty(entry.Name)) continue;
-                bool keep = string.Equals(entry.Name, "whisper-server.exe", StringComparison.OrdinalIgnoreCase) ||
-                            string.Equals(entry.Name, "whisper-cli.exe", StringComparison.OrdinalIgnoreCase) ||
-                            string.Equals(entry.Name, "whisper.dll", StringComparison.OrdinalIgnoreCase) ||
-                            (entry.Name.StartsWith("ggml", StringComparison.OrdinalIgnoreCase) &&
-                             entry.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase));
-                if (!keep) continue;
-
-                string dest = Path.Combine(WhisperBinDir, entry.Name);
-                entry.ExtractToFile(dest, overwrite: true);
-            }
-        }
-        TryDeleteFile(tmpZip);
     }
 
     private async Task DownloadWhisperModelAsync(string variant, CancellationToken ct)
@@ -262,52 +305,558 @@ public sealed class VoiceModelManager
         Directory.CreateDirectory(WhisperModelDir);
         string part = dest + ".part";
 
-        await DownloadFileWithProgressAsync(url, part, label, ct);
+        await DownloadFileWithProgressAsync(url, part, label, ct, HasValidGgmlHeader);
+
+        if (!File.Exists(part) || new FileInfo(part).Length < 10 * 1024 * 1024 || !HasValidGgmlHeader(part))
+        {
+            TryDeleteFile(part);
+            throw new InvalidDataException("Повреждённый файл модели Whisper (неверный заголовок или размер)");
+        }
+
         File.Move(part, dest, overwrite: true);
     }
 
-    private async Task DownloadFileWithProgressAsync(string url, string destPartPath, string stage, CancellationToken ct)
+    private static HttpClient CreateHttpClient(bool forceFreshConnection)
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(destPartPath)!);
-        TryDeleteFile(destPartPath);
-
-        using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(15) };
-        http.DefaultRequestHeaders.UserAgent.ParseAdd("OmniWave/2.0");
-
-        using var resp = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
-        resp.EnsureSuccessStatusCode();
-
-        long totalBytes = resp.Content.Headers.ContentLength ?? 0;
-        double totalMb = Math.Round(totalBytes / (1024.0 * 1024.0), 1);
-
-        PublishProgress(new VoiceDownloadProgress(true, 0, stage, 0, totalMb));
-
-        await using var src = await resp.Content.ReadAsStreamAsync(ct);
-        await using (var fs = new FileStream(destPartPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, useAsync: true))
+        var handler = new SocketsHttpHandler
         {
-            byte[] buffer = new byte[81920];
-            long received = 0;
-            long lastReportTick = Environment.TickCount64;
+            AutomaticDecompression = DecompressionMethods.None,
+            AllowAutoRedirect = true,
+            MaxAutomaticRedirections = 10,
+            ConnectTimeout = TimeSpan.FromSeconds(15),
+            PooledConnectionLifetime = forceFreshConnection ? TimeSpan.Zero : TimeSpan.FromMinutes(2),
+            MaxConnectionsPerServer = 8,
+            UseProxy = true
+        };
 
-            while (true)
+        var http = new HttpClient(handler, disposeHandler: true)
+        {
+            Timeout = Timeout.InfiniteTimeSpan,
+            DefaultRequestVersion = HttpVersion.Version11,
+            DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower
+        };
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("OmniWave/2.0");
+        return http;
+    }
+
+    private static async Task<(Uri ResolvedUri, long TotalBytes, bool SupportsRange)> ProbeDownloadAsync(
+        string url,
+        CancellationToken ct)
+    {
+        for (int attempt = 1; ; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
             {
-                int read = await src.ReadAsync(buffer, ct);
-                if (read <= 0) break;
+                using var http = CreateHttpClient(forceFreshConnection: attempt > 1);
+                using var headerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                headerCts.CancelAfter(HeaderTimeout);
 
-                await fs.WriteAsync(buffer.AsMemory(0, read), ct);
-                received += read;
+                using var req = new HttpRequestMessage(HttpMethod.Get, url);
+                req.Version = HttpVersion.Version11;
+                req.VersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
+                req.Headers.Range = new RangeHeaderValue(0, 0);
 
-                long now = Environment.TickCount64;
-                if (now - lastReportTick >= 150)
+                using var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, headerCts.Token);
+
+                if (resp.StatusCode == HttpStatusCode.PartialContent)
                 {
-                    lastReportTick = now;
-                    int pct = totalBytes > 0 ? (int)Math.Clamp(received * 100L / totalBytes, 0, 99) : 0;
-                    double dlMb = Math.Round(received / (1024.0 * 1024.0), 1);
-                    PublishProgress(new VoiceDownloadProgress(true, pct, stage, dlMb, totalMb));
+                    long total = resp.Content.Headers.ContentRange?.Length ?? 0;
+                    Uri resolved = resp.RequestMessage?.RequestUri ?? new Uri(url);
+                    return (resolved, total, total > 0);
                 }
+
+                if (resp.StatusCode == HttpStatusCode.OK)
+                {
+                    long total = resp.Content.Headers.ContentLength ?? 0;
+                    bool supportsRange = total > 0 && resp.Headers.AcceptRanges.Any(r =>
+                        string.Equals(r, "bytes", StringComparison.OrdinalIgnoreCase));
+                    Uri resolved = resp.RequestMessage?.RequestUri ?? new Uri(url);
+                    return (resolved, total, supportsRange);
+                }
+
+                if ((int)resp.StatusCode == 429 || (int)resp.StatusCode >= 500)
+                    throw new HttpRequestException($"HTTP {(int)resp.StatusCode}", null, resp.StatusCode);
+
+                resp.EnsureSuccessStatusCode();
+                throw new HttpRequestException($"HTTP {(int)resp.StatusCode}", null, resp.StatusCode);
+            }
+            catch (OperationCanceledException oce) when (!ct.IsCancellationRequested)
+            {
+                if (attempt >= 4)
+                    throw new TimeoutException("Таймаут опроса сервера загрузки", oce);
+                await Task.Delay(TimeSpan.FromSeconds(attempt), ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested && attempt < 4 && IsTransientNetworkError(ex, ct))
+            {
+                await Task.Delay(TimeSpan.FromSeconds(attempt), ct);
             }
         }
     }
+
+    private async Task DownloadFileWithProgressAsync(
+        string url,
+        string destPartPath,
+        string stage,
+        CancellationToken ct,
+        Func<string, bool>? validateHeader = null)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(destPartPath)!);
+
+        var (resolvedUri, totalBytes, supportsRange) = await ProbeDownloadAsync(url, ct);
+
+        long existingBytes = File.Exists(destPartPath) ? new FileInfo(destPartPath).Length : 0;
+        if (existingBytes > 0)
+        {
+            bool invalidExisting = !supportsRange ||
+                                   (totalBytes > 0 && existingBytes > totalBytes) ||
+                                   (validateHeader != null && existingBytes >= 4 && !validateHeader(destPartPath));
+            if (invalidExisting)
+            {
+                TryDeleteFile(destPartPath);
+                existingBytes = 0;
+            }
+        }
+
+        double totalMb = totalBytes > 0 ? Math.Round(totalBytes / (1024.0 * 1024.0), 1) : 0;
+        if (totalBytes > 0 && existingBytes == totalBytes)
+        {
+            double dlMb = Math.Round(existingBytes / (1024.0 * 1024.0), 1);
+            PublishProgress(new VoiceDownloadProgress(true, 99, stage, dlMb, totalMb));
+            return;
+        }
+
+        int initPct = totalBytes > 0 ? (int)Math.Clamp(existingBytes * 100L / totalBytes, 0, 99) : 0;
+        double initMb = Math.Round(existingBytes / (1024.0 * 1024.0), 1);
+        PublishProgress(new VoiceDownloadProgress(true, initPct, stage, initMb, totalMb));
+
+        if (supportsRange && totalBytes >= ParallelThresholdBytes)
+        {
+            try
+            {
+                await DownloadParallelChunkedAsync(url, resolvedUri, totalBytes, existingBytes, destPartPath, stage, ct);
+            }
+            catch (RangeNotHonoredException)
+            {
+                existingBytes = File.Exists(destPartPath) ? new FileInfo(destPartPath).Length : 0;
+                await DownloadSequentialWithResumeAsync(url, totalBytes, supportsRange, existingBytes, destPartPath, stage, ct);
+            }
+        }
+        else
+        {
+            await DownloadSequentialWithResumeAsync(url, totalBytes, supportsRange, existingBytes, destPartPath, stage, ct);
+        }
+
+        if (totalBytes > 0)
+        {
+            long actual = File.Exists(destPartPath) ? new FileInfo(destPartPath).Length : 0;
+            if (actual != totalBytes)
+                throw new IOException($"Размер загруженного файла не совпадает ({actual}/{totalBytes} байт)");
+        }
+    }
+
+    private async Task DownloadParallelChunkedAsync(
+        string url,
+        Uri resolvedUri,
+        long totalBytes,
+        long initialOffset,
+        string destPartPath,
+        string stage,
+        CancellationToken ct)
+    {
+        Uri activeUri = resolvedUri;
+        object uriLock = new();
+        using var refreshLock = new SemaphoreSlim(1, 1);
+        using var sharedHttp = CreateHttpClient(forceFreshConnection: false);
+
+        long offset = initialOffset;
+        double totalMb = Math.Round(totalBytes / (1024.0 * 1024.0), 1);
+        long lastReportTick = Environment.TickCount64;
+        object progressLock = new();
+        long batchInFlightBytes = 0;
+
+        void ReportProgress(bool force, string? customStage = null)
+        {
+            long now = Environment.TickCount64;
+            if (!force && now - Interlocked.Read(ref lastReportTick) < 150)
+                return;
+
+            lock (progressLock)
+            {
+                now = Environment.TickCount64;
+                if (!force && now - lastReportTick < 150)
+                    return;
+                Interlocked.Exchange(ref lastReportTick, now);
+
+                long dl = Math.Clamp(offset + Volatile.Read(ref batchInFlightBytes), 0, totalBytes);
+                int pct = totalBytes > 0 ? (int)Math.Clamp(dl * 100L / totalBytes, 0, 99) : 0;
+                double dlMb = Math.Round(dl / (1024.0 * 1024.0), 1);
+                PublishProgress(new VoiceDownloadProgress(true, pct, customStage ?? stage, dlMb, totalMb));
+            }
+        }
+
+        async Task<byte[]> DownloadChunkWithRetryAsync(long start, long end, int expectedLen)
+        {
+            for (int attempt = 1; ; attempt++)
+            {
+                ct.ThrowIfCancellationRequested();
+                long chunkGot = 0;
+                HttpClient? retryHttp = null;
+
+                try
+                {
+                    var http = attempt == 1 ? sharedHttp : (retryHttp = CreateHttpClient(forceFreshConnection: true));
+                    Uri currentUri;
+                    lock (uriLock) currentUri = activeUri;
+
+                    using var headerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    headerCts.CancelAfter(HeaderTimeout);
+
+                    using var req = new HttpRequestMessage(HttpMethod.Get, currentUri);
+                    req.Version = HttpVersion.Version11;
+                    req.VersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
+                    req.Headers.Range = new RangeHeaderValue(start, end);
+
+                    using var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, headerCts.Token);
+
+                    if (resp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden or HttpStatusCode.NotFound or HttpStatusCode.Gone)
+                    {
+                        if (attempt >= MaxChunkRetries)
+                            resp.EnsureSuccessStatusCode();
+
+                        await refreshLock.WaitAsync(ct);
+                        try
+                        {
+                            Uri latest;
+                            lock (uriLock) latest = activeUri;
+                            if (latest == currentUri)
+                            {
+                                var refreshed = await ProbeDownloadAsync(url, ct);
+                                lock (uriLock) activeUri = refreshed.ResolvedUri;
+                            }
+                        }
+                        finally
+                        {
+                            refreshLock.Release();
+                        }
+
+                        ReportProgress(force: true, $"{stage} (обновление ссылки {attempt}/{MaxChunkRetries})");
+                        await Task.Delay(Math.Min(1000 * attempt, 6000), ct);
+                        continue;
+                    }
+
+                    if (resp.StatusCode == HttpStatusCode.OK)
+                        throw new RangeNotHonoredException();
+
+                    if ((int)resp.StatusCode == 429 || (int)resp.StatusCode >= 500)
+                        throw new HttpRequestException($"HTTP {(int)resp.StatusCode}", null, resp.StatusCode);
+
+                    if (resp.StatusCode != HttpStatusCode.PartialContent)
+                        resp.EnsureSuccessStatusCode();
+
+                    var cr = resp.Content.Headers.ContentRange;
+                    if (cr?.From != null && cr.From.Value != start)
+                        throw new IOException($"Неожиданное смещение сегмента: {cr.From.Value} вместо {start}");
+
+                    byte[] data = new byte[expectedLen];
+                    await using var stream = await resp.Content.ReadAsStreamAsync(ct);
+                    int pos = 0;
+
+                    while (pos < expectedLen)
+                    {
+                        using var readCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                        readCts.CancelAfter(ReadStallTimeout);
+                        int n = await stream.ReadAsync(data.AsMemory(pos, expectedLen - pos), readCts.Token);
+                        if (n <= 0)
+                            break;
+
+                        pos += n;
+                        chunkGot += n;
+                        Interlocked.Add(ref batchInFlightBytes, n);
+                        ReportProgress(force: false);
+                    }
+
+                    if (pos != expectedLen)
+                        throw new IOException($"Обрыв сегмента {start}-{end}: получено {pos} из {expectedLen} байт");
+
+                    return data;
+                }
+                catch (OperationCanceledException oce) when (!ct.IsCancellationRequested)
+                {
+                    if (chunkGot > 0)
+                        Interlocked.Add(ref batchInFlightBytes, -chunkGot);
+
+                    if (attempt >= MaxChunkRetries)
+                        throw new TimeoutException("Таймаут чтения сегмента модели", oce);
+
+                    ReportProgress(force: true, $"{stage} (повтор сегмента {attempt}/{MaxChunkRetries})");
+                    await Task.Delay(Math.Min(1000 * attempt, 6000), ct);
+                }
+                catch (Exception ex) when (!ct.IsCancellationRequested && attempt < MaxChunkRetries && IsTransientNetworkError(ex, ct))
+                {
+                    if (chunkGot > 0)
+                        Interlocked.Add(ref batchInFlightBytes, -chunkGot);
+
+                    ReportProgress(force: true, $"{stage} (повтор сегмента {attempt}/{MaxChunkRetries})");
+                    await Task.Delay(Math.Min(1000 * attempt, 6000), ct);
+                }
+                finally
+                {
+                    retryHttp?.Dispose();
+                }
+            }
+        }
+
+        while (offset < totalBytes)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var chunks = new List<(long Start, long End, int ExpectedLen)>(ParallelConcurrency);
+            long cursor = offset;
+            for (int i = 0; i < ParallelConcurrency && cursor < totalBytes; i++)
+            {
+                long end = Math.Min(cursor + ParallelChunkBytes - 1, totalBytes - 1);
+                int len = (int)(end - cursor + 1);
+                chunks.Add((cursor, end, len));
+                cursor = end + 1;
+            }
+
+            Interlocked.Exchange(ref batchInFlightBytes, 0);
+
+            var tasks = chunks.Select(c => DownloadChunkWithRetryAsync(c.Start, c.End, c.ExpectedLen)).ToArray();
+            byte[][] buffers = await Task.WhenAll(tasks);
+
+            using (var fs = new FileStream(destPartPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None, 81920, useAsync: true))
+            {
+                fs.Seek(offset, SeekOrigin.Begin);
+                foreach (var buf in buffers)
+                    await fs.WriteAsync(buf, ct);
+                await fs.FlushAsync(ct);
+            }
+
+            offset = cursor;
+            Interlocked.Exchange(ref batchInFlightBytes, 0);
+            ReportProgress(force: true);
+        }
+    }
+
+    private async Task DownloadSequentialWithResumeAsync(
+        string url,
+        long totalBytes,
+        bool supportsRange,
+        long initialOffset,
+        string destPartPath,
+        string stage,
+        CancellationToken ct)
+    {
+        long offset = initialOffset;
+
+        for (int attempt = 1; ; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                offset = File.Exists(destPartPath) ? new FileInfo(destPartPath).Length : 0;
+                if (totalBytes > 0 && offset == totalBytes)
+                    return;
+
+                using var http = CreateHttpClient(forceFreshConnection: attempt > 1);
+                using var headerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                headerCts.CancelAfter(HeaderTimeout);
+
+                using var req = new HttpRequestMessage(HttpMethod.Get, url);
+                req.Version = HttpVersion.Version11;
+                req.VersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
+                if (offset > 0 && supportsRange)
+                    req.Headers.Range = new RangeHeaderValue(offset, null);
+
+                using var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, headerCts.Token);
+
+                if (resp.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
+                {
+                    if (totalBytes > 0 && offset == totalBytes)
+                        return;
+
+                    TryDeleteFile(destPartPath);
+                    offset = 0;
+                    if (attempt > MaxSequentialRetries)
+                        resp.EnsureSuccessStatusCode();
+                    await Task.Delay(Math.Min(1000 * attempt, 6000), ct);
+                    continue;
+                }
+
+                if ((int)resp.StatusCode == 429 || (int)resp.StatusCode >= 500)
+                    throw new HttpRequestException($"HTTP {(int)resp.StatusCode}", null, resp.StatusCode);
+
+                resp.EnsureSuccessStatusCode();
+
+                FileMode fileMode;
+                if (resp.StatusCode == HttpStatusCode.PartialContent && offset > 0)
+                {
+                    var cr = resp.Content.Headers.ContentRange;
+                    if (cr?.From != null && cr.From.Value != offset)
+                    {
+                        TryDeleteFile(destPartPath);
+                        offset = 0;
+                        fileMode = FileMode.Create;
+                    }
+                    else
+                    {
+                        if (cr?.Length > 0)
+                            totalBytes = cr.Length.Value;
+                        fileMode = FileMode.Append;
+                    }
+                }
+                else
+                {
+                    offset = 0;
+                    if (resp.Content.Headers.ContentLength is long len && len > 0)
+                        totalBytes = len;
+                    fileMode = FileMode.Create;
+                }
+
+                double totalMb = totalBytes > 0 ? Math.Round(totalBytes / (1024.0 * 1024.0), 1) : 0;
+                long lastReportTick = Environment.TickCount64;
+
+                await using var src = await resp.Content.ReadAsStreamAsync(ct);
+                await using (var fs = new FileStream(destPartPath, fileMode, FileAccess.Write, FileShare.None, 81920, useAsync: true))
+                {
+                    byte[] buffer = new byte[81920];
+                    while (true)
+                    {
+                        int read;
+                        try
+                        {
+                            using var readCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                            readCts.CancelAfter(ReadStallTimeout);
+                            read = await src.ReadAsync(buffer, readCts.Token);
+                        }
+                        catch
+                        {
+                            try { await fs.FlushAsync(CancellationToken.None); } catch { }
+                            throw;
+                        }
+
+                        if (read <= 0) break;
+
+                        await fs.WriteAsync(buffer.AsMemory(0, read), ct);
+                        offset += read;
+
+                        long now = Environment.TickCount64;
+                        if (now - lastReportTick >= 150)
+                        {
+                            lastReportTick = now;
+                            int pct = totalBytes > 0 ? (int)Math.Clamp(offset * 100L / totalBytes, 0, 99) : 0;
+                            double dlMb = Math.Round(offset / (1024.0 * 1024.0), 1);
+                            PublishProgress(new VoiceDownloadProgress(true, pct, stage, dlMb, totalMb));
+                        }
+                    }
+                    await fs.FlushAsync(ct);
+                }
+
+                if (totalBytes > 0 && offset < totalBytes)
+                    throw new IOException($"Обрыв потока на {offset} из {totalBytes} байт");
+
+                return;
+            }
+            catch (OperationCanceledException oce) when (!ct.IsCancellationRequested)
+            {
+                if (attempt > MaxSequentialRetries)
+                    throw new TimeoutException("Таймаут ответа сервера при скачивании", oce);
+
+                double totalMb = totalBytes > 0 ? Math.Round(totalBytes / (1024.0 * 1024.0), 1) : 0;
+                double dlMb = Math.Round(offset / (1024.0 * 1024.0), 1);
+                int pct = totalBytes > 0 ? (int)Math.Clamp(offset * 100L / totalBytes, 0, 99) : 0;
+                PublishProgress(new VoiceDownloadProgress(true, pct, $"{stage} (повтор {attempt}/{MaxSequentialRetries})", dlMb, totalMb));
+                await Task.Delay(Math.Min(1000 * attempt, 6000), ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested && attempt <= MaxSequentialRetries && IsTransientNetworkError(ex, ct))
+            {
+                double totalMb = totalBytes > 0 ? Math.Round(totalBytes / (1024.0 * 1024.0), 1) : 0;
+                double dlMb = Math.Round(offset / (1024.0 * 1024.0), 1);
+                int pct = totalBytes > 0 ? (int)Math.Clamp(offset * 100L / totalBytes, 0, 99) : 0;
+                PublishProgress(new VoiceDownloadProgress(true, pct, $"{stage} (повтор {attempt}/{MaxSequentialRetries})", dlMb, totalMb));
+                await Task.Delay(Math.Min(1000 * attempt, 6000), ct);
+            }
+        }
+    }
+
+    private static bool IsTransientNetworkError(Exception ex, CancellationToken outerCt)
+    {
+        if (outerCt.IsCancellationRequested)
+            return false;
+
+        switch (ex)
+        {
+            case RangeNotHonoredException:
+                return false;
+            case IOException:
+            case SocketException:
+            case TimeoutException:
+                return true;
+            case OperationCanceledException:
+                return true;
+            case HttpRequestException httpEx:
+                if (httpEx.StatusCode == null)
+                    return true;
+                int code = (int)httpEx.StatusCode.Value;
+                return code == 408 || code == 429 || code >= 500;
+            case AggregateException agg:
+                return agg.InnerExceptions.Any(inner => IsTransientNetworkError(inner, outerCt));
+            default:
+                return ex.InnerException != null && IsTransientNetworkError(ex.InnerException, outerCt);
+        }
+    }
+
+    private static string FormatDownloadError(Exception ex)
+    {
+        for (Exception? cur = ex; cur != null; cur = cur.InnerException)
+        {
+            if (cur is HttpRequestException httpEx && httpEx.StatusCode != null)
+                return $"Ошибка HTTP {(int)httpEx.StatusCode.Value} при загрузке модели";
+            if (cur is TimeoutException || (cur is OperationCanceledException && cur is not TaskCanceledException { InnerException: IOException or SocketException }))
+                return "Таймаут ответа сервера (часть сохранена — повторите)";
+            if (cur is IOException or SocketException)
+                return "Обрыв сети (часть сохранена — повторите установку)";
+            if (cur is InvalidDataException ide)
+                return ide.Message.Length > 70 ? ide.Message[..67] + "..." : ide.Message;
+        }
+
+        string msg = (ex.Message ?? "неизвестная ошибка").Replace('\r', ' ').Replace('\n', ' ').Trim();
+        return msg.Length > 75 ? msg[..72] + "..." : msg;
+    }
+
+    private static bool HasValidGgmlHeader(string path)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            Span<byte> buf = stackalloc byte[4];
+            if (fs.Read(buf) != 4) return false;
+            return buf[0] == (byte)'l' && buf[1] == (byte)'m' && buf[2] == (byte)'g' && buf[3] == (byte)'g';
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool HasValidZipHeader(string path)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            Span<byte> buf = stackalloc byte[2];
+            if (fs.Read(buf) != 2) return false;
+            return buf[0] == (byte)'P' && buf[1] == (byte)'K';
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private sealed class RangeNotHonoredException : Exception { }
 
     private void PublishProgress(VoiceDownloadProgress p)
     {
