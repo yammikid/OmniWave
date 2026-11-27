@@ -59,13 +59,15 @@ public partial class PlayerWindow : Window
     private readonly DispatcherTimer _edgeAnimTimer;
     private readonly DispatcherTimer _edgeHoverTimer;
     private readonly DispatcherTimer _clipboardWatchTimer;
-    private readonly Process _selfProcess = Process.GetCurrentProcess();
+    private readonly AppTelemetryService _telemetry = new();
 
     private HwndSource? _hwndSource;
     private VkAuthWindow? _activeAuthWindow;
+    private AliceHttpServer? _aliceServer;
     private CancellationTokenSource? _searchCts;
     private CancellationTokenSource? _proxyTestCts;
     private CancellationTokenSource? _authFlowCts;
+    private CancellationTokenSource? _voiceCts;
     private List<SearchTrackGroup> _currentSearchGroups = new();
     private List<TrackItem> _rawSearchTracks = new();
     private List<TrackItem> _currentResults = new();
@@ -110,8 +112,10 @@ public partial class PlayerWindow : Window
     private bool _vkClearedSession;
     private bool _youtubeClearedSession;
     private bool _systemCheckInitialized;
-    private TimeSpan _lastCpuTime;
-    private DateTime _lastCpuSampleUtc = DateTime.UtcNow;
+    private int _telemetryBusy;
+    private bool _isVoiceListening;
+    private string _lastAliceQuery = "";
+    private string _lastAliceReply = "";
 
     public bool AllowClose { get; set; }
     public bool IsCompactMode => _isCompactMode;
@@ -157,8 +161,6 @@ public partial class PlayerWindow : Window
             SaveCurrentWindowPosition();
         };
 
-        _lastCpuTime = _selfProcess.TotalProcessorTime;
-        _lastCpuSampleUtc = DateTime.UtcNow;
         _telemetryTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(3000) };
         _telemetryTimer.Tick += (_, _) => PushTelemetrySample();
 
@@ -175,6 +177,8 @@ public partial class PlayerWindow : Window
         _clipboardWatchTimer.Tick += async (_, _) => await OnClipboardWatchTickAsync();
 
         RestoreSavedGeometry();
+        _aliceServer = new AliceHttpServer(HandleAliceHttpRequestAsync);
+        ConfigureAliceServer();
 
         PreviewKeyDown += PlayerWindow_PreviewKeyDown;
         Activated += PlayerWindow_Activated;
@@ -187,7 +191,7 @@ public partial class PlayerWindow : Window
         };
         SizeChanged += (_, _) =>
         {
-            WindowBlurHelper.UpdateWin10RoundedRegion(this, _isCompactMode ? 12 : 16);
+            WindowBlurHelper.UpdateWin10RoundedRegion(this, GetScaledCornerRadius(_isCompactMode));
         };
         IsVisibleChanged += (_, _) => UpdateSuspensionState();
         StateChanged += (_, _) =>
@@ -251,10 +255,12 @@ public partial class PlayerWindow : Window
     private void OnSettingsChanged(AppSettings _) => Dispatcher.BeginInvoke(() =>
     {
         ApplyWindowSettingsFromConfig();
+        ConfigureAliceServer();
         if (!_isUiSuspended)
         {
             PushAccountsUpdate();
             PushWindowSettingsUpdate();
+            PushAliceStateUpdate();
         }
     });
 
@@ -269,16 +275,16 @@ public partial class PlayerWindow : Window
             _hwndSource = HwndSource.FromHwnd(hwnd);
             _hwndSource?.AddHook(WindowHwndProc);
         }
-        WindowBlurHelper.ApplyChromaWindowStyle(this, _isCompactMode ? 12 : 16);
-        Dispatcher.BeginInvoke(DispatcherPriority.Render, () => WindowBlurHelper.UpdateWin10RoundedRegion(this, _isCompactMode ? 12 : 16));
-        WindowBlurHelper.SetWindowAlpha(this, _settings.Current.WindowOpacityPercent / 100.0);
+        WindowBlurHelper.ApplyChromaWindowStyle(this, GetScaledCornerRadius(_isCompactMode));
+        Dispatcher.BeginInvoke(DispatcherPriority.Render, () => WindowBlurHelper.UpdateWin10RoundedRegion(this, GetScaledCornerRadius(_isCompactMode)));
+        WindowBlurHelper.SetWindowAlpha(this, 1.0);
         Topmost = _settings.Current.WindowAlwaysOnTop;
     }
 
     protected override void OnDpiChanged(DpiScale oldDpi, DpiScale newDpi)
     {
         base.OnDpiChanged(oldDpi, newDpi);
-        WindowBlurHelper.UpdateWin10RoundedRegion(this, _isCompactMode ? 12 : 16);
+        WindowBlurHelper.UpdateWin10RoundedRegion(this, GetScaledCornerRadius(_isCompactMode));
         if (_isApplyingGeometry || !IsLoaded) return;
 
         if (_isCompactMode && !string.IsNullOrEmpty(_dockedEdge))
@@ -371,20 +377,45 @@ public partial class PlayerWindow : Window
         _hwndSource = null;
 
         try { _authFlowCts?.Cancel(); _authFlowCts?.Dispose(); } catch { }
+        try { _voiceCts?.Cancel(); _voiceCts?.Dispose(); } catch { }
+        try { _aliceServer?.Dispose(); _aliceServer = null; } catch { }
         try { _activeAuthWindow?.Close(); _activeAuthWindow = null; } catch { }
         try { _searchCts?.Cancel(); _searchCts?.Dispose(); } catch { }
         try { _proxyTestCts?.Cancel(); _proxyTestCts?.Dispose(); } catch { }
-        try { _selfProcess.Dispose(); } catch { }
+        try { _telemetry.Dispose(); } catch { }
         try { PlayerWebView?.Dispose(); } catch { }
         base.OnClosing(e);
+    }
+
+    private double GetWindowScale(int? overridePercent = null)
+        => Math.Clamp(overridePercent ?? _settings.Current.WindowScalePercent, 80, 140) / 100.0;
+
+    private (double W, double H) GetScaledDimensions(bool compact, int? overridePercent = null)
+    {
+        double scale = GetWindowScale(overridePercent);
+        double baseW = compact ? CompactWidth : ExpandedWidth;
+        double baseH = compact ? CompactHeight : ExpandedHeight;
+        return (Math.Round(baseW * scale), Math.Round(baseH * scale));
+    }
+
+    private int GetScaledCornerRadius(bool compact, int? overridePercent = null)
+        => Math.Max(8, (int)Math.Round((compact ? 12 : 16) * GetWindowScale(overridePercent)));
+
+    private void ApplyWebViewZoom(int? overridePercent = null)
+    {
+        try
+        {
+            if (PlayerWebView?.CoreWebView2 != null)
+                PlayerWebView.ZoomFactor = GetWindowScale(overridePercent);
+        }
+        catch { }
     }
 
     private void RestoreSavedGeometry()
     {
         var s = _settings.Current;
         _isCompactMode = s.IsCompactMode;
-        double w = _isCompactMode ? CompactWidth : ExpandedWidth;
-        double h = _isCompactMode ? CompactHeight : ExpandedHeight;
+        var (w, h) = GetScaledDimensions(_isCompactMode);
 
         _isApplyingGeometry = true;
         try
@@ -426,7 +457,13 @@ public partial class PlayerWindow : Window
             SetCompactMode(s.IsCompactMode, save: false);
         if (Topmost != s.WindowAlwaysOnTop)
             SetAlwaysOnTop(s.WindowAlwaysOnTop, save: false);
-        WindowBlurHelper.SetWindowAlpha(this, s.WindowOpacityPercent / 100.0);
+
+        WindowBlurHelper.SetWindowAlpha(this, 1.0);
+        var (expectedW, expectedH) = GetScaledDimensions(_isCompactMode);
+        if (Math.Abs(Width - expectedW) > 0.5 || Math.Abs(Height - expectedH) > 0.5)
+            SetWindowScale(s.WindowScalePercent, save: false);
+        else
+            ApplyWebViewZoom();
     }
 
     private void SaveCurrentWindowPosition()
@@ -485,8 +522,7 @@ public partial class PlayerWindow : Window
     public void SetCompactMode(bool compact, bool save = true)
     {
         _isCompactMode = compact;
-        double targetW = compact ? CompactWidth : ExpandedWidth;
-        double targetH = compact ? CompactHeight : ExpandedHeight;
+        var (targetW, targetH) = GetScaledDimensions(compact);
 
         _edgeAnimTimer.Stop();
         _isApplyingGeometry = true;
@@ -524,9 +560,11 @@ public partial class PlayerWindow : Window
         }
 
         Topmost = _settings.Current.WindowAlwaysOnTop;
-        WindowBlurHelper.ApplyChromaWindowStyle(this, compact ? 12 : 16);
-        WindowBlurHelper.SetWindowAlpha(this, _settings.Current.WindowOpacityPercent / 100.0);
-        Dispatcher.BeginInvoke(DispatcherPriority.Render, () => WindowBlurHelper.UpdateWin10RoundedRegion(this, _isCompactMode ? 12 : 16));
+        ApplyWebViewZoom();
+        int cornerRadius = GetScaledCornerRadius(compact);
+        WindowBlurHelper.ApplyChromaWindowStyle(this, cornerRadius);
+        WindowBlurHelper.SetWindowAlpha(this, 1.0);
+        Dispatcher.BeginInvoke(DispatcherPriority.Render, () => WindowBlurHelper.UpdateWin10RoundedRegion(this, GetScaledCornerRadius(_isCompactMode)));
 
         if (save)
         {
@@ -792,22 +830,74 @@ public partial class PlayerWindow : Window
         _trayStateSyncAction();
     }
 
-    public void SetWindowOpacity(int percent, bool save = true)
+    public void SetWindowScale(int percent, bool save = true)
     {
-        int clamped = Math.Clamp(percent, 75, 100);
-        WindowBlurHelper.SetWindowAlpha(this, clamped / 100.0);
+        int clamped = Math.Clamp(percent, 80, 140);
+        var (targetW, targetH) = GetScaledDimensions(_isCompactMode, clamped);
+
+        _edgeAnimTimer.Stop();
+        _isApplyingGeometry = true;
+        try
+        {
+            double curW = Width > 0 ? Width : targetW;
+            double curH = Height > 0 ? Height : targetH;
+            double centerX = Left + curW / 2.0;
+            double centerY = Top + curH / 2.0;
+
+            Width = targetW;
+            Height = targetH;
+
+            if (_isCompactMode && !string.IsNullOrEmpty(_dockedEdge))
+            {
+                var work = WindowBlurHelper.GetMonitorWorkAreaForWindow(this);
+                var (eLeft, eTop) = ComputeEdgePosition(_dockedEdge, _isEdgeCollapsed, work);
+                Left = eLeft;
+                Top = eTop;
+            }
+            else
+            {
+                var (clampedLeft, clampedTop) = WindowBlurHelper.ClampToVisibleMonitors(
+                    this,
+                    centerX - targetW / 2.0,
+                    centerY - targetH / 2.0,
+                    targetW,
+                    targetH);
+                Left = clampedLeft;
+                Top = clampedTop;
+            }
+        }
+        finally
+        {
+            _isApplyingGeometry = false;
+        }
+
+        ApplyWebViewZoom(clamped);
+        int radius = GetScaledCornerRadius(_isCompactMode, clamped);
+        WindowBlurHelper.UpdateWin10RoundedRegion(this, radius);
+        Dispatcher.BeginInvoke(DispatcherPriority.Render, () => WindowBlurHelper.UpdateWin10RoundedRegion(this, GetScaledCornerRadius(_isCompactMode, clamped)));
+
         if (save)
         {
             _isSettingsApplying = true;
             try
             {
-                _settings.Update(s => s.WindowOpacityPercent = clamped, notify: false);
+                _settings.Update(s =>
+                {
+                    s.WindowScalePercent = clamped;
+                    if (!_isEdgeCollapsed)
+                    {
+                        s.PlayerWindowLeft = Left;
+                        s.PlayerWindowTop = Top;
+                    }
+                }, notify: false);
             }
             finally
             {
                 _isSettingsApplying = false;
             }
         }
+
+        PushWindowSettingsUpdate();
     }
 
     public void CenterOnPrimaryMonitor()
@@ -908,9 +998,11 @@ public partial class PlayerWindow : Window
             WindowState = WindowState.Normal;
         Activate();
         Topmost = _settings.Current.WindowAlwaysOnTop;
-        WindowBlurHelper.ApplyChromaWindowStyle(this, _isCompactMode ? 12 : 16);
-        WindowBlurHelper.SetWindowAlpha(this, _settings.Current.WindowOpacityPercent / 100.0);
-        Dispatcher.BeginInvoke(DispatcherPriority.Render, () => WindowBlurHelper.UpdateWin10RoundedRegion(this, _isCompactMode ? 12 : 16));
+        ApplyWebViewZoom();
+        int cornerRadius = GetScaledCornerRadius(_isCompactMode);
+        WindowBlurHelper.ApplyChromaWindowStyle(this, cornerRadius);
+        WindowBlurHelper.SetWindowAlpha(this, 1.0);
+        Dispatcher.BeginInvoke(DispatcherPriority.Render, () => WindowBlurHelper.UpdateWin10RoundedRegion(this, GetScaledCornerRadius(_isCompactMode)));
         UpdateSuspensionState();
     }
 
@@ -1481,7 +1573,11 @@ public partial class PlayerWindow : Window
             };
 
             await PlayerWebView.EnsureCoreWebView2Async();
+            _telemetry.SetWebViewBrowserProcessId(PlayerWebView.CoreWebView2.BrowserProcessId);
+            _ = Task.Run(() => _telemetry.Sample());
             PlayerWebView.DefaultBackgroundColor = System.Drawing.Color.FromArgb(255, 17, 18, 22);
+            ApplyWebViewZoom();
+            PlayerWebView.NavigationCompleted += (_, _) => ApplyWebViewZoom();
 
             var wvSettings = PlayerWebView.CoreWebView2.Settings;
             wvSettings.AreDefaultContextMenusEnabled = false;
@@ -1597,9 +1693,9 @@ public partial class PlayerWindow : Window
                     SetAlwaysOnTop(!_settings.Current.WindowAlwaysOnTop, save: true);
                 break;
 
-            case "window.setOpacity":
-                if (root.TryGetProperty("opacity", out var opEl) && opEl.ValueKind == JsonValueKind.Number)
-                    SetWindowOpacity((int)Math.Round(opEl.GetDouble()), save: true);
+            case "window.setScale":
+                if (root.TryGetProperty("scale", out var scEl) && scEl.ValueKind == JsonValueKind.Number)
+                    SetWindowScale((int)Math.Round(scEl.GetDouble()), save: true);
                 break;
 
             case "window.setChromaIntensity":
@@ -1803,10 +1899,7 @@ public partial class PlayerWindow : Window
 
             case "favorites.shuffle":
                 if (_favorites.Count > 0)
-                {
-                    var shuffled = _favorites.OrderBy(_ => Random.Shared.Next()).ToList();
-                    await _player.PlayFromQueueAsync(shuffled, 0);
-                }
+                    await _player.PlayShuffledFromQueueAsync(_favorites);
                 break;
 
             case "favorites.exportYandex":
@@ -2199,6 +2292,85 @@ public partial class PlayerWindow : Window
             case "auth.importYoutubeCookies":
                 ImportYoutubeCookiesFromWeb();
                 break;
+
+            case "alice.runCommand":
+            {
+                var cmd = ReadStr(root, "command") ?? "";
+                await ExecuteAliceCommandAsync(cmd);
+                break;
+            }
+
+            case "alice.startVoice":
+                await StartVoiceListeningAsync();
+                break;
+
+            case "alice.stopVoice":
+                StopVoiceListening();
+                break;
+
+            case "alice.saveSettings":
+            {
+                bool enabled = !root.TryGetProperty("enabled", out var enEl) || enEl.ValueKind != JsonValueKind.False;
+                int port = ReadInt(root, "port", _settings.Current.AliceApiPort);
+                if (port < 1024 || port > 65535) port = _settings.Current.AliceApiPort;
+                _isSettingsApplying = true;
+                try
+                {
+                    _settings.Update(s =>
+                    {
+                        s.AliceApiEnabled = enabled;
+                        s.AliceApiPort = port;
+                    }, notify: false);
+                }
+                finally
+                {
+                    _isSettingsApplying = false;
+                }
+                ConfigureAliceServer();
+                PushAliceStateUpdate();
+                PostToWeb("status", new { message = _aliceServer?.StatusText ?? "Настройки Алисы сохранены" });
+                break;
+            }
+
+            case "alice.regenerateToken":
+            {
+                var newTok = AppSettings.GenerateAliceToken();
+                _isSettingsApplying = true;
+                try
+                {
+                    _settings.Update(s => s.AliceApiToken = newTok, notify: false);
+                }
+                finally
+                {
+                    _isSettingsApplying = false;
+                }
+                ConfigureAliceServer();
+                PushAliceStateUpdate();
+                PostToWeb("status", new { message = "Секретный токен Алисы обновлён" });
+                break;
+            }
+
+            case "alice.copyUrl":
+            {
+                var kind = ReadStr(root, "kind") ?? "webhook";
+                var s = _settings.Current;
+                string baseUrl = _aliceServer?.BaseUrl ?? $"http://127.0.0.1:{s.AliceApiPort}";
+                string toCopy = kind switch
+                {
+                    "token" => s.AliceApiToken,
+                    "quick" => $"{baseUrl}/alice?token={Uri.EscapeDataString(s.AliceApiToken)}&q=",
+                    _ => $"{baseUrl}/alice?token={Uri.EscapeDataString(s.AliceApiToken)}"
+                };
+                SafeSetClipboardText(toCopy);
+                string label = kind switch
+                {
+                    "token" => "Токен Алисы скопирован",
+                    "quick" => "GET-шаблон для Алисы скопирован",
+                    _ => "Webhook URL для Алисы скопирован"
+                };
+                PostToWeb("status", new { message = label });
+                break;
+            }
         }
     }
 
@@ -2217,7 +2389,7 @@ public partial class PlayerWindow : Window
             autoPauseOnSwitch = s.AutoPauseOnSwitch,
             autoStart = _settings.IsAutoStartEnabled(),
             chromaIntensity = s.ChromaIntensity,
-            windowOpacity = s.WindowOpacityPercent,
+            windowScale = s.WindowScalePercent,
             zeroBlurMode = s.ZeroBlurMode,
             downloadFolder = s.DownloadFolder
         };
@@ -2551,40 +2723,44 @@ public partial class PlayerWindow : Window
         }
     }
 
+    private static object ToTelemetryDto(TelemetrySample s) => new
+    {
+        ramMb = s.RamMb,
+        cpuPercent = s.CpuPercent,
+        gpuPercent = s.GpuPercent,
+        processCount = s.ProcessCount
+    };
+
     private object SampleTelemetryDto()
     {
-        try
-        {
-            _selfProcess.Refresh();
-            long ramMb = Math.Max(1, _selfProcess.WorkingSet64 / (1024L * 1024L));
-            var nowUtc = DateTime.UtcNow;
-            var curCpu = _selfProcess.TotalProcessorTime;
-            double elapsedMs = Math.Max(1.0, (nowUtc - _lastCpuSampleUtc).TotalMilliseconds);
-            double cpuDeltaMs = Math.Max(0.0, (curCpu - _lastCpuTime).TotalMilliseconds);
-            _lastCpuTime = curCpu;
-            _lastCpuSampleUtc = nowUtc;
-
-            double cpuPct = Math.Clamp(
-                cpuDeltaMs / (elapsedMs * Math.Max(1, Environment.ProcessorCount)) * 100.0,
-                0.0,
-                100.0);
-            return new
-            {
-                ramMb,
-                cpuPercent = Math.Round(cpuPct, 1),
-                gpuPercent = 0
-            };
-        }
-        catch
-        {
-            return new { ramMb = 24L, cpuPercent = 0.2, gpuPercent = 0 };
-        }
+        var cur = _telemetry.LastSample;
+        if (cur.RamMb > 0)
+            return ToTelemetryDto(cur);
+        return ToTelemetryDto(_telemetry.Sample());
     }
 
     private void PushTelemetrySample()
     {
         if (_isUiSuspended || _activeTab != "settings") return;
-        PostToWeb("telemetry", SampleTelemetryDto());
+        if (Interlocked.CompareExchange(ref _telemetryBusy, 1, 0) != 0) return;
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                var sample = _telemetry.Sample();
+                Dispatcher.BeginInvoke(() =>
+                {
+                    if (!_isUiSuspended && _activeTab == "settings")
+                        PostToWeb("telemetry", ToTelemetryDto(sample));
+                });
+            }
+            catch { }
+            finally
+            {
+                Interlocked.Exchange(ref _telemetryBusy, 0);
+            }
+        });
     }
 
     private void PushWindowSettingsUpdate()
@@ -2612,6 +2788,7 @@ public partial class PlayerWindow : Window
             repeatMode = (int)_player.RepeatMode,
             shuffle = _player.ShuffleEnabled,
             windowSettings = BuildWindowSettingsDto(),
+            alice = BuildAliceStateDto(),
             proxy = BuildProxyDto(_settings.Current),
             youtubeCookiesConnected = YtDlpMusicProvider.HasYouTubeCookies,
             externalSource = !_controller.IsLocalActive ? _controller.CurrentMediaState?.ActiveBrand : null,
@@ -2665,6 +2842,7 @@ public partial class PlayerWindow : Window
             shuffle = _player.ShuffleEnabled,
             compact = _isCompactMode,
             windowSettings = BuildWindowSettingsDto(),
+            alice = BuildAliceStateDto(),
             proxy = BuildProxyDto(s),
             telemetry = SampleTelemetryDto(),
             externalSource = !_controller.IsLocalActive ? _controller.CurrentMediaState?.ActiveBrand : null,
@@ -4175,6 +4353,588 @@ public partial class PlayerWindow : Window
 
     private static int ReadInt(JsonElement root, string prop, int fallback)
         => root.TryGetProperty(prop, out var el) && el.ValueKind == JsonValueKind.Number ? el.GetInt32() : fallback;
+
+    #endregion
+
+    #region Алиса и голосовое управление
+
+    private void ConfigureAliceServer()
+    {
+        var s = _settings.Current;
+        _aliceServer?.Configure(s.AliceApiEnabled, s.AliceApiPort, s.AliceApiToken);
+    }
+
+    private object BuildAliceStateDto()
+    {
+        var s = _settings.Current;
+        string baseUrl = _aliceServer?.BaseUrl ?? $"http://127.0.0.1:{s.AliceApiPort}";
+        string maskedToken = s.AliceApiToken.Length > 8
+            ? $"{s.AliceApiToken[..4]}••••{s.AliceApiToken[^4..]}"
+            : s.AliceApiToken;
+
+        return new
+        {
+            enabled = s.AliceApiEnabled,
+            port = s.AliceApiPort,
+            tokenPreview = maskedToken,
+            running = _aliceServer?.IsRunning == true,
+            statusText = _aliceServer?.StatusText ?? (s.AliceApiEnabled ? "Инициализация..." : "Локальный API выключен"),
+            webhookUrl = $"{baseUrl}/alice",
+            speechPackAvailable = AliceVoiceRecognizer.HasWindowsSpeechPack(),
+            listening = _isVoiceListening,
+            lastQuery = _lastAliceQuery,
+            lastReply = _lastAliceReply
+        };
+    }
+
+    private void PushAliceStateUpdate()
+    {
+        PostToWeb("aliceState", BuildAliceStateDto());
+    }
+
+    private object BuildAliceStatusSnapshot()
+    {
+        var cur = _controller.IsLocalActive ? _player.CurrentTrack : (_externalActiveTrack ?? _player.CurrentTrack);
+        var (queueItems, idx) = _player.GetQueueSnapshot();
+        return new
+        {
+            isPlaying = _isPlaying,
+            volume = _player.Volume,
+            shuffle = _player.ShuffleEnabled,
+            repeatMode = _player.RepeatMode.ToString().ToLowerInvariant(),
+            compact = _isCompactMode,
+            queueCount = queueItems.Count,
+            currentIndex = idx,
+            track = cur != null ? new
+            {
+                id = cur.Id,
+                title = cur.Title,
+                artist = cur.Artist,
+                source = cur.Source,
+                brandKey = cur.BrandKey,
+                durationText = cur.DurationText,
+                isLiked = cur.IsLiked
+            } : null
+        };
+    }
+
+    private string DescribeNowPlayingReply()
+    {
+        var cur = _controller.IsLocalActive ? _player.CurrentTrack : (_externalActiveTrack ?? _player.CurrentTrack);
+        if (cur == null)
+            return "Сейчас ничего не играет. Скажите, что включить, или попросите «Мою волну».";
+
+        string stateWord = _isPlaying ? "Сейчас играет" : "На паузе";
+        return $"{stateWord}: {cur.Artist} — {cur.Title} ({cur.Source}). Громкость {_player.Volume}%.";
+    }
+
+    private async Task<AliceCommandResult> HandleAliceHttpRequestAsync(AliceHttpEndpointRequest req)
+    {
+        if (req.IsNewSession && string.IsNullOrWhiteSpace(req.Utterance))
+        {
+            return new AliceCommandResult(
+                true,
+                "OmniWave на связи! Скажите, что включить, или команду: пауза, следующий, громче, тише, моя волна, вк микс.",
+                "help",
+                Status: await Dispatcher.InvokeAsync(BuildAliceStatusSnapshot));
+        }
+
+        switch (req.Path)
+        {
+            case "/api/status":
+            {
+                var (statusObj, reply) = await Dispatcher.InvokeAsync(() =>
+                    (BuildAliceStatusSnapshot(), DescribeNowPlayingReply()));
+                return new AliceCommandResult(true, reply, "status", Status: statusObj);
+            }
+
+            case "/api/play":
+            {
+                if (!string.IsNullOrWhiteSpace(req.Utterance))
+                    return await ExecuteAliceCommandAsync($"включи {req.Utterance}");
+                return await ExecuteAliceCommandAsync("продолжи");
+            }
+
+            case "/api/pause":
+                return await ExecuteAliceCommandAsync("пауза");
+
+            case "/api/toggle":
+                return await ExecuteAliceCommandAsync("переключи паузу");
+
+            case "/api/next":
+                return await ExecuteAliceCommandAsync("следующий");
+
+            case "/api/prev":
+                return await ExecuteAliceCommandAsync("предыдущий");
+
+            case "/api/shuffle":
+                if (req.Query.TryGetValue("enabled", out var shVal) && bool.TryParse(shVal, out bool shOn))
+                    return await ExecuteAliceCommandAsync(shOn ? "включи перемешивание" : "выключи перемешивание");
+                return await ExecuteAliceCommandAsync("перемешай");
+
+            case "/api/repeat":
+                if (req.Query.TryGetValue("mode", out var repVal))
+                {
+                    var m = repVal.Trim().ToLowerInvariant();
+                    if (m is "one" or "track") return await ExecuteAliceCommandAsync("повтор трека");
+                    if (m is "all" or "queue") return await ExecuteAliceCommandAsync("повтор очереди");
+                    if (m is "off" or "none") return await ExecuteAliceCommandAsync("выключи повтор");
+                }
+                return await ExecuteAliceCommandAsync("повтор");
+
+            case "/api/volume":
+                if (req.Query.TryGetValue("value", out var vStr) && int.TryParse(vStr, out int vNum))
+                    return await ExecuteAliceCommandAsync($"громкость {Math.Clamp(vNum, 0, 100)}");
+                return new AliceCommandResult(false, "Укажите параметр ?value=0..100", "volume", Status: await Dispatcher.InvokeAsync(BuildAliceStatusSnapshot));
+
+            case "/api/volume/up":
+                return await ExecuteAliceCommandAsync(
+                    req.Query.TryGetValue("delta", out var uStr) && int.TryParse(uStr, out int uNum)
+                        ? $"громче {Math.Clamp(uNum, 1, 100)}"
+                        : "громче");
+
+            case "/api/volume/down":
+                return await ExecuteAliceCommandAsync(
+                    req.Query.TryGetValue("delta", out var dStr) && int.TryParse(dStr, out int dNum)
+                        ? $"тише {Math.Clamp(dNum, 1, 100)}"
+                        : "тише");
+
+            case "/api/mute":
+                if (req.Query.TryGetValue("enabled", out var mVal) && bool.TryParse(mVal, out bool mOn))
+                    return await ExecuteAliceCommandAsync(mOn ? "выключи звук" : "включи звук");
+                return await ExecuteAliceCommandAsync(_player.Volume > 0 ? "выключи звук" : "включи звук");
+
+            case "/api/like":
+                return await ExecuteAliceCommandAsync("лайк");
+
+            case "/api/wave":
+                return await ExecuteAliceCommandAsync("моя волна");
+
+            case "/api/vkmix":
+                return await ExecuteAliceCommandAsync("вк микс");
+
+            case "/api/compact":
+                if (req.Query.TryGetValue("enabled", out var cVal) && bool.TryParse(cVal, out bool cOn))
+                    return await ExecuteAliceCommandAsync(cOn ? "компактный режим" : "разверни");
+                return await ExecuteAliceCommandAsync(_isCompactMode ? "разверни" : "компактный режим");
+
+            case "/api/search":
+                if (string.IsNullOrWhiteSpace(req.Utterance))
+                    return new AliceCommandResult(false, "Укажите запрос ?q=...", "search");
+                return await ExecuteAliceSearchOnlyAsync(req.Utterance);
+
+            default:
+                return await ExecuteAliceCommandAsync(req.Utterance ?? "");
+        }
+    }
+
+    private async Task<AliceCommandResult> ExecuteAliceSearchOnlyAsync(string query)
+    {
+        return await await Dispatcher.InvokeAsync(async () =>
+        {
+            _activeSearchFilter = "all";
+            await PerformSearchAsync(query);
+            int found = _currentSearchGroups.Count;
+            var first = _currentResults.FirstOrDefault();
+            string reply = first != null
+                ? $"Найдено {found} треков по запросу «{query}». Первый: {first.Artist} — {first.Title}."
+                : $"По запросу «{query}» ничего не найдено.";
+            PublishAliceOutcome(query, reply, first != null, "search");
+            return new AliceCommandResult(first != null, reply, "search", query, BuildAliceStatusSnapshot());
+        });
+    }
+
+    private Task<AliceCommandResult> ExecuteAliceCommandAsync(string phrase)
+        => Dispatcher.InvokeAsync(() => ExecuteAliceCommandCoreAsync(phrase)).Task.Unwrap();
+
+    private async Task<AliceCommandResult> ExecuteAliceCommandCoreAsync(string phrase)
+    {
+        var parsed = AliceCommandParser.Parse(phrase);
+        string reply;
+        bool ok = true;
+        string action = parsed.Type.ToString();
+
+        switch (parsed.Type)
+        {
+            case AliceCommandType.Help:
+                reply = "Доступны команды: «включи …», «пауза», «следующий», «громкость 50», «громче», «тише», «моя волна», «вк микс», «лайк», «перемешай», «что играет».";
+                break;
+
+            case AliceCommandType.Status:
+                reply = DescribeNowPlayingReply();
+                break;
+
+            case AliceCommandType.Play:
+                if (_controller.IsLocalActive || (_player.CurrentTrack != null && _externalActiveTrack == null))
+                {
+                    if (_player.CurrentTrack == null && _favorites.Count > 0)
+                    {
+                        await _player.PlayFromQueueAsync(_favorites, 0);
+                        reply = $"Включаю избранное: {_favorites[0].Artist} — {_favorites[0].Title}";
+                    }
+                    else
+                    {
+                        _player.Play();
+                        reply = _player.CurrentTrack != null
+                            ? $"Продолжаю: {_player.CurrentTrack.Artist} — {_player.CurrentTrack.Title}"
+                            : "Очередь пуста — скажите, что включить";
+                    }
+                }
+                else
+                {
+                    await _controller.SendCommandAsync("play");
+                    reply = "Воспроизведение возобновлено";
+                }
+                break;
+
+            case AliceCommandType.Pause:
+                if (_controller.IsLocalActive || (_player.CurrentTrack != null && _externalActiveTrack == null))
+                    _player.Pause();
+                else
+                    await _controller.SendCommandAsync("pause");
+                reply = "Поставил на паузу";
+                break;
+
+            case AliceCommandType.Toggle:
+                if (_controller.IsLocalActive || (_player.CurrentTrack != null && _externalActiveTrack == null))
+                    _player.TogglePause();
+                else
+                    await _controller.SendCommandAsync("toggle");
+                reply = _player.IsPlaying ? "Поставил на паузу" : "Воспроизведение продолжено";
+                break;
+
+            case AliceCommandType.Next:
+                if (_controller.IsLocalActive || (_player.CurrentTrack != null && _externalActiveTrack == null))
+                    await _player.NextAsync();
+                else
+                    await _controller.SendCommandAsync("next");
+                reply = _player.CurrentTrack != null
+                    ? $"Следующий трек: {_player.CurrentTrack.Artist} — {_player.CurrentTrack.Title}"
+                    : "Переключил на следующий трек";
+                break;
+
+            case AliceCommandType.Prev:
+                if (_controller.IsLocalActive || (_player.CurrentTrack != null && _externalActiveTrack == null))
+                    await _player.PrevAsync();
+                else
+                    await _controller.SendCommandAsync("prev");
+                reply = _player.CurrentTrack != null
+                    ? $"Предыдущий трек: {_player.CurrentTrack.Artist} — {_player.CurrentTrack.Title}"
+                    : "Переключил назад";
+                break;
+
+            case AliceCommandType.ShuffleOn:
+                _player.SetShuffle(true);
+                reply = "Перемешивание включено, очередь обновлена";
+                break;
+
+            case AliceCommandType.ShuffleOff:
+                _player.SetShuffle(false);
+                reply = "Перемешивание выключено, исходный порядок восстановлен";
+                break;
+
+            case AliceCommandType.ShuffleToggle:
+                bool sh = _player.ToggleShuffle();
+                reply = sh ? "Перемешивание включено" : "Перемешивание выключено";
+                break;
+
+            case AliceCommandType.RepeatOne:
+                _player.SetRepeatMode(RepeatMode.One);
+                reply = "Включён повтор текущего трека";
+                break;
+
+            case AliceCommandType.RepeatAll:
+                _player.SetRepeatMode(RepeatMode.All);
+                reply = "Включён повтор всей очереди";
+                break;
+
+            case AliceCommandType.RepeatOff:
+                _player.SetRepeatMode(RepeatMode.Off);
+                reply = "Повтор выключен";
+                break;
+
+            case AliceCommandType.RepeatCycle:
+            {
+                var mode = _player.CycleRepeatMode();
+                reply = mode switch
+                {
+                    RepeatMode.One => "Повтор текущего трека",
+                    RepeatMode.All => "Повтор всей очереди",
+                    _ => "Повтор выключен"
+                };
+                break;
+            }
+
+            case AliceCommandType.Mute:
+                if (_player.Volume > 0)
+                    _savedVolumeBeforeMute = _player.Volume;
+                _controller.SetAppVolume(0);
+                reply = "Звук выключен";
+                break;
+
+            case AliceCommandType.Unmute:
+            {
+                int restore = _savedVolumeBeforeMute > 0 ? _savedVolumeBeforeMute : 80;
+                _controller.SetAppVolume(restore);
+                reply = $"Звук включён: {restore}%";
+                break;
+            }
+
+            case AliceCommandType.SetVolume:
+            {
+                int v = Math.Clamp(parsed.NumberValue, 0, 100);
+                if (v > 0) _savedVolumeBeforeMute = v;
+                _controller.SetAppVolume(v);
+                reply = $"Громкость установлена на {v}%";
+                break;
+            }
+
+            case AliceCommandType.VolumeUp:
+            {
+                int v = Math.Clamp(_player.Volume + parsed.NumberValue, 0, 100);
+                if (v > 0) _savedVolumeBeforeMute = v;
+                _controller.SetAppVolume(v);
+                reply = $"Громче: {v}%";
+                break;
+            }
+
+            case AliceCommandType.VolumeDown:
+            {
+                int v = Math.Clamp(_player.Volume - parsed.NumberValue, 0, 100);
+                _controller.SetAppVolume(v);
+                reply = $"Тише: {v}%";
+                break;
+            }
+
+            case AliceCommandType.SeekRelative:
+                await _controller.SeekRelativeMsAsync(parsed.NumberValue * 1000L);
+                reply = parsed.NumberValue >= 0
+                    ? $"Перемотал вперёд на {parsed.NumberValue} сек"
+                    : $"Перемотал назад на {Math.Abs(parsed.NumberValue)} сек";
+                break;
+
+            case AliceCommandType.SetCompact:
+                RestoreFromTray();
+                SetCompactMode(parsed.BoolValue, save: true);
+                reply = parsed.BoolValue ? "Включён компактный режим" : "Окно развёрнуто";
+                break;
+
+            case AliceCommandType.ShowWindow:
+                RestoreFromTray();
+                reply = "Окно OmniWave открыто";
+                break;
+
+            case AliceCommandType.HideToTray:
+                HideToTray();
+                reply = "Окно свёрнуто в трей";
+                break;
+
+            case AliceCommandType.Like:
+            {
+                var cur = _controller.IsLocalActive ? _player.CurrentTrack : (_externalActiveTrack ?? _player.CurrentTrack);
+                if (cur == null)
+                {
+                    ok = false;
+                    reply = "Сейчас нет активного трека для добавления в избранное";
+                }
+                else
+                {
+                    if (!_library.IsLiked(cur))
+                        _library.ToggleLike(cur);
+                    reply = $"Добавлено в избранное: {cur.Artist} — {cur.Title}";
+                }
+                break;
+            }
+
+            case AliceCommandType.Unlike:
+            {
+                var cur = _controller.IsLocalActive ? _player.CurrentTrack : (_externalActiveTrack ?? _player.CurrentTrack);
+                if (cur == null)
+                {
+                    ok = false;
+                    reply = "Сейчас нет активного трека";
+                }
+                else
+                {
+                    if (_library.IsLiked(cur))
+                        _library.ToggleLike(cur);
+                    reply = $"Убрано из избранного: {cur.Title}";
+                }
+                break;
+            }
+
+            case AliceCommandType.YandexWave:
+                if (!_yandex.IsAuthenticated)
+                {
+                    ok = false;
+                    reply = "Войдите в Яндекс Музыку в настройках, чтобы запускать «Мою волну»";
+                }
+                else
+                {
+                    await StartYandexMyWaveAsync();
+                    reply = _player.CurrentTrack != null
+                        ? $"Запускаю «Мою волну»: {_player.CurrentTrack.Artist} — {_player.CurrentTrack.Title}"
+                        : "Запускаю «Мою волну» Яндекса";
+                }
+                break;
+
+            case AliceCommandType.VkMix:
+                if (!_vk.IsAuthenticated)
+                {
+                    ok = false;
+                    reply = "Войдите в VK Музыку в настройках, чтобы запускать «VK Микс»";
+                }
+                else
+                {
+                    await StartVkMixAsync();
+                    reply = _player.CurrentTrack != null
+                        ? $"Запускаю «VK Микс»: {_player.CurrentTrack.Artist} — {_player.CurrentTrack.Title}"
+                        : "Запускаю «VK Микс»";
+                }
+                break;
+
+            case AliceCommandType.PlayFavorites:
+                if (_favorites.Count == 0)
+                {
+                    ok = false;
+                    reply = "Список избранного пока пуст";
+                }
+                else
+                {
+                    await _player.PlayFromQueueAsync(_favorites, 0);
+                    reply = $"Включаю избранное: {_favorites[0].Artist} — {_favorites[0].Title}";
+                }
+                break;
+
+            case AliceCommandType.ShuffleFavorites:
+                if (_favorites.Count == 0)
+                {
+                    ok = false;
+                    reply = "Список избранного пока пуст";
+                }
+                else
+                {
+                    await _player.PlayShuffledFromQueueAsync(_favorites);
+                    reply = _player.CurrentTrack != null
+                        ? $"Перемешал избранное: {_player.CurrentTrack.Artist} — {_player.CurrentTrack.Title}"
+                        : "Включил избранное вперемешку";
+                }
+                break;
+
+            case AliceCommandType.SearchAndPlay:
+            default:
+            {
+                if (string.IsNullOrWhiteSpace(parsed.Query))
+                {
+                    reply = "Не расслышал запрос. Повторите, что нужно включить.";
+                    ok = false;
+                    break;
+                }
+
+                _activeSearchFilter = "all";
+                await PerformSearchAsync(parsed.Query);
+                var first = _currentResults.FirstOrDefault();
+                if (first != null)
+                {
+                    await _player.PlayFromQueueAsync(_currentResults, 0);
+                    reply = $"Включаю {first.Artist} — {first.Title} ({first.Source})";
+                }
+                else
+                {
+                    ok = false;
+                    reply = $"Не удалось найти трек по запросу «{parsed.Query}»";
+                }
+                break;
+            }
+        }
+
+        PublishAliceOutcome(phrase, reply, ok, action);
+        return new AliceCommandResult(ok, reply, action, parsed.Query, BuildAliceStatusSnapshot());
+    }
+
+    private void PublishAliceOutcome(string query, string reply, bool ok, string action)
+    {
+        _lastAliceQuery = (query ?? "").Trim();
+        _lastAliceReply = reply;
+        PostToWeb("aliceReply", new
+        {
+            query = _lastAliceQuery,
+            reply,
+            ok,
+            action
+        });
+        PostToWeb("status", new { message = reply });
+    }
+
+    private void StopVoiceListening()
+    {
+        var prev = _voiceCts;
+        _voiceCts = null;
+        if (prev != null)
+        {
+            try { prev.Cancel(); } catch { }
+            try { prev.Dispose(); } catch { }
+        }
+        _isVoiceListening = false;
+        PostToWeb("aliceVoiceState", new { listening = false, mode = "", message = "" });
+    }
+
+    private async Task StartVoiceListeningAsync()
+    {
+        if (_isVoiceListening)
+        {
+            StopVoiceListening();
+            return;
+        }
+
+        if (AliceVoiceRecognizer.HasWindowsSpeechPack())
+        {
+            _voiceCts?.Cancel();
+            _voiceCts?.Dispose();
+            _voiceCts = new CancellationTokenSource();
+            var ct = _voiceCts.Token;
+
+            _isVoiceListening = true;
+            PostToWeb("aliceVoiceState", new
+            {
+                listening = true,
+                mode = "winrt",
+                focusInput = true,
+                message = "Слушаю голосовую команду..."
+            });
+
+            var result = await AliceVoiceRecognizer.RecognizeOnceWinRtAsync(ct);
+            _isVoiceListening = false;
+            PostToWeb("aliceVoiceState", new { listening = false, mode = "winrt", message = "" });
+
+            if (result.Ok && !string.IsNullOrWhiteSpace(result.Text))
+            {
+                await ExecuteAliceCommandAsync(result.Text);
+                return;
+            }
+
+            if (result.FallbackReason == "cancelled")
+                return;
+        }
+
+        // На Windows 10/11 без офлайн-пакета распознавания речи открываем строку Алисы и системный голосовой ввод (Win+H)
+        RestoreFromTray();
+        if (_isCompactMode)
+            SetCompactMode(false, save: true);
+
+        PostToWeb("aliceVoiceState", new
+        {
+            listening = false,
+            mode = "win-dictation",
+            focusInput = true,
+            message = "Говорите в микрофон (Windows Win+H) и нажмите Enter"
+        });
+        PostToWeb("status", new { message = "Запускаю голосовой ввод Windows (Win+H) — диктуйте команду Алисе" });
+
+        await Task.Delay(120);
+        try { PlayerWebView?.Focus(); } catch { }
+        AliceVoiceRecognizer.TriggerWindowsVoiceTyping();
+    }
 
     #endregion
 }

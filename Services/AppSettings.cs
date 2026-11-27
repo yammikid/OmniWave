@@ -28,6 +28,7 @@ public class AppSettings
     public bool CompactEdgeAutoHide { get; set; } = true;
     public string CompactDockedEdge { get; set; } = "";
     public int ChromaIntensity { get; set; } = 67;
+    public int WindowScalePercent { get; set; } = 100;
     public int WindowOpacityPercent { get; set; } = 100;
     public bool ZeroBlurMode { get; set; } = true;
 
@@ -56,6 +57,10 @@ public class AppSettings
     public string ProxyPassword { get; set; } = "";
     public bool ProxyBypassRuServices { get; set; } = true;
 
+    public bool AliceApiEnabled { get; set; } = true;
+    public int AliceApiPort { get; set; } = 47510;
+    public string AliceApiToken { get; set; } = "";
+
     public void Normalize()
     {
         if (PlayerWindowLeft.HasValue && (double.IsNaN(PlayerWindowLeft.Value) || double.IsInfinity(PlayerWindowLeft.Value)))
@@ -67,7 +72,9 @@ public class AppSettings
         CompactDockedEdge = edge is "left" or "right" or "top" ? edge : "";
 
         ChromaIntensity = Math.Clamp(ChromaIntensity, 0, 100);
-        WindowOpacityPercent = Math.Clamp(WindowOpacityPercent, 75, 100);
+        if (WindowScalePercent <= 0) WindowScalePercent = 100;
+        WindowScalePercent = Math.Clamp(WindowScalePercent, 80, 140);
+        WindowOpacityPercent = 100;
 
         VkUserId = Math.Max(0, VkUserId);
         YandexUserId = Math.Max(0, YandexUserId);
@@ -97,7 +104,16 @@ public class AppSettings
         ProxyPort = ProxyService.NormalizePort(ProxyType, ProxyPort);
         ProxyUsername = (ProxyUsername ?? "").Trim();
         ProxyPassword ??= "";
+
+        if (AliceApiPort <= 0) AliceApiPort = 47510;
+        AliceApiPort = Math.Clamp(AliceApiPort, 1024, 65535);
+        AliceApiToken = (AliceApiToken ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(AliceApiToken))
+            AliceApiToken = GenerateAliceToken();
     }
+
+    public static string GenerateAliceToken()
+        => System.Security.Cryptography.RandomNumberGenerator.GetHexString(24).ToLowerInvariant();
 }
 
 public class SettingsService
@@ -126,14 +142,17 @@ public class SettingsService
 
     private AppSettings Load()
     {
+        bool fileExisted = File.Exists(_settingsPath);
         try
         {
-            if (File.Exists(_settingsPath))
+            if (fileExisted)
             {
                 var json = File.ReadAllText(_settingsPath);
                 var loaded = JsonSerializer.Deserialize<AppSettings>(json);
                 if (loaded != null)
                 {
+                    bool hadToken = !string.IsNullOrWhiteSpace(loaded.AliceApiToken);
+                    bool hadScale = loaded.WindowScalePercent > 0;
                     loaded.Normalize();
                     if (loaded.EqualizerEnabled &&
                         string.Equals(loaded.EqualizerPreset, "Flat", StringComparison.OrdinalIgnoreCase) &&
@@ -142,6 +161,8 @@ public class SettingsService
                     {
                         loaded.EqualizerEnabled = false;
                     }
+                    if (!hadToken || !hadScale)
+                        TryWriteSettingsUnlocked(loaded);
                     return loaded;
                 }
             }
@@ -150,7 +171,19 @@ public class SettingsService
 
         var defaults = new AppSettings();
         defaults.Normalize();
+        if (!fileExisted)
+            TryWriteSettingsUnlocked(defaults);
         return defaults;
+    }
+
+    private void TryWriteSettingsUnlocked(AppSettings settings)
+    {
+        try
+        {
+            var json = JsonSerializer.Serialize(settings, JsonOptions);
+            File.WriteAllText(_settingsPath, json);
+        }
+        catch { }
     }
 
     public void Save(bool notify = true)

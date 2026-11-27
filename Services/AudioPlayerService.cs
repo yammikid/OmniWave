@@ -53,6 +53,7 @@ public class AudioPlayerService : IDisposable
     private long _pendingSeekMs = -1;
     private readonly Dictionary<string, (List<TrackItem> Queue, int Index, long PositionMs, bool IsWave)> _savedBrandQueues = new(StringComparer.OrdinalIgnoreCase);
     private List<TrackItem> _queue = new();
+    private List<TrackItem>? _unshuffledQueue;
     private int _currentIndex = -1;
     private int _softwareVolume = 80;
     private long _lastTimeMs;
@@ -343,16 +344,73 @@ public class AudioPlayerService : IDisposable
         TrackItem? target = null;
         lock (_queueLock)
         {
-            _queue = queue.Select(t => t.Clone()).ToList();
-            _currentIndex = (index >= 0 && index < _queue.Count) ? index : -1;
+            var cloned = queue.Select(t => t.Clone()).ToList();
+            if (cloned.Count == 0)
+            {
+                _queue = cloned;
+                _unshuffledQueue = null;
+                _currentIndex = -1;
+            }
+            else if (ShuffleEnabled && !isWave && !isVkMix && cloned.Count > 1)
+            {
+                int safeIdx = (index >= 0 && index < cloned.Count) ? index : 0;
+                _unshuffledQueue = cloned.ToList();
+
+                var current = cloned[safeIdx];
+                var rest = cloned.Where((_, i) => i != safeIdx).ToList();
+                FisherYatesShuffle(rest);
+                rest.Insert(0, current);
+                _queue = rest;
+                _currentIndex = 0;
+                target = _queue[0];
+            }
+            else
+            {
+                _unshuffledQueue = ShuffleEnabled ? cloned.ToList() : null;
+                _queue = cloned;
+                _currentIndex = (index >= 0 && index < _queue.Count) ? index : -1;
+                if (_currentIndex >= 0)
+                    target = _queue[_currentIndex];
+            }
+
             UpdatePlayingFlagsUnlocked();
-            if (_currentIndex >= 0)
-                target = _queue[_currentIndex];
         }
 
         QueueChanged?.Invoke();
         if (target != null)
             await LoadAndPlayAsync(target, startPositionMs);
+    }
+
+    public async Task PlayShuffledFromQueueAsync(List<TrackItem> queue)
+    {
+        if (queue == null || queue.Count == 0) return;
+
+        SaveCurrentBrandState();
+        IsYandexWaveActive = false;
+        IsVkMixActive = false;
+        TrackItem? target = null;
+
+        lock (_queueLock)
+        {
+            var cloned = queue.Select(t => t.Clone()).ToList();
+            ShuffleEnabled = true;
+            _unshuffledQueue = cloned.ToList();
+
+            var shuffled = cloned.ToList();
+            if (shuffled.Count > 1)
+                FisherYatesShuffle(shuffled);
+
+            _queue = shuffled;
+            _currentIndex = 0;
+            UpdatePlayingFlagsUnlocked();
+            target = _queue[0];
+        }
+
+        ShuffleChanged?.Invoke(true);
+        QueueChanged?.Invoke();
+        StatusMessage?.Invoke("Очередь перемешана");
+        if (target != null)
+            await LoadAndPlayAsync(target);
     }
 
     public async Task PlayQueueIndexAsync(int index)
@@ -377,6 +435,10 @@ public class AudioPlayerService : IDisposable
         var copy = track.Clone();
         lock (_queueLock)
         {
+            TrackItem? current = (_currentIndex >= 0 && _currentIndex < _queue.Count)
+                ? _queue[_currentIndex]
+                : null;
+
             if (playNext)
             {
                 int insertAt = (_currentIndex >= 0 && _currentIndex < _queue.Count) ? _currentIndex + 1 : 0;
@@ -386,10 +448,26 @@ public class AudioPlayerService : IDisposable
             {
                 _queue.Add(copy);
             }
+
+            if (_unshuffledQueue != null)
+            {
+                if (playNext)
+                {
+                    int origCur = current != null ? FindTrackIndex(_unshuffledQueue, current) : -1;
+                    int origInsert = origCur >= 0 ? Math.Min(origCur + 1, _unshuffledQueue.Count) : 0;
+                    _unshuffledQueue.Insert(origInsert, copy);
+                }
+                else
+                {
+                    _unshuffledQueue.Add(copy);
+                }
+            }
+
             UpdatePlayingFlagsUnlocked();
         }
 
         QueueChanged?.Invoke();
+        _ = PreResolveNextAsync();
         StatusMessage?.Invoke(playNext
             ? $"Включится следующим: {track.Title}"
             : $"Добавлено в очередь: {track.Title}");
@@ -400,16 +478,32 @@ public class AudioPlayerService : IDisposable
         int count = 0;
         lock (_queueLock)
         {
-            foreach (var t in tracks)
+            var batch = tracks.Select(t => t.Clone()).ToList();
+            count = batch.Count;
+            if (count > 0)
             {
-                _queue.Add(t.Clone());
-                count++;
+                _unshuffledQueue?.AddRange(batch);
+
+                if (ShuffleEnabled && batch.Count > 1)
+                {
+                    var shuffledBatch = batch.ToList();
+                    FisherYatesShuffle(shuffledBatch);
+                    _queue.AddRange(shuffledBatch);
+                }
+                else
+                {
+                    _queue.AddRange(batch);
+                }
+
+                UpdatePlayingFlagsUnlocked();
             }
-            UpdatePlayingFlagsUnlocked();
         }
 
         if (count > 0)
+        {
             QueueChanged?.Invoke();
+            _ = PreResolveNextAsync();
+        }
     }
 
     public void MoveInQueue(int fromIndex, int toIndex)
@@ -438,7 +532,10 @@ public class AudioPlayerService : IDisposable
         }
 
         if (changed)
+        {
             QueueChanged?.Invoke();
+            _ = PreResolveNextAsync();
+        }
     }
 
     public void RemoveFromQueue(int index)
@@ -448,7 +545,16 @@ public class AudioPlayerService : IDisposable
         {
             if (index < 0 || index >= _queue.Count) return;
 
+            var removed = _queue[index];
             _queue.RemoveAt(index);
+
+            if (_unshuffledQueue != null)
+            {
+                int origIdx = FindTrackIndex(_unshuffledQueue, removed);
+                if (origIdx >= 0)
+                    _unshuffledQueue.RemoveAt(origIdx);
+            }
+
             if (_queue.Count == 0)
             {
                 _currentIndex = -1;
@@ -468,7 +574,10 @@ public class AudioPlayerService : IDisposable
         }
 
         if (changed)
+        {
             QueueChanged?.Invoke();
+            _ = PreResolveNextAsync();
+        }
     }
 
     public void ShuffleQueue()
@@ -476,27 +585,13 @@ public class AudioPlayerService : IDisposable
         lock (_queueLock)
         {
             if (_queue.Count <= 1) return;
-
-            TrackItem? current = (_currentIndex >= 0 && _currentIndex < _queue.Count)
-                ? _queue[_currentIndex]
-                : null;
-
-            if (current != null)
-            {
-                _queue.RemoveAt(_currentIndex);
-                FisherYatesShuffle(_queue);
-                _queue.Insert(0, current);
-                _currentIndex = 0;
-            }
-            else
-            {
-                FisherYatesShuffle(_queue);
-            }
-
+            _unshuffledQueue ??= _queue.ToList();
+            ShuffleRemainingUnlocked();
             UpdatePlayingFlagsUnlocked();
         }
 
         QueueChanged?.Invoke();
+        _ = PreResolveNextAsync();
         StatusMessage?.Invoke("Очередь перемешана");
     }
 
@@ -506,11 +601,19 @@ public class AudioPlayerService : IDisposable
         {
             if (_queue.Count == 0) return;
             _queue.Clear();
+            _unshuffledQueue = null;
             _currentIndex = -1;
         }
 
         QueueChanged?.Invoke();
         StatusMessage?.Invoke("Очередь очищена");
+    }
+
+    public void SetRepeatMode(RepeatMode mode)
+    {
+        if (RepeatMode == mode) return;
+        RepeatMode = mode;
+        _ = PreResolveNextAsync();
     }
 
     public RepeatMode CycleRepeatMode()
@@ -521,16 +624,109 @@ public class AudioPlayerService : IDisposable
             RepeatMode.All => RepeatMode.One,
             _ => RepeatMode.Off
         };
+        _ = PreResolveNextAsync();
         return RepeatMode;
+    }
+
+    public bool SetShuffle(bool enabled)
+    {
+        if (ShuffleEnabled == enabled)
+            return ShuffleEnabled;
+        return ToggleShuffle();
     }
 
     public bool ToggleShuffle()
     {
-        ShuffleEnabled = !ShuffleEnabled;
-        if (ShuffleEnabled)
-            ShuffleQueue();
+        lock (_queueLock)
+        {
+            ShuffleEnabled = !ShuffleEnabled;
+            if (ShuffleEnabled)
+            {
+                _unshuffledQueue = _queue.ToList();
+                if (_queue.Count > 1)
+                    ShuffleRemainingUnlocked();
+                UpdatePlayingFlagsUnlocked();
+            }
+            else
+            {
+                if (_unshuffledQueue != null && _unshuffledQueue.Count > 0)
+                {
+                    TrackItem? current = (_currentIndex >= 0 && _currentIndex < _queue.Count)
+                        ? _queue[_currentIndex]
+                        : null;
+
+                    _queue = _unshuffledQueue.ToList();
+                    _unshuffledQueue = null;
+
+                    if (current != null)
+                    {
+                        int idx = FindTrackIndex(_queue, current);
+                        _currentIndex = idx >= 0
+                            ? idx
+                            : (_queue.Count > 0 ? Math.Clamp(_currentIndex, 0, _queue.Count - 1) : -1);
+                    }
+                    else
+                    {
+                        _currentIndex = _queue.Count > 0 ? Math.Clamp(_currentIndex, 0, _queue.Count - 1) : -1;
+                    }
+
+                    UpdatePlayingFlagsUnlocked();
+                }
+                else
+                {
+                    _unshuffledQueue = null;
+                }
+            }
+        }
+
         ShuffleChanged?.Invoke(ShuffleEnabled);
+        QueueChanged?.Invoke();
+        StatusMessage?.Invoke(ShuffleEnabled
+            ? "Перемешивание включено (очередь обновлена)"
+            : "Перемешивание выключено (порядок восстановлен)");
+        _ = PreResolveNextAsync();
         return ShuffleEnabled;
+    }
+
+    private void ShuffleRemainingUnlocked()
+    {
+        TrackItem? current = (_currentIndex >= 0 && _currentIndex < _queue.Count)
+            ? _queue[_currentIndex]
+            : null;
+
+        if (current != null)
+        {
+            _queue.RemoveAt(_currentIndex);
+            FisherYatesShuffle(_queue);
+            _queue.Insert(0, current);
+            _currentIndex = 0;
+        }
+        else
+        {
+            FisherYatesShuffle(_queue);
+        }
+    }
+
+    private void ReshuffleForWrapUnlocked()
+    {
+        if (_queue.Count <= 1) return;
+        TrackItem? lastPlayed = (_currentIndex >= 0 && _currentIndex < _queue.Count)
+            ? _queue[_currentIndex]
+            : null;
+
+        FisherYatesShuffle(_queue);
+        if (lastPlayed != null && ReferenceEquals(_queue[0], lastPlayed))
+        {
+            int swapIdx = Random.Shared.Next(1, _queue.Count);
+            (_queue[0], _queue[swapIdx]) = (_queue[swapIdx], _queue[0]);
+        }
+    }
+
+    private static int FindTrackIndex(List<TrackItem> list, TrackItem target)
+    {
+        int idx = list.FindIndex(t => ReferenceEquals(t, target));
+        if (idx >= 0) return idx;
+        return list.FindIndex(t => string.Equals(t.UniqueKey, target.UniqueKey, StringComparison.OrdinalIgnoreCase));
     }
 
     private async Task HandleEndReachedAsync()
@@ -547,26 +743,17 @@ public class AudioPlayerService : IDisposable
                 if (_currentIndex < 0 || _currentIndex >= _queue.Count) _currentIndex = 0;
                 target = _queue[_currentIndex];
             }
-            else if (ShuffleEnabled && _queue.Count > 1)
+            else if (_currentIndex + 1 < _queue.Count)
             {
-                int rnd;
-                do { rnd = Random.Shared.Next(_queue.Count); }
-                while (rnd == _currentIndex);
-                _currentIndex = rnd;
+                _currentIndex++;
                 target = _queue[_currentIndex];
             }
             else if (RepeatMode == RepeatMode.All)
             {
-                _currentIndex = (_currentIndex + 1) % _queue.Count;
-                target = _queue[_currentIndex];
-            }
-            else
-            {
-                if (_currentIndex + 1 < _queue.Count)
-                {
-                    _currentIndex++;
-                    target = _queue[_currentIndex];
-                }
+                if (ShuffleEnabled && _queue.Count > 1)
+                    ReshuffleForWrapUnlocked();
+                _currentIndex = 0;
+                target = _queue[0];
             }
 
             UpdatePlayingFlagsUnlocked();
@@ -587,17 +774,18 @@ public class AudioPlayerService : IDisposable
         lock (_queueLock)
         {
             if (_queue.Count == 0) return;
-            if (ShuffleEnabled && _queue.Count > 1)
+
+            if (_currentIndex + 1 < _queue.Count)
             {
-                int rnd;
-                do { rnd = Random.Shared.Next(_queue.Count); }
-                while (rnd == _currentIndex);
-                _currentIndex = rnd;
+                _currentIndex++;
             }
             else
             {
-                _currentIndex = (_currentIndex + 1) % _queue.Count;
+                if (ShuffleEnabled && _queue.Count > 1)
+                    ReshuffleForWrapUnlocked();
+                _currentIndex = 0;
             }
+
             UpdatePlayingFlagsUnlocked();
             nextTrack = _queue[_currentIndex];
         }

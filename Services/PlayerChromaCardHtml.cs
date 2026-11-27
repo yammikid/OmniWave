@@ -615,10 +615,36 @@ public static class PlayerChromaCardHtml
       margin-bottom: 8px;
     }
 
+    .ow-search-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
     .ow-search-box {
       position: relative;
       display: flex;
       align-items: center;
+      flex: 1;
+      min-width: 0;
+    }
+    .ow-mic-btn {
+      flex-shrink: 0;
+      border: 1px solid var(--ow-hairline);
+      background: var(--ow-bg-input);
+    }
+    .ow-mic-btn.is-listening {
+      color: rgb(var(--chroma-r), var(--chroma-g), var(--chroma-b));
+      border-color: rgba(var(--chroma-r), var(--chroma-g), var(--chroma-b), 0.85);
+      background: rgba(var(--chroma-r), var(--chroma-g), var(--chroma-b), 0.14);
+    }
+    .ow-alice-bar {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      border-radius: 8px;
+      border: 1px solid rgba(var(--chroma-r), var(--chroma-g), var(--chroma-b), 0.28);
+      background: #101218;
+      padding: 6px;
     }
     .ow-search-icon {
       position: absolute;
@@ -1484,7 +1510,9 @@ public static class PlayerChromaCardHtml
         eye: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>',
         eyeOff: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.53 13.53 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><path d="m2 2 20 20"/></svg>',
         folder: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9l-2-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/></svg>',
-        external: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>'
+        external: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>',
+        mic: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1"/><path d="M12 18v4"/><path d="M8 22h8"/></svg>',
+        copy: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>'
       };
 
       const state = {
@@ -1535,7 +1563,7 @@ public static class PlayerChromaCardHtml
           autoPauseOnSwitch: true,
           autoStart: false,
           chromaIntensity: 67,
-          windowOpacity: 100,
+          windowScale: 100,
           zeroBlurMode: true,
           downloadFolder: ''
         },
@@ -1585,7 +1613,28 @@ public static class PlayerChromaCardHtml
           progress: 0
         },
         eq: { enabled: false, preset: 'Flat', preamp: 0, bands: [], rate: 1.0, presets: {} },
-        telemetry: { ramMb: 24, cpuPercent: 0.2, gpuPercent: 0 },
+        aliceBarOpen: false,
+        aliceInput: '',
+        aliceSettingsInput: '',
+        pendingFocusAliceInput: false,
+        alice: {
+          enabled: true,
+          port: 47510,
+          tokenPreview: '',
+          running: false,
+          statusText: 'Инициализация...',
+          webhookUrl: 'http://127.0.0.1:47510/alice',
+          speechPackAvailable: false,
+          listening: false,
+          lastQuery: '',
+          lastReply: ''
+        },
+        aliceDraft: {
+          dirty: false,
+          enabled: true,
+          port: '47510'
+        },
+        telemetry: { ramMb: 0, cpuPercent: 0, gpuPercent: 0, processCount: 1 },
         suspended: false
       };
 
@@ -1862,13 +1911,31 @@ public static class PlayerChromaCardHtml
          TAB BODIES: SEARCH, QUEUE, FAVORITES/PLAYLISTS, SETTINGS/BRIDGE
          ====================================================================== */
       function buildSearchHeaderHTML() {
+        const aliceBar = state.aliceBarOpen
+          ? '<div class="ow-alice-bar">' +
+              '<div class="ow-input-row">' +
+                '<input id="ow-alice-cmd-input" data-role="alice-cmd-input" type="text" value="' + esc(state.aliceInput) + '" placeholder="Команда Алисе: включи Кино / тише / моя волна..." class="ow-input" />' +
+                '<button data-action="alice-run" class="ow-badge-btn is-ok" title="Выполнить команду Алисе">▶</button>' +
+                '<button data-action="close-alice-bar" class="ow-icon-btn" style="width:22px;height:22px" title="Скрыть">' + ICONS.close + '</button>' +
+              '</div>' +
+              (state.alice.lastReply
+                ? '<div data-role="alice-bar-reply" class="ow-status-line truncate">' + esc(state.alice.lastReply) + '</div>'
+                : '<div data-role="alice-bar-reply" class="ow-status-line truncate" style="display:none"></div>') +
+            '</div>'
+          : '';
+
         return '<div class="ow-search-header">' +
-          '<div class="ow-search-box">' +
-            '<span class="ow-search-icon">' + ICONS.search + '</span>' +
-            '<input id="ow-search-input" data-role="search-input" type="text" value="' + esc(state.searchQuery) + '" placeholder="Поиск по сервисам или ссылка..." class="ow-search-input" />' +
-            '<button data-action="clear-search-input" class="ow-clear-input-btn" style="display:' + (state.searchQuery ? 'flex' : 'none') + '" title="Очистить">' + ICONS.close + '</button>' +
-            '<kbd class="ow-kbd-hint ow-mono" style="display:' + (state.searchQuery ? 'none' : 'inline-block') + '">/</kbd>' +
+          '<div class="ow-search-row">' +
+            '<div class="ow-search-box">' +
+              '<span class="ow-search-icon">' + ICONS.search + '</span>' +
+              '<input id="ow-search-input" data-role="search-input" type="text" value="' + esc(state.searchQuery) + '" placeholder="Поиск по сервисам или ссылка..." class="ow-search-input" />' +
+              '<button data-action="clear-search-input" class="ow-clear-input-btn" style="display:' + (state.searchQuery ? 'flex' : 'none') + '" title="Очистить">' + ICONS.close + '</button>' +
+              '<kbd class="ow-kbd-hint ow-mono" style="display:' + (state.searchQuery ? 'none' : 'inline-block') + '">/</kbd>' +
+            '</div>' +
+            '<button data-action="alice-voice" data-role="mic-btn" class="ow-icon-btn sz-28 ow-mic-btn ' + (state.alice.listening ? 'is-listening' : '') + '" title="Голосовая команда Алисе (микрофон / Win+H)">' + ICONS.mic + '</button>' +
+            '<button data-action="toggle-alice-bar" class="ow-icon-btn sz-28 ow-mic-btn ' + (state.aliceBarOpen ? 'is-active' : '') + '" title="Строка команд Алисы">' + ICONS.sparkle + '</button>' +
           '</div>' +
+          aliceBar +
           '<div class="ow-chips-scroller" data-chips-scroller="search">' +
             '<button type="button" data-chips-nav="-1" class="ow-chips-nav is-left is-hidden" title="Листать влево">‹</button>' +
             '<div class="ow-chips-row" data-chips-row="search">' +
@@ -2115,6 +2182,16 @@ public static class PlayerChromaCardHtml
         };
       }
 
+      function syncAliceDraftFromServer(force) {
+        const al = state.alice || {};
+        if (!force && state.aliceDraft.dirty) return;
+        state.aliceDraft = {
+          dirty: false,
+          enabled: al.enabled !== false,
+          port: String(al.port || 47510)
+        };
+      }
+
       function statusKindClass(kind) {
         if (kind === 'ok') return 'is-ok';
         if (kind === 'warn' || kind === 'busy') return 'is-warn';
@@ -2195,6 +2272,8 @@ public static class PlayerChromaCardHtml
         const eq = state.eq || { enabled: false, preset: 'Flat', rate: 1.0, presets: {} };
         const pr = state.proxy || {};
         const pd = state.proxyDraft || {};
+        const al = state.alice || {};
+        const ad = state.aliceDraft || {};
         const yt = state.ytDlp || {};
         const up = state.update || {};
         const ap = state.authPanel || {};
@@ -2326,6 +2405,45 @@ public static class PlayerChromaCardHtml
             '</div>' +
           '</div>' +
 
+          /* 2.5. Алиса и голосовое управление */
+          '<div class="ow-card-block" data-section="alice">' +
+            '<div class="ow-section-head" style="margin-bottom:0">' +
+              '<span class="ow-section-label">Алиса и голос</span>' +
+              '<span data-role="alice-pill" class="ow-badge-btn ' + (al.running ? 'is-ok' : '') + '" style="cursor:default">' + (al.running ? 'Активен' : 'Выкл.') + '</span>' +
+            '</div>' +
+            renderToggleRow('aliceApiEnabled', 'Локальный API (Webhook / REST)', Boolean(ad.enabled)) +
+            '<div class="ow-input-row">' +
+              '<div style="width:92px">' +
+                '<div class="ow-field-label">Порт</div>' +
+                '<input data-alice-field="port" type="text" value="' + esc(ad.port || '47510') + '" placeholder="47510" class="ow-input ow-mono" />' +
+              '</div>' +
+              '<div style="flex:1;min-width:0;padding-top:15px">' +
+                '<button data-action="alice-save" class="ow-btn-secondary">Применить</button>' +
+              '</div>' +
+            '</div>' +
+            '<div data-role="alice-status" class="ow-status-line ' + (al.running ? 'is-ok' : '') + '">' + esc(al.statusText || '') + '</div>' +
+            '<div class="ow-bridge-row" style="padding:5px 8px">' +
+              '<div style="min-width:0">' +
+                '<div style="font-size:10px;color:var(--ow-text-muted)">Токен доступа (X-Alice-Token)</div>' +
+                '<div class="ow-mono truncate" style="font-size:11px;color:#E5E7EB">' + esc(al.tokenPreview || '—') + '</div>' +
+              '</div>' +
+              '<div style="display:flex;align-items:center;gap:4px;flex-shrink:0">' +
+                '<button data-action="alice-copy-token" class="ow-badge-btn" title="Копировать секретный токен">' + ICONS.copy + '</button>' +
+                '<button data-action="alice-regen-token" class="ow-badge-btn">Обновить</button>' +
+              '</div>' +
+            '</div>' +
+            '<div class="ow-btn-grid">' +
+              '<button data-action="alice-copy-webhook" class="ow-btn-secondary">Webhook (/alice)</button>' +
+              '<button data-action="alice-copy-quick" class="ow-btn-secondary">GET-команда</button>' +
+            '</div>' +
+            '<div class="ow-input-row">' +
+              '<input data-role="alice-settings-input" type="text" value="' + esc(state.aliceSettingsInput || '') + '" placeholder="Команда: «включи Кино» / «громкость 50»" class="ow-input" />' +
+              '<button data-action="alice-voice" data-role="mic-btn" class="ow-icon-btn sz-26 ow-mic-btn ' + (al.listening ? 'is-listening' : '') + '" title="Голосовая команда">' + ICONS.mic + '</button>' +
+              '<button data-action="alice-run-settings" class="ow-badge-btn is-ok" title="Выполнить">▶</button>' +
+            '</div>' +
+            '<div data-role="alice-reply" class="ow-status-line" style="display:' + (al.lastReply ? 'block' : 'none') + '">' + esc(al.lastReply || '') + '</div>' +
+          '</div>' +
+
           /* 3. Внешний вид (Chroma Card) */
           '<div class="ow-card-block">' +
             '<div class="ow-section-label">Внешний вид (Chroma Card)</div>' +
@@ -2338,10 +2456,15 @@ public static class PlayerChromaCardHtml
             '</div>' +
             '<div style="display:flex;flex-direction:column;gap:4px">' +
               '<div class="ow-setting-row">' +
-                '<span style="font-size:12px;color:#E5E7EB">Прозрачность окна</span>' +
-                '<span data-role="opacity-label" class="ow-mono" style="font-size:11px;color:var(--ow-text-secondary)">' + ws.windowOpacity + '%</span>' +
+                '<span style="font-size:12px;color:#E5E7EB">Размер окна</span>' +
+                '<button data-action="reset-window-scale" data-role="scale-label" class="ow-mono ow-link-btn accent" title="Сбросить масштаб до 100%">' + (ws.windowScale || 100) + '%</button>' +
               '</div>' +
-              '<input data-role="opacity-slider" type="range" min="75" max="100" value="' + ws.windowOpacity + '" class="ow-slider w-full" aria-label="Прозрачность окна" />' +
+              '<input data-role="scale-slider" type="range" min="80" max="140" step="5" value="' + (ws.windowScale || 100) + '" class="ow-slider w-full" aria-label="Размер окна" />' +
+              '<div class="ow-grid-4" style="margin-top:2px">' +
+                [85, 100, 115, 130].map(sc =>
+                  '<button data-window-scale="' + sc + '" class="ow-chip ' + (Number(ws.windowScale || 100) === sc ? 'is-active' : '') + '" style="justify-content:center">' + sc + '%</button>'
+                ).join('') +
+              '</div>' +
             '</div>' +
           '</div>' +
 
@@ -2355,7 +2478,7 @@ public static class PlayerChromaCardHtml
             renderToggleRow('startMinimized', 'Запускать свёрнутым в трей', Boolean(ws.startMinimized)) +
             renderToggleRow('autoPauseOnSwitch', 'Автопауза при переключении', ws.autoPauseOnSwitch !== false) +
             renderToggleRow('autoStart', 'Автозапуск Windows', ws.autoStart) +
-            renderToggleRow('zeroBlurMode', 'Zero-Blur режим (0% GPU)', ws.zeroBlurMode) +
+            renderToggleRow('zeroBlurMode', 'Zero-Blur режим (без DWM-размытия)', ws.zeroBlurMode) +
             '<button data-action="center-window" class="ow-btn-secondary">Центрировать окно на экране</button>' +
           '</div>' +
 
@@ -2420,7 +2543,7 @@ public static class PlayerChromaCardHtml
             '<div class="ow-telemetry-row">' +
               '<span class="ow-telemetry-left">' +
                 '<span class="ow-dot" style="background:var(--status-ok)"></span>' +
-                '<span data-role="telemetry-text">' + formatTelemetryText() + '</span>' +
+                '<span data-role="telemetry-text" title="OmniWave + WebView2 + LibVLC (' + ((state.telemetry && state.telemetry.processCount) || 1) + ' проц.)">' + formatTelemetryText() + '</span>' +
               '</span>' +
               '<span style="color:var(--ow-text-muted)">v2.0</span>' +
             '</div>' +
@@ -2429,8 +2552,9 @@ public static class PlayerChromaCardHtml
       }
 
       function formatTelemetryText() {
-        const tm = state.telemetry || { ramMb: 24, cpuPercent: 0.2, gpuPercent: 0 };
-        return 'RAM ' + Math.round(tm.ramMb || 24) + ' MB · CPU ' + Number(tm.cpuPercent || 0).toFixed(1) + '% · GPU ' + (tm.gpuPercent || 0) + '%';
+        const tm = state.telemetry || { ramMb: 0, cpuPercent: 0, gpuPercent: 0, processCount: 1 };
+        const ram = tm.ramMb > 0 ? (Math.round(tm.ramMb) + ' MB') : '—';
+        return 'RAM ' + ram + ' · CPU ' + Number(tm.cpuPercent || 0).toFixed(1) + '% · GPU ' + Number(tm.gpuPercent || 0).toFixed(1) + '%';
       }
 
       function buildActiveTabBodyHTML() {
@@ -2590,6 +2714,11 @@ public static class PlayerChromaCardHtml
           const sInp = document.getElementById('ow-search-input');
           if (sInp) sInp.focus();
         }
+        if (state.pendingFocusAliceInput) {
+          state.pendingFocusAliceInput = false;
+          const aInp = document.getElementById('ow-alice-cmd-input');
+          if (aInp) aInp.focus();
+        }
         if (state.pendingFocusNewPlaylist) {
           state.pendingFocusNewPlaylist = false;
           const pInp = document.getElementById('ow-new-pl-input');
@@ -2628,6 +2757,11 @@ public static class PlayerChromaCardHtml
         if (!panel) return;
         panel.innerHTML = buildActiveTabPanelHTML();
         bindTabInputs();
+        if (state.pendingFocusAliceInput) {
+          state.pendingFocusAliceInput = false;
+          const aInp = document.getElementById('ow-alice-cmd-input');
+          if (aInp) aInp.focus();
+        }
       }
 
       function updateTabBadges() {
@@ -2706,6 +2840,18 @@ public static class PlayerChromaCardHtml
           port: pd.port || '',
           username: pd.username || '',
           password: pd.password || ''
+        });
+      }
+
+      function sendAliceSave() {
+        const ad = state.aliceDraft || {};
+        const parsedPort = parseInt(String(ad.port || '47510').trim(), 10);
+        const port = Number.isFinite(parsedPort) ? Math.max(1024, Math.min(65535, parsedPort)) : 47510;
+        ad.port = String(port);
+        ad.dirty = false;
+        sendToHost('alice.saveSettings', {
+          enabled: ad.enabled !== false,
+          port: port
         });
       }
 
@@ -2796,6 +2942,50 @@ public static class PlayerChromaCardHtml
           };
         });
 
+        const alicePortInp = appRoot.querySelector('[data-alice-field="port"]');
+        if (alicePortInp) {
+          alicePortInp.oninput = (e) => {
+            state.aliceDraft.dirty = true;
+            state.aliceDraft.port = e.target.value;
+          };
+          alicePortInp.onkeydown = (e) => {
+            if (e.key === 'Enter') {
+              alicePortInp.blur();
+              sendAliceSave();
+            }
+          };
+        }
+
+        const aliceCmdInp = appRoot.querySelector('[data-role="alice-cmd-input"]');
+        if (aliceCmdInp) {
+          aliceCmdInp.oninput = (e) => {
+            state.aliceInput = e.target.value;
+          };
+          aliceCmdInp.onkeydown = (e) => {
+            if (e.key === 'Enter' && (aliceCmdInp.value || '').trim()) {
+              const phrase = aliceCmdInp.value.trim();
+              state.aliceInput = '';
+              aliceCmdInp.value = '';
+              sendToHost('alice.runCommand', { command: phrase });
+            } else if (e.key === 'Escape') {
+              state.aliceBarOpen = false;
+              refreshWholeTabPanel();
+            }
+          };
+        }
+
+        const aliceSetInp = appRoot.querySelector('[data-role="alice-settings-input"]');
+        if (aliceSetInp) {
+          aliceSetInp.oninput = (e) => {
+            state.aliceSettingsInput = e.target.value;
+          };
+          aliceSetInp.onkeydown = (e) => {
+            if (e.key === 'Enter' && (aliceSetInp.value || '').trim()) {
+              sendToHost('alice.runCommand', { command: aliceSetInp.value.trim() });
+            }
+          };
+        }
+
         const dlInp = appRoot.querySelector('[data-role="dl-folder-input"]');
         if (dlInp) {
           dlInp.onkeydown = (e) => {
@@ -2826,14 +3016,20 @@ public static class PlayerChromaCardHtml
           };
         }
 
-        const opSlider = appRoot.querySelector('[data-role="opacity-slider"]');
-        if (opSlider) {
-          opSlider.oninput = (e) => {
+        const scaleSlider = appRoot.querySelector('[data-role="scale-slider"]');
+        if (scaleSlider) {
+          scaleSlider.oninput = (e) => {
             const val = Number(e.target.value);
-            state.windowSettings.windowOpacity = val;
-            const lbl = appRoot.querySelector('[data-role="opacity-label"]');
+            const lbl = appRoot.querySelector('[data-role="scale-label"]');
             if (lbl) lbl.textContent = val + '%';
-            sendToHost('window.setOpacity', { opacity: val });
+            appRoot.querySelectorAll('[data-window-scale]').forEach(btn => {
+              btn.classList.toggle('is-active', Number(btn.getAttribute('data-window-scale')) === val);
+            });
+          };
+          scaleSlider.onchange = (e) => {
+            const val = Number(e.target.value);
+            state.windowSettings.windowScale = val;
+            sendToHost('window.setScale', { scale: val });
           };
         }
 
@@ -3205,6 +3401,14 @@ public static class PlayerChromaCardHtml
               }
               return;
             }
+            if (key === 'aliceApiEnabled') {
+              const nextVal = !state.aliceDraft.enabled;
+              state.aliceDraft.dirty = true;
+              state.aliceDraft.enabled = nextVal;
+              sw.setAttribute('aria-checked', nextVal ? 'true' : 'false');
+              sendAliceSave();
+              return;
+            }
 
             const nextVal = !state.windowSettings[key];
             state.windowSettings[key] = nextVal;
@@ -3228,8 +3432,23 @@ public static class PlayerChromaCardHtml
             } else if (key === 'zeroBlurMode') {
               ChromaEngine.syncStrength();
               sendToHost('window.setZeroBlur', { enabled: nextVal });
-              showToast(nextVal ? 'Zero-Blur режим (0% GPU) активен' : 'Zero-Blur режим выключен');
+              showToast(nextVal ? 'Zero-Blur режим (без DWM-размытия) активен' : 'Zero-Blur режим выключен');
             }
+            return;
+          }
+
+          const winScaleBtn = e.target.closest('[data-window-scale]');
+          if (winScaleBtn) {
+            const scVal = Number(winScaleBtn.getAttribute('data-window-scale') || 100);
+            state.windowSettings.windowScale = scVal;
+            const lbl = appRoot.querySelector('[data-role="scale-label"]');
+            if (lbl) lbl.textContent = scVal + '%';
+            const sl = appRoot.querySelector('[data-role="scale-slider"]');
+            if (sl) sl.value = scVal;
+            appRoot.querySelectorAll('[data-window-scale]').forEach(chip => {
+              chip.classList.toggle('is-active', Number(chip.getAttribute('data-window-scale')) === scVal);
+            });
+            sendToHost('window.setScale', { scale: scVal });
             return;
           }
 
@@ -3317,6 +3536,18 @@ public static class PlayerChromaCardHtml
             case 'open-accounts': sendToHost('window.openAccounts'); break;
             case 'open-settings': sendToHost('window.openSettings'); break;
             case 'center-window': sendToHost('window.center'); break;
+            case 'reset-window-scale': {
+              state.windowSettings.windowScale = 100;
+              const lbl = appRoot.querySelector('[data-role="scale-label"]');
+              if (lbl) lbl.textContent = '100%';
+              const sl = appRoot.querySelector('[data-role="scale-slider"]');
+              if (sl) sl.value = 100;
+              appRoot.querySelectorAll('[data-window-scale]').forEach(chip => {
+                chip.classList.toggle('is-active', Number(chip.getAttribute('data-window-scale')) === 100);
+              });
+              sendToHost('window.setScale', { scale: 100 });
+              break;
+            }
             case 'auth-import-yandex-json': sendToHost('auth.importYandexJson'); break;
             case 'auth-import-yt-cookies': sendToHost('auth.importYoutubeCookies'); break;
             case 'auth-open-again':
@@ -3359,6 +3590,47 @@ public static class PlayerChromaCardHtml
             case 'check-ytdlp': sendToHost('system.checkYtDlp'); break;
             case 'check-update': sendToHost('system.checkUpdate'); break;
             case 'install-update': sendToHost('system.installUpdate'); break;
+            case 'alice-voice':
+              sendToHost(state.alice && state.alice.listening ? 'alice.stopVoice' : 'alice.startVoice');
+              break;
+            case 'toggle-alice-bar':
+              state.aliceBarOpen = !state.aliceBarOpen;
+              state.pendingFocusAliceInput = state.aliceBarOpen;
+              refreshWholeTabPanel();
+              break;
+            case 'close-alice-bar':
+              state.aliceBarOpen = false;
+              refreshWholeTabPanel();
+              break;
+            case 'alice-run':
+              if ((state.aliceInput || '').trim()) {
+                const phrase = state.aliceInput.trim();
+                state.aliceInput = '';
+                const cmdEl = document.getElementById('ow-alice-cmd-input');
+                if (cmdEl) cmdEl.value = '';
+                sendToHost('alice.runCommand', { command: phrase });
+              }
+              break;
+            case 'alice-run-settings':
+              if ((state.aliceSettingsInput || '').trim()) {
+                sendToHost('alice.runCommand', { command: state.aliceSettingsInput.trim() });
+              }
+              break;
+            case 'alice-save':
+              sendAliceSave();
+              break;
+            case 'alice-regen-token':
+              sendToHost('alice.regenerateToken');
+              break;
+            case 'alice-copy-token':
+              sendToHost('alice.copyUrl', { kind: 'token' });
+              break;
+            case 'alice-copy-webhook':
+              sendToHost('alice.copyUrl', { kind: 'webhook' });
+              break;
+            case 'alice-copy-quick':
+              sendToHost('alice.copyUrl', { kind: 'quick' });
+              break;
           }
         };
 
@@ -3671,6 +3943,10 @@ public static class PlayerChromaCardHtml
           state.proxy = Object.assign({}, state.proxy, msg.proxy);
           syncProxyDraftFromServer(isInit);
         }
+        if (msg.alice && typeof msg.alice === 'object') {
+          state.alice = Object.assign({}, state.alice, msg.alice);
+          syncAliceDraftFromServer(isInit);
+        }
         if (isInit || 'yandexConnected' in msg) {
           state.accounts = {
             yandexConnected: Boolean(msg.yandexConnected),
@@ -3726,7 +4002,20 @@ public static class PlayerChromaCardHtml
                 } else {
                   const pinBtn = appRoot.querySelector('[data-role="pin-btn"]');
                   if (pinBtn) pinBtn.classList.toggle('is-active', Boolean(state.windowSettings.alwaysOnTop));
-                  if (state.activeTab === 'settings' && !isTypingInSettings()) refreshTabBodyOnly();
+                  if (state.activeTab === 'settings') {
+                    if (!isTypingInSettings()) {
+                      refreshTabBodyOnly();
+                    } else if (typeof state.windowSettings.windowScale === 'number') {
+                      const sc = state.windowSettings.windowScale;
+                      const lbl = appRoot.querySelector('[data-role="scale-label"]');
+                      if (lbl) lbl.textContent = sc + '%';
+                      const sl = appRoot.querySelector('[data-role="scale-slider"]');
+                      if (sl) sl.value = sc;
+                      appRoot.querySelectorAll('[data-window-scale]').forEach(chip => {
+                        chip.classList.toggle('is-active', Number(chip.getAttribute('data-window-scale')) === sc);
+                      });
+                    }
+                  }
                 }
                 break;
               case 'edgeDockState':
@@ -4039,7 +4328,60 @@ public static class PlayerChromaCardHtml
               case 'telemetry':
                 state.telemetry = msg;
                 const tEl = appRoot.querySelector('[data-role="telemetry-text"]');
-                if (tEl) tEl.textContent = formatTelemetryText();
+                if (tEl) {
+                  tEl.textContent = formatTelemetryText();
+                  tEl.title = 'OmniWave + WebView2 + LibVLC (' + (msg.processCount || 1) + ' проц.)';
+                }
+                break;
+              case 'aliceState':
+                state.alice = Object.assign({}, state.alice, msg);
+                syncAliceDraftFromServer(false);
+                appRoot.querySelectorAll('[data-role="mic-btn"]').forEach(btn => {
+                  btn.classList.toggle('is-listening', Boolean(state.alice.listening));
+                });
+                if (!state.compact && state.activeTab === 'settings' && !isTypingInSettings()) {
+                  refreshTabBodyOnly();
+                }
+                break;
+              case 'aliceVoiceState':
+                state.alice.listening = Boolean(msg.listening);
+                appRoot.querySelectorAll('[data-role="mic-btn"]').forEach(btn => {
+                  btn.classList.toggle('is-listening', state.alice.listening);
+                });
+                if (msg.focusInput) {
+                  if (!state.compact && state.activeTab === 'settings') {
+                    const sInp = appRoot.querySelector('[data-role="alice-settings-input"]');
+                    if (sInp) sInp.focus();
+                  } else {
+                    state.activeTab = 'search';
+                    state.aliceBarOpen = true;
+                    state.pendingFocusAliceInput = true;
+                    sendToHost('ui.tabChanged', { tab: 'search' });
+                    appRoot.querySelectorAll('[data-tab]').forEach(b => b.classList.toggle('is-active', b.getAttribute('data-tab') === 'search'));
+                    if (state.compact) {
+                      renderApp();
+                    } else {
+                      refreshWholeTabPanel();
+                    }
+                  }
+                }
+                break;
+              case 'aliceReply':
+                if (msg.query !== undefined) state.alice.lastQuery = msg.query || '';
+                if (msg.reply !== undefined) state.alice.lastReply = msg.reply || '';
+                {
+                  const bRep = appRoot.querySelector('[data-role="alice-bar-reply"]');
+                  if (bRep) {
+                    bRep.textContent = state.alice.lastReply || '';
+                    bRep.style.display = state.alice.lastReply ? 'block' : 'none';
+                  }
+                  const sRep = appRoot.querySelector('[data-role="alice-reply"]');
+                  if (sRep) {
+                    sRep.textContent = state.alice.lastReply || '';
+                    sRep.className = 'ow-status-line ' + (msg.ok === false ? 'is-err' : 'is-ok');
+                    sRep.style.display = state.alice.lastReply ? 'block' : 'none';
+                  }
+                }
                 break;
               case 'status':
                 showToast(msg.message);
