@@ -1,0 +1,320 @@
+<Window x:Class="DynamicIsland.VkAuthWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        Title="Вход в VK Музыку — OmniWave"
+        Icon="pack://application:,,,/Assets/omniwave.ico"
+        Width="980" Height="740"
+        MinWidth="520" MinHeight="480"
+        WindowStyle="None"
+        AllowsTransparency="False"
+        ResizeMode="CanResize"
+        Background="#111216"
+        WindowStartupLocation="CenterScreen"
+        TextOptions.TextFormattingMode="Ideal"
+        TextOptions.TextRenderingMode="ClearType">
+
+    <WindowChrome.WindowChrome>
+        <WindowChrome CaptionHeight="40"
+                      ResizeBorderThickness="6"
+                      GlassFrameThickness="0"
+                      CornerRadius="0"/>
+    </WindowChrome.WindowChrome>
+
+    <Window.Resources>
+        <Style x:Key="ChromaHdrBtn" TargetType="Button">
+            <Setter Property="Background" Value="#1E2129"/>
+            <Setter Property="Foreground" Value="#E5E7EB"/>
+            <Setter Property="BorderBrush" Value="#2A2E39"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="8,4"/>
+            <Setter Property="Height" Value="26"/>
+            <Setter Property="MinWidth" Value="26"/>
+            <Setter Property="FontSize" Value="11.5"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="WindowChrome.IsHitTestVisibleInChrome" Value="True"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="6"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#282D38"/>
+                                <Setter TargetName="Bd" Property="BorderBrush" Value="#3B4254"/>
+                                <Setter Property="Foreground" Value="#FFFFFF"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#323846"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="ChromaCloseBtn" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#E5E7EB"/>
+            <Setter Property="BorderBrush" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="8,4"/>
+            <Setter Property="Height" Value="26"/>
+            <Setter Property="MinWidth" Value="26"/>
+            <Setter Property="FontSize" Value="11.5"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="WindowChrome.IsHitTestVisibleInChrome" Value="True"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="6"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#3B1D22"/>
+                                <Setter TargetName="Bd" Property="BorderBrush" Value="#6E2B35"/>
+                                <Setter Property="Foreground" Value="#FCA5A5"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#52252D"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="ChromaPrimaryBtn" TargetType="Button">
+            <Setter Property="Background" Value="#2688EB"/>
+            <Setter Property="Foreground" Value="#FFFFFF"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="12,6"/>
+            <Setter Property="FontSize" Value="11.5"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd"
+                                Background="{TemplateBinding Background}"
+                                CornerRadius="6"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#3895F5"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#1E73CB"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="ChromaLinkBtn" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#9CA3AF"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="6,3"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd"
+                                Background="{TemplateBinding Background}"
+                                CornerRadius="5"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#23262F"/>
+                                <Setter Property="Foreground" Value="#F3F4F6"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Border x:Name="RootBorder"
+            Background="#111216"
+            BorderBrush="#2A3447"
+            BorderThickness="1"
+            CornerRadius="8">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="40"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Шапка Chroma Card (40px, перетаскивание через WindowChrome CaptionHeight=40) -->
+            <Border Grid.Row="0"
+                    Background="#181A20"
+                    BorderBrush="#23262F"
+                    BorderThickness="0,0,0,1"
+                    CornerRadius="8,8,0,0">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <StackPanel Grid.Column="0"
+                                Orientation="Horizontal"
+                                VerticalAlignment="Center"
+                                Margin="14,0,8,0">
+                        <Ellipse Width="9" Height="9"
+                                 Fill="#2688EB"
+                                 VerticalAlignment="Center"
+                                 Margin="0,0,8,0"/>
+                        <TextBlock Text="Вход в VK Музыку"
+                                   FontSize="12.5"
+                                   FontWeight="SemiBold"
+                                   Foreground="#F3F4F6"
+                                   VerticalAlignment="Center"/>
+                        <TextBlock Text="• QR-код или логин (Ctrl + колесо для масштаба)"
+                                   FontSize="11"
+                                   Foreground="#6B7280"
+                                   VerticalAlignment="Center"
+                                   TextTrimming="CharacterEllipsis"
+                                   Margin="8,0,0,0"/>
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="1"
+                                Orientation="Horizontal"
+                                VerticalAlignment="Center"
+                                Margin="0,0,8,0">
+                        <Button Content="−"
+                                Style="{StaticResource ChromaHdrBtn}"
+                                ToolTip="Уменьшить масштаб (Ctrl + −)"
+                                Click="ZoomOut_Click"/>
+                        <Button x:Name="BtnZoomReset"
+                                Content="100%"
+                                Style="{StaticResource ChromaHdrBtn}"
+                                MinWidth="44"
+                                Margin="4,0,0,0"
+                                ToolTip="Сбросить масштаб 100% (Ctrl + 0)"
+                                Click="ZoomReset_Click"/>
+                        <Button Content="+"
+                                Style="{StaticResource ChromaHdrBtn}"
+                                Margin="4,0,0,0"
+                                ToolTip="Увеличить масштаб (Ctrl + +)"
+                                Click="ZoomIn_Click"/>
+
+                        <Border Width="1" Height="16" Background="#23262F" Margin="8,0"/>
+
+                        <Button Content="↻"
+                                Style="{StaticResource ChromaHdrBtn}"
+                                ToolTip="Обновить страницу"
+                                Click="Reload_Click"/>
+
+                        <Border Width="1" Height="16" Background="#23262F" Margin="8,0"/>
+
+                        <Button Content="─"
+                                Style="{StaticResource ChromaHdrBtn}"
+                                Background="Transparent"
+                                BorderBrush="Transparent"
+                                ToolTip="Свернуть"
+                                Click="Minimize_Click"/>
+                        <Button x:Name="BtnMaxRestore"
+                                Content="□"
+                                Style="{StaticResource ChromaHdrBtn}"
+                                Background="Transparent"
+                                BorderBrush="Transparent"
+                                Margin="2,0,0,0"
+                                ToolTip="Развернуть / восстановить"
+                                Click="MaxRestore_Click"/>
+                        <Button Content="✕"
+                                Style="{StaticResource ChromaCloseBtn}"
+                                Margin="2,0,0,0"
+                                ToolTip="Закрыть"
+                                Click="Close_Click"/>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- Область браузера без перекрытия QR-кода -->
+            <wv2:WebView2 x:Name="AuthWebView"
+                          Grid.Row="1"
+                          DefaultBackgroundColor="#111216"/>
+
+            <!-- Компактная нижняя панель статуса и ручного ввода -->
+            <Border Grid.Row="2"
+                    Background="#181A20"
+                    BorderBrush="#23262F"
+                    BorderThickness="0,1,0,0"
+                    CornerRadius="0,0,8,8"
+                    Padding="12,6">
+                <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock x:Name="TxtStatus"
+                                   Grid.Column="0"
+                                   Text="Загрузка страницы входа ВКонтакте..."
+                                   Foreground="#9CA3AF"
+                                   FontSize="11.5"
+                                   TextTrimming="CharacterEllipsis"
+                                   VerticalAlignment="Center"/>
+                        <Button x:Name="BtnManualToggle"
+                                Grid.Column="1"
+                                Content="Вставить cookie / токен вручную"
+                                Style="{StaticResource ChromaLinkBtn}"
+                                Margin="10,0,0,0"
+                                Click="ManualToggle_Click"/>
+                    </Grid>
+
+                    <Grid x:Name="ManualPanel" Visibility="Collapsed" Margin="0,8,0,2">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <Border Grid.Column="0"
+                                Background="#0D0E12"
+                                BorderBrush="#23262F"
+                                BorderThickness="1"
+                                CornerRadius="6"
+                                Padding="8,5"
+                                Margin="0,0,8,0">
+                            <TextBox x:Name="TxtManualInput"
+                                     Background="Transparent"
+                                     BorderThickness="0"
+                                     Foreground="#F3F4F6"
+                                     CaretBrush="#2688EB"
+                                     FontSize="12"
+                                     VerticalContentAlignment="Center"/>
+                        </Border>
+                        <Button Grid.Column="1"
+                                Content="Применить"
+                                Style="{StaticResource ChromaPrimaryBtn}"
+                                Click="ApplyManual_Click"/>
+                    </Grid>
+                </StackPanel>
+            </Border>
+        </Grid>
+    </Border>
+</Window>

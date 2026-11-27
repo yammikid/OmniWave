@@ -1146,30 +1146,7 @@ public partial class PlayerWindow : Window
                 break;
 
             case "vk":
-                StartClipboardWatcher("vk");
-                if (bridgeConnected && _browserBridge != null)
-                {
-                    if (!TryOpenUrlInBrowser(_browserBridge.GetConnectUrl("vk")))
-                        return;
-                    PostToWeb("authPending", new { provider = "vk", active = true, busy = true, mode = "bridge" });
-                    PostToWeb("status", new { message = "Синхронизация VK Музыки через Мост браузера..." });
-                }
-                else
-                {
-                    if (!TryOpenUrlInBrowser(VkMusicProvider.OAuthAuthorizeUrl))
-                        return;
-                    PostToWeb("authPending", new
-                    {
-                        provider = "vk",
-                        active = true,
-                        busy = false,
-                        mode = "vk_blank"
-                    });
-                    PostToWeb("status", new
-                    {
-                        message = "Нажмите «Разрешить», затем кликните по адресной строке oauth.vk.ru и нажмите Ctrl+C"
-                    });
-                }
+                _ = OpenVkBrowserAuthWindowAsync();
                 break;
 
             case "spotify":
@@ -1203,6 +1180,52 @@ public partial class PlayerWindow : Window
                 }
                 break;
         }
+    }
+
+    private async Task OpenVkBrowserAuthWindowAsync()
+    {
+        if (_isAuthBusy) return;
+        CancelActiveAuthFlow();
+
+        PostToWeb("authPending", new { provider = "vk", active = false, busy = false });
+        PostToWeb("status", new { message = "Откройте QR-код или войдите в аккаунт VK в отдельном окне..." });
+
+        var (token, cookieHeader, userId, userName) = VkAuthWindow.ShowVkAuth(this, clearSession: !_vk.IsAuthenticated);
+        if (string.IsNullOrWhiteSpace(token) && string.IsNullOrWhiteSpace(cookieHeader))
+        {
+            PostToWeb("status", new { message = "Вход в VK Музыку отменён" });
+            return;
+        }
+
+        _isAuthBusy = true;
+        bool ok = false;
+        string message = "Не удалось выполнить вход в VK Музыку";
+        PostToWeb("status", new { message = "Проверка сессии VK Музыки..." });
+
+        try
+        {
+            (ok, message) = await _vk.VerifyAndSaveSessionAsync(token, cookieHeader, userId, userName);
+            if (ok)
+            {
+                PostToWeb("status", new { message = $"{message}. Загрузка плейлистов ВК..." });
+                var pls = await _vk.FetchUserPlaylistsAsync();
+                _library.ReplaceExternalPlaylists("vk", pls);
+                message = $"{message} • Плейлистов: {pls.Count}, треков: {pls.Sum(p => p.Tracks.Count)}";
+            }
+        }
+        catch (Exception ex)
+        {
+            ok = false;
+            message = $"Ошибка авторизации VK: {ex.Message}";
+        }
+        finally
+        {
+            _isAuthBusy = false;
+        }
+
+        PushAccountsUpdate();
+        PostToWeb("authResult", new { provider = "vk", ok, message });
+        PostToWeb("status", new { message });
     }
 
     private bool TryOpenUrlInBrowser(string url)

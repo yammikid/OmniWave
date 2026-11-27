@@ -2282,7 +2282,7 @@ public static class PlayerChromaCardHtml
                   '<span class="ow-dot-lg" style="background:var(--src-vk)"></span>' +
                   '<div style="min-width:0">' +
                     '<div style="font-size:12px;color:#E5E7EB">VK Музыка</div>' +
-                    '<div class="ow-bridge-sub truncate">' + esc(acc.vkConnected ? (acc.vkUserName || 'Подключён') : 'Вход OAuth через ваш браузер') + '</div>' +
+                    '<div class="ow-bridge-sub truncate">' + esc(acc.vkConnected ? (acc.vkUserName || 'Подключён') : 'Отдельное окно браузера (QR / логин)') + '</div>' +
                   '</div>' +
                 '</div>' +
                 '<div style="display:flex;align-items:center;gap:4px;flex-shrink:0">' +
@@ -3158,6 +3158,21 @@ public static class PlayerChromaCardHtml
           const authLogin = e.target.closest('[data-auth-login]');
           if (authLogin) {
             const prov = authLogin.getAttribute('data-auth-login');
+            if (prov === 'vk') {
+              state.authPanel = {
+                provider: '',
+                mode: '',
+                userCode: '',
+                verificationUrl: '',
+                input: '',
+                busy: false,
+                statusText: '',
+                statusOk: null
+              };
+              refreshTabBodyOnly();
+              sendToHost('auth.openBrowser', { provider: 'vk' });
+              return;
+            }
             state.authPanel = {
               provider: prov,
               mode: '',

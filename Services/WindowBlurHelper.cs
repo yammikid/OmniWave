@@ -155,6 +155,17 @@ public static class WindowBlurHelper
     }
 
     /// <summary>
+    /// Снимает кастомный регион скругления (например, при разворачивании окна на весь экран на Windows 10).
+    /// </summary>
+    public static void ClearRoundedRegion(Window window)
+    {
+        if (IsWindows11OrLater) return;
+        var hwnd = new WindowInteropHelper(window).Handle;
+        if (hwnd == IntPtr.Zero) return;
+        try { _ = SetWindowRgn(hwnd, IntPtr.Zero, true); } catch { }
+    }
+
+    /// <summary>
     /// Настраивает общую прозрачность окна (0.75–1.0) через Win32 WS_EX_LAYERED / LWA_ALPHA
     /// для окон с AllowsTransparency="False" без использования DWM blur.
     /// </summary>
