@@ -107,6 +107,8 @@ public partial class PlayerWindow : Window
     private DateTime _clipboardWatchDeadlineUtc = DateTime.MinValue;
     private bool _clipboardWatchBusy;
     private bool _isAuthBusy;
+    private bool _vkClearedSession;
+    private bool _youtubeClearedSession;
     private bool _systemCheckInitialized;
     private TimeSpan _lastCpuTime;
     private DateTime _lastCpuSampleUtc = DateTime.UtcNow;
@@ -1169,7 +1171,7 @@ public partial class PlayerWindow : Window
             res = await VkAuthWindow.ShowAuthAsync(
                 this,
                 BrowserAuthMode.Vk,
-                clearSession: !_vk.IsAuthenticated,
+                clearSession: _vkClearedSession,
                 onCreated: w => _activeAuthWindow = w);
         }
         finally
@@ -1193,6 +1195,7 @@ public partial class PlayerWindow : Window
             (ok, message) = await _vk.VerifyAndSaveSessionAsync(res.Token, res.CookieHeader, res.UserId, res.UserName);
             if (ok)
             {
+                _vkClearedSession = false;
                 PostToWeb("status", new { message = $"{message}. Загрузка плейлистов ВК..." });
                 var pls = await _vk.FetchUserPlaylistsAsync();
                 _library.ReplaceExternalPlaylists("vk", pls);
@@ -1233,7 +1236,7 @@ public partial class PlayerWindow : Window
             res = await VkAuthWindow.ShowAuthAsync(
                 this,
                 BrowserAuthMode.YouTube,
-                clearSession: !YtDlpMusicProvider.HasYouTubeCookies,
+                clearSession: _youtubeClearedSession,
                 onCreated: w => _activeAuthWindow = w);
         }
         finally
@@ -1247,6 +1250,7 @@ public partial class PlayerWindow : Window
             return;
         }
 
+        _youtubeClearedSession = false;
         PushAccountsUpdate();
         PostToWeb("authResult", new { provider = "youtube", ok = true, message = "YouTube cookies сохранены" });
         PostToWeb("status", new { message = "YouTube cookies подключены" });
@@ -2432,6 +2436,7 @@ public partial class PlayerWindow : Window
                 PostToWeb("status", new { message = "Вы вышли из аккаунта Яндекс Музыки." });
                 break;
             case "vk":
+                _vkClearedSession = true;
                 _vk.Disconnect();
                 _library.RemoveExternalPlaylists("vk");
                 PostToWeb("status", new { message = "Вы вышли из аккаунта ВКонтакте." });
@@ -2442,6 +2447,7 @@ public partial class PlayerWindow : Window
                 PostToWeb("status", new { message = "Вы вышли из аккаунта Spotify." });
                 break;
             case "youtube":
+                _youtubeClearedSession = true;
                 YtDlpMusicProvider.ClearYouTubeCookies();
                 PostToWeb("status", new { message = "YouTube cookies удалены." });
                 break;
