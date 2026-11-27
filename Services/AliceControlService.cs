@@ -42,6 +42,13 @@ public enum AliceCommandType
     VkMix,
     PlayFavorites,
     ShuffleFavorites,
+    PlayPlaylist,
+    PlayRadio,
+    SetSleepTimer,
+    CancelSleepTimer,
+    WhatTime,
+    ScaleWindow,
+    RepeatLastReply,
     SearchAndPlay
 }
 
@@ -89,26 +96,106 @@ public static class AliceCommandParser
 
     private static readonly Dictionary<string, int> RussianNumbers = new(StringComparer.Ordinal)
     {
-        ["ноль"] = 0, ["нуль"] = 0, ["минимум"] = 10, ["один"] = 1, ["одна"] = 1,
+        ["ноль"] = 0, ["нуль"] = 0, ["минимум"] = 10, ["один"] = 1, ["одна"] = 1, ["одну"] = 1,
         ["два"] = 2, ["две"] = 2, ["три"] = 3, ["четыре"] = 4, ["пять"] = 5,
         ["шесть"] = 6, ["семь"] = 7, ["восемь"] = 8, ["девять"] = 9, ["десять"] = 10,
-        ["пятнадцать"] = 15, ["двадцать"] = 20, ["двадцать пять"] = 25, ["тридцать"] = 30,
+        ["пятнадцать"] = 15, ["двадцать"] = 20, ["тридцать"] = 30,
         ["сорок"] = 40, ["пятьдесят"] = 50, ["половина"] = 50, ["половину"] = 50, ["средняя"] = 50, ["среднюю"] = 50,
         ["шестьдесят"] = 60, ["семьдесят"] = 70, ["восемьдесят"] = 80, ["девяносто"] = 90,
         ["сто"] = 100, ["максимум"] = 100, ["полная"] = 100, ["полную"] = 100, ["на полную"] = 100
     };
 
-    public static AliceParsedCommand Parse(string? rawPhrase)
+    private static readonly Dictionary<string, int> RussianTens = new(StringComparer.Ordinal)
     {
-        string text = NormalizePhrase(rawPhrase);
+        ["двадцать"] = 20, ["тридцать"] = 30, ["сорок"] = 40, ["пятьдесят"] = 50,
+        ["шестьдесят"] = 60, ["семьдесят"] = 70, ["восемьдесят"] = 80, ["девяносто"] = 90
+    };
+
+    private static readonly Dictionary<string, int> RussianUnits = new(StringComparer.Ordinal)
+    {
+        ["один"] = 1, ["одна"] = 1, ["два"] = 2, ["две"] = 2, ["три"] = 3,
+        ["четыре"] = 4, ["пять"] = 5, ["шесть"] = 6, ["семь"] = 7, ["восемь"] = 8, ["девять"] = 9
+    };
+
+    public static bool IsFastControlCommand(AliceCommandType type)
+        => type is not (AliceCommandType.SearchAndPlay or AliceCommandType.PlayPlaylist or AliceCommandType.PlayRadio);
+
+    public static IReadOnlyList<string> ExpandWakeAliases(string? wakeWordsCsv)
+    {
+        var list = new HashSet<string>(StringComparer.Ordinal);
+        if (!string.IsNullOrWhiteSpace(wakeWordsCsv))
+        {
+            foreach (var raw in wakeWordsCsv.Split(new[] { ',', ';', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var w = PunctRegex.Replace(raw.Trim().ToLowerInvariant().Replace('ё', 'е'), " ");
+                w = SpacesRegex.Replace(w, " ").Trim();
+                if (w.Length < 2) continue;
+                list.Add(w);
+
+                if (w == "омни")
+                {
+                    list.Add("омне");
+                    list.Add("оми");
+                    list.Add("умни");
+                    list.Add("омнивейв");
+                }
+                else if (w == "волна")
+                {
+                    list.Add("волны");
+                    list.Add("волну");
+                }
+                else if (w == "алиса")
+                {
+                    list.Add("алисы");
+                    list.Add("алису");
+                }
+            }
+        }
+        return list.OrderByDescending(x => x.Length).ToList();
+    }
+
+    public static string StripWakeWords(string? raw, IEnumerable<string>? customWakeWords = null)
+        => NormalizePhrase(raw, customWakeWords);
+
+    public static AliceParsedCommand Parse(string? rawPhrase, IEnumerable<string>? customWakeWords = null)
+    {
+        string text = NormalizePhrase(rawPhrase, customWakeWords);
         if (string.IsNullOrWhiteSpace(text))
             return new(AliceCommandType.Help);
 
         if (MatchesAny(text, "привет", "помощь", "команды", "что ты умеешь", "что умеешь", "help"))
             return new(AliceCommandType.Help);
 
+        if (MatchesAny(text, "повтори", "повтори ответ", "что ты сказал", "что ты сказала", "еще раз"))
+            return new(AliceCommandType.RepeatLastReply);
+
+        if (MatchesAny(text, "сколько времени", "который час", "какое время", "время сейчас", "сколько время", "время"))
+            return new(AliceCommandType.WhatTime);
+
         if (MatchesAny(text, "что сейчас играет", "что играет", "какой трек", "что за трек", "что за песня", "кто поет", "статус", "status", "now playing"))
             return new(AliceCommandType.Status);
+
+        if (MatchesAny(text, "отмени таймер", "отмени таймер сна", "отменить таймер", "выключи таймер", "выключи таймер сна", "убери таймер", "сбрось таймер"))
+            return new(AliceCommandType.CancelSleepTimer);
+
+        if (text.Contains("таймер", StringComparison.Ordinal) ||
+            text.StartsWith("выключи музыку через", StringComparison.Ordinal) ||
+            text.StartsWith("выключи через", StringComparison.Ordinal) ||
+            text.StartsWith("останови через", StringComparison.Ordinal) ||
+            text.StartsWith("останови музыку через", StringComparison.Ordinal))
+        {
+            int mins = ExtractSleepMinutes(text, defaultMinutes: 15);
+            return new(AliceCommandType.SetSleepTimer, NumberValue: mins);
+        }
+
+        if (MatchesAny(text, "обычный размер окна", "сбрось размер окна", "размер окна 100", "масштаб 100"))
+            return new(AliceCommandType.ScaleWindow, NumberValue: 100, BoolValue: true);
+
+        if (MatchesAny(text, "увеличь окно", "сделай окно больше", "больше окно", "крупнее окно"))
+            return new(AliceCommandType.ScaleWindow, NumberValue: 10, BoolValue: false);
+
+        if (MatchesAny(text, "уменьши окно", "сделай окно меньше", "меньше окно"))
+            return new(AliceCommandType.ScaleWindow, NumberValue: -10, BoolValue: false);
 
         if (MatchesAny(text, "перемешай избранное", "перемешать избранное", "избранное вперемешку", "случайное избранное", "shuffle favorites"))
             return new(AliceCommandType.ShuffleFavorites);
@@ -121,6 +208,15 @@ public static class AliceCommandParser
 
         if (MatchesAny(text, "вк микс", "vk микс", "vk mix", "микс вк", "включи вк микс", "запусти вк микс", "включи микс"))
             return new(AliceCommandType.VkMix);
+
+        if (TryExtractAfterKeyword(text, out var playlistName, "включи плейлист", "запусти плейлист", "поставь плейлист", "открой плейлист", "плейлист"))
+            return new(AliceCommandType.PlayPlaylist, Query: playlistName);
+
+        if (MatchesAny(text, "включи радио", "запусти радио", "поставь радио", "радио"))
+            return new(AliceCommandType.PlayRadio, Query: "");
+
+        if (TryExtractAfterKeyword(text, out var radioQuery, "включи радио", "запусти радио", "поставь радио", "найди радио", "радио"))
+            return new(AliceCommandType.PlayRadio, Query: radioQuery);
 
         if (MatchesAny(text, "без звука", "выключи звук", "отключи звук", "убери звук", "звук выкл", "мут", "замуть", "mute"))
             return new(AliceCommandType.Mute);
@@ -204,10 +300,10 @@ public static class AliceCommandParser
         if (MatchesAny(text, "следующий", "следующий трек", "следующая песня", "дальше", "пропусти", "пропусти трек", "скип", "next", "skip"))
             return new(AliceCommandType.Next);
 
-        if (MatchesAny(text, "предыдущий", "предыдущий трек", "предыдущая песня", "назад", "верни", "верни трек", "prev", "previous"))
+        if (MatchesAny(text, "предыдущий", "предыдущий трек", "предыдущая песня", "назад", "верни", "верни трек", "предыдущая", "prev", "previous"))
             return new(AliceCommandType.Prev);
 
-        if (MatchesAny(text, "пауза", "поставь на паузу", "стоп", "останови", "останови музыку", "приостанови", "выключи музыку", "тишина", "pause", "stop"))
+        if (MatchesAny(text, "пауза", "поставь на паузу", "стоп", "останови", "останови музыку", "приостанови", "выключи музыку", "тишина", "хватит", "pause", "stop"))
             return new(AliceCommandType.Pause);
 
         if (MatchesAny(text, "продолжи", "продолжить", "играй", "пуск", "возобнови", "включи музыку", "включить музыку", "play", "resume"))
@@ -220,18 +316,22 @@ public static class AliceCommandParser
         return new(AliceCommandType.SearchAndPlay, Query: searchQuery);
     }
 
-    private static string NormalizePhrase(string? raw)
+    private static string NormalizePhrase(string? raw, IEnumerable<string>? customWakeWords)
     {
         if (string.IsNullOrWhiteSpace(raw)) return "";
         string s = raw.Trim().ToLowerInvariant().Replace('ё', 'е');
         s = PunctRegex.Replace(s, " ");
         s = SpacesRegex.Replace(s, " ").Trim();
 
+        List<string> prefixes = customWakeWords != null
+            ? customWakeWords.Concat(WakePrefixes).Where(w => !string.IsNullOrWhiteSpace(w)).Distinct(StringComparer.Ordinal).OrderByDescending(w => w.Length).ToList()
+            : WakePrefixes.ToList();
+
         bool changed = true;
         while (changed && s.Length > 0)
         {
             changed = false;
-            foreach (var p in WakePrefixes)
+            foreach (var p in prefixes)
             {
                 if (s == p) return "";
                 if (s.StartsWith(p + " ", StringComparison.Ordinal))
@@ -250,6 +350,37 @@ public static class AliceCommandParser
         }
 
         return s;
+    }
+
+    private static bool TryExtractAfterKeyword(string text, out string extracted, params string[] prefixes)
+    {
+        foreach (var p in prefixes)
+        {
+            if (text.StartsWith(p + " ", StringComparison.Ordinal))
+            {
+                extracted = text[(p.Length + 1)..].Trim();
+                if (!string.IsNullOrWhiteSpace(extracted))
+                    return true;
+            }
+        }
+        extracted = "";
+        return false;
+    }
+
+    private static int ExtractSleepMinutes(string text, int defaultMinutes)
+    {
+        if (text.Contains("полчаса", StringComparison.Ordinal) || text.Contains("пол часа", StringComparison.Ordinal))
+            return 30;
+        if (text.Contains("полтора часа", StringComparison.Ordinal))
+            return 90;
+
+        bool isHours = text.Contains("час", StringComparison.Ordinal);
+        if (ExtractNumber0To100(text, out int num))
+        {
+            int mins = isHours ? num * 60 : num;
+            return Math.Clamp(mins, 1, 480);
+        }
+        return isHours ? 60 : defaultMinutes;
     }
 
     private static string StripSearchVerbPrefix(string text)
@@ -306,11 +437,21 @@ public static class AliceCommandParser
     private static int ExtractSeconds(string text, int defaultSec)
     {
         var m = DigitsRegex.Match(text);
-        if (!m.Success || !int.TryParse(m.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int val))
-            return defaultSec;
-        if (text.Contains("мин", StringComparison.Ordinal))
-            val *= 60;
-        return Math.Clamp(val, 1, 600);
+        if (m.Success && int.TryParse(m.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int val))
+        {
+            if (text.Contains("мин", StringComparison.Ordinal))
+                val *= 60;
+            return Math.Clamp(val, 1, 600);
+        }
+
+        if (ExtractNumber0To100(text, out int wordVal) && wordVal > 0)
+        {
+            if (text.Contains("мин", StringComparison.Ordinal))
+                wordVal *= 60;
+            return Math.Clamp(wordVal, 1, 600);
+        }
+
+        return defaultSec;
     }
 
     private static bool ExtractNumber0To100(string text, out int value)
@@ -318,6 +459,17 @@ public static class AliceCommandParser
         var m = DigitsRegex.Match(text);
         if (m.Success && int.TryParse(m.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out value))
             return true;
+
+        var words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        for (int i = 0; i < words.Length - 1; i++)
+        {
+            if (RussianTens.TryGetValue(words[i], out int tens) &&
+                RussianUnits.TryGetValue(words[i + 1], out int unit))
+            {
+                value = tens + unit;
+                return true;
+            }
+        }
 
         foreach (var kv in RussianNumbers.OrderByDescending(k => k.Key.Length))
         {

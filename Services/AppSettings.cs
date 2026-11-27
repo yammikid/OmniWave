@@ -61,6 +61,16 @@ public class AppSettings
     public int AliceApiPort { get; set; } = 47510;
     public string AliceApiToken { get; set; } = "";
 
+    public bool VoiceWakeWordEnabled { get; set; }
+    public string VoiceWakeWords { get; set; } = "омни, волна";
+    public bool VoiceWhisperEnabled { get; set; } = true;
+    public string VoiceWhisperModel { get; set; } = "small-q5";
+    public bool VoiceTtsEnabled { get; set; } = true;
+    public string VoiceTtsVoiceName { get; set; } = "";
+    public bool VoiceDuckMusic { get; set; } = true;
+    public bool VoiceHotkeyEnabled { get; set; } = true;
+    public int VoiceInputDeviceIndex { get; set; } = -1;
+
     public void Normalize()
     {
         if (PlayerWindowLeft.HasValue && (double.IsNaN(PlayerWindowLeft.Value) || double.IsInfinity(PlayerWindowLeft.Value)))
@@ -110,6 +120,14 @@ public class AppSettings
         AliceApiToken = (AliceApiToken ?? "").Trim();
         if (string.IsNullOrWhiteSpace(AliceApiToken))
             AliceApiToken = GenerateAliceToken();
+
+        VoiceWakeWords = (VoiceWakeWords ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(VoiceWakeWords))
+            VoiceWakeWords = "омни, волна";
+        var wModel = (VoiceWhisperModel ?? "").Trim().ToLowerInvariant();
+        VoiceWhisperModel = wModel == "base" ? "base" : "small-q5";
+        VoiceTtsVoiceName ??= "";
+        VoiceInputDeviceIndex = Math.Max(-1, VoiceInputDeviceIndex);
     }
 
     public static string GenerateAliceToken()

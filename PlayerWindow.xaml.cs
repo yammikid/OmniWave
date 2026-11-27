@@ -60,10 +60,16 @@ public partial class PlayerWindow : Window
     private readonly DispatcherTimer _edgeHoverTimer;
     private readonly DispatcherTimer _clipboardWatchTimer;
     private readonly AppTelemetryService _telemetry = new();
+    private readonly VoiceModelManager _voiceModels = new();
+    private readonly VoiceFeedbackService _voiceFeedback = new();
 
     private HwndSource? _hwndSource;
     private VkAuthWindow? _activeAuthWindow;
     private AliceHttpServer? _aliceServer;
+    private VoiceAssistantService _voiceAssistant = null!;
+    private DispatcherTimer? _sleepTimer;
+    private DateTime _sleepTimerEndsUtc;
+    private int _sleepTimerMinutes;
     private CancellationTokenSource? _searchCts;
     private CancellationTokenSource? _proxyTestCts;
     private CancellationTokenSource? _authFlowCts;
@@ -180,6 +186,19 @@ public partial class PlayerWindow : Window
         _aliceServer = new AliceHttpServer(HandleAliceHttpRequestAsync);
         ConfigureAliceServer();
 
+        _voiceAssistant = new VoiceAssistantService(_voiceModels, _voiceFeedback, ExecuteAliceCommandAsync);
+        _voiceAssistant.DuckingRequested += ducked => _player.SetDucking(ducked);
+        _voiceAssistant.StatusChanged += status => Dispatcher.BeginInvoke(() => PostVoiceStateUpdate(status));
+        _voiceAssistant.AudioLevelChanged += (lvl, live) => Dispatcher.BeginInvoke(() =>
+        {
+            if (!_isUiSuspended && _webViewReady)
+                PostToWeb("voiceLevel", new { audioLevel = Math.Round(lvl, 3), liveTranscript = live });
+        });
+        _voiceAssistant.ApplySettings(_settings.Current);
+
+        _sleepTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+        _sleepTimer.Tick += async (_, _) => await OnSleepTimerTickAsync();
+
         PreviewKeyDown += PlayerWindow_PreviewKeyDown;
         Activated += PlayerWindow_Activated;
         Loaded += async (_, _) => await InitWebViewAsync();
@@ -256,11 +275,13 @@ public partial class PlayerWindow : Window
     {
         ApplyWindowSettingsFromConfig();
         ConfigureAliceServer();
+        _voiceAssistant?.ApplySettings(_settings.Current);
         if (!_isUiSuspended)
         {
             PushAccountsUpdate();
             PushWindowSettingsUpdate();
             PushAliceStateUpdate();
+            PushVoiceStateUpdate();
         }
     });
 
@@ -359,6 +380,7 @@ public partial class PlayerWindow : Window
         _edgeAnimTimer.Stop();
         _edgeHoverTimer.Stop();
         _clipboardWatchTimer.Stop();
+        _sleepTimer?.Stop();
         Activated -= PlayerWindow_Activated;
 
         _player.PositionChanged -= OnPositionChanged;
@@ -378,6 +400,8 @@ public partial class PlayerWindow : Window
 
         try { _authFlowCts?.Cancel(); _authFlowCts?.Dispose(); } catch { }
         try { _voiceCts?.Cancel(); _voiceCts?.Dispose(); } catch { }
+        try { _voiceAssistant?.Dispose(); } catch { }
+        try { _voiceFeedback.Dispose(); } catch { }
         try { _aliceServer?.Dispose(); _aliceServer = null; } catch { }
         try { _activeAuthWindow?.Close(); _activeAuthWindow = null; } catch { }
         try { _searchCts?.Cancel(); _searchCts?.Dispose(); } catch { }
@@ -2371,6 +2395,42 @@ public partial class PlayerWindow : Window
                 PostToWeb("status", new { message = label });
                 break;
             }
+
+            case "voice.toggle":
+                await StartVoiceListeningAsync();
+                break;
+
+            case "voice.cancel":
+                _voiceAssistant?.CancelActiveListening();
+                break;
+
+            case "voice.installModels":
+            {
+                var mode = ReadStr(root, "mode") ?? "hybrid";
+                _ = InstallVoiceModelsForWebAsync(mode);
+                break;
+            }
+
+            case "voice.cancelInstall":
+                _voiceModels.CancelDownload();
+                break;
+
+            case "voice.deleteModels":
+                if (_voiceAssistant != null)
+                {
+                    await _voiceAssistant.DeleteModelsAsync();
+                    PushVoiceStateUpdate();
+                    PostToWeb("status", new { message = "Голосовые модели удалены" });
+                }
+                break;
+
+            case "voice.saveSettings":
+                SaveVoiceSettingsFromWeb(root);
+                break;
+
+            case "voice.testTts":
+                _ = TestVoiceTtsAsync();
+                break;
         }
     }
 
@@ -2789,6 +2849,7 @@ public partial class PlayerWindow : Window
             shuffle = _player.ShuffleEnabled,
             windowSettings = BuildWindowSettingsDto(),
             alice = BuildAliceStateDto(),
+            voice = BuildVoiceStateDto(),
             proxy = BuildProxyDto(_settings.Current),
             youtubeCookiesConnected = YtDlpMusicProvider.HasYouTubeCookies,
             externalSource = !_controller.IsLocalActive ? _controller.CurrentMediaState?.ActiveBrand : null,
@@ -2843,6 +2904,7 @@ public partial class PlayerWindow : Window
             compact = _isCompactMode,
             windowSettings = BuildWindowSettingsDto(),
             alice = BuildAliceStateDto(),
+            voice = BuildVoiceStateDto(),
             proxy = BuildProxyDto(s),
             telemetry = SampleTelemetryDto(),
             externalSource = !_controller.IsLocalActive ? _controller.CurrentMediaState?.ActiveBrand : null,
@@ -4549,7 +4611,9 @@ public partial class PlayerWindow : Window
 
     private async Task<AliceCommandResult> ExecuteAliceCommandCoreAsync(string phrase)
     {
-        var parsed = AliceCommandParser.Parse(phrase);
+        var parsed = AliceCommandParser.Parse(
+            phrase,
+            AliceCommandParser.ExpandWakeAliases(_settings.Current.VoiceWakeWords));
         string reply;
         bool ok = true;
         string action = parsed.Type.ToString();
@@ -4557,8 +4621,90 @@ public partial class PlayerWindow : Window
         switch (parsed.Type)
         {
             case AliceCommandType.Help:
-                reply = "Доступны команды: «включи …», «пауза», «следующий», «громкость 50», «громче», «тише», «моя волна», «вк микс», «лайк», «перемешай», «что играет».";
+                reply = "Скажите: «включи …», «включи плейлист …», «включи радио», «пауза», «следующий», «громкость 50», «моя волна», «вк микс», «лайк», «таймер сна 30 минут», «сколько времени».";
                 break;
+
+            case AliceCommandType.WhatTime:
+                reply = $"Сейчас {DateTime.Now:HH:mm}";
+                break;
+
+            case AliceCommandType.RepeatLastReply:
+                reply = !string.IsNullOrWhiteSpace(_lastAliceReply)
+                    ? _lastAliceReply
+                    : "Пока нечего повторять";
+                break;
+
+            case AliceCommandType.CancelSleepTimer:
+                _sleepTimer?.Stop();
+                _sleepTimerMinutes = 0;
+                _sleepTimerEndsUtc = DateTime.MinValue;
+                PushVoiceStateUpdate();
+                reply = "Таймер сна отменён";
+                break;
+
+            case AliceCommandType.SetSleepTimer:
+            {
+                int mins = Math.Clamp(parsed.NumberValue > 0 ? parsed.NumberValue : 15, 1, 480);
+                _sleepTimerMinutes = mins;
+                _sleepTimerEndsUtc = DateTime.UtcNow.AddMinutes(mins);
+                _sleepTimer?.Start();
+                PushVoiceStateUpdate();
+                reply = $"Таймер сна установлен на {mins} мин";
+                break;
+            }
+
+            case AliceCommandType.ScaleWindow:
+            {
+                int nextScale = parsed.BoolValue
+                    ? parsed.NumberValue
+                    : _settings.Current.WindowScalePercent + parsed.NumberValue;
+                SetWindowScale(nextScale, save: true);
+                reply = $"Размер окна: {_settings.Current.WindowScalePercent}%";
+                break;
+            }
+
+            case AliceCommandType.PlayPlaylist:
+            {
+                string plQuery = parsed.Query ?? "";
+                var allPls = _library.GetPlaylists();
+                var matched = FindBestPlaylistMatch(allPls, plQuery);
+                if (matched == null)
+                {
+                    ok = false;
+                    reply = $"Плейлист «{plQuery}» не найден";
+                }
+                else if (matched.Tracks.Count == 0)
+                {
+                    ok = false;
+                    reply = $"Плейлист «{matched.Name}» пуст";
+                }
+                else
+                {
+                    await _player.PlayFromQueueAsync(matched.Tracks, 0);
+                    reply = $"Включаю плейлист «{matched.Name}»";
+                }
+                break;
+            }
+
+            case AliceCommandType.PlayRadio:
+            {
+                _activeSearchFilter = "radio";
+                await PerformSearchAsync(parsed.Query ?? "");
+                var firstRadio = _currentResults.FirstOrDefault();
+                if (firstRadio != null)
+                {
+                    await _player.PlayFromQueueAsync(_currentResults, 0);
+                    reply = $"Включаю радио: {firstRadio.Title}";
+                }
+                else
+                {
+                    ok = false;
+                    reply = string.IsNullOrWhiteSpace(parsed.Query)
+                        ? "Не удалось загрузить радиостанции"
+                        : $"Радиостанция «{parsed.Query}» не найдена";
+                }
+                break;
+            }
 
             case AliceCommandType.Status:
                 reply = DescribeNowPlayingReply();
@@ -4866,8 +5012,177 @@ public partial class PlayerWindow : Window
         PostToWeb("status", new { message = reply });
     }
 
+    public void TriggerVoiceAssistantFromHotkey()
+    {
+        _ = StartVoiceListeningAsync();
+    }
+
+    private object BuildVoiceStateDto(VoiceAssistantStatus? overrideStatus = null)
+    {
+        var s = _settings.Current;
+        var st = overrideStatus ?? _voiceAssistant?.GetStatusSnapshot();
+        int sleepRemainingMin = (_sleepTimer?.IsEnabled == true && _sleepTimerEndsUtc > DateTime.UtcNow)
+            ? Math.Max(1, (int)Math.Ceiling((_sleepTimerEndsUtc - DateTime.UtcNow).TotalMinutes))
+            : 0;
+
+        return new
+        {
+            state = st?.StateKey ?? "notInstalled",
+            statusText = st?.StatusText ?? "Установите модели распознавания",
+            liveTranscript = st?.LiveTranscript ?? "",
+            lastCommand = st?.LastCommand ?? "",
+            lastReply = st?.LastReply ?? "",
+            audioLevel = st != null ? Math.Round(st.AudioLevel, 3) : 0.0,
+            voskReady = st?.VoskReady ?? _voiceModels.IsVoskReady(),
+            whisperReady = st?.WhisperReady ?? _voiceModels.IsWhisperReady(s.VoiceWhisperModel),
+            whisperRunning = st?.WhisperRunning ?? false,
+            downloadBusy = st?.DownloadBusy ?? false,
+            downloadPercent = st?.DownloadPercent ?? 0,
+            downloadStage = st?.DownloadStage ?? "",
+            downloadMb = st?.DownloadMb ?? 0,
+            downloadTotalMb = st?.DownloadTotalMb ?? 0,
+            diskUsageMb = st?.DiskUsageMb ?? _voiceModels.GetTotalDiskUsageMb(),
+            wakeWordEnabled = s.VoiceWakeWordEnabled,
+            wakeWords = s.VoiceWakeWords,
+            whisperEnabled = s.VoiceWhisperEnabled,
+            whisperModel = s.VoiceWhisperModel,
+            ttsEnabled = s.VoiceTtsEnabled,
+            ttsVoiceName = s.VoiceTtsVoiceName,
+            duckMusic = s.VoiceDuckMusic,
+            hotkeyEnabled = s.VoiceHotkeyEnabled,
+            inputDeviceIndex = s.VoiceInputDeviceIndex,
+            activeEngineLabel = st?.ActiveEngineLabel ?? "Модели не установлены",
+            sleepTimerMinutes = sleepRemainingMin,
+            russianVoices = VoiceFeedbackService.GetRussianVoices().Select(v => new
+            {
+                id = v.Id,
+                displayName = v.DisplayName,
+                shortName = v.ShortName
+            }).ToList(),
+            inputDevices = MicrophoneCaptureService.GetInputDevices().Select(d => new
+            {
+                index = d.DeviceIndex,
+                name = d.Name
+            }).ToList()
+        };
+    }
+
+    private void PushVoiceStateUpdate()
+    {
+        PostVoiceStateUpdate(_voiceAssistant?.GetStatusSnapshot());
+    }
+
+    private void PostVoiceStateUpdate(VoiceAssistantStatus? status)
+    {
+        if (_isUiSuspended || !_webViewReady) return;
+        PostToWeb("voiceState", BuildVoiceStateDto(status));
+    }
+
+    private void SaveVoiceSettingsFromWeb(JsonElement root)
+    {
+        bool wakeOn = root.TryGetProperty("wakeWordEnabled", out var wkEl)
+            ? wkEl.ValueKind == JsonValueKind.True
+            : _settings.Current.VoiceWakeWordEnabled;
+        string wakeWords = ReadStr(root, "wakeWords") ?? _settings.Current.VoiceWakeWords;
+        bool whisperOn = !root.TryGetProperty("whisperEnabled", out var whEl) || whEl.ValueKind != JsonValueKind.False;
+        string whisperModel = ReadStr(root, "whisperModel") ?? _settings.Current.VoiceWhisperModel;
+        bool ttsOn = !root.TryGetProperty("ttsEnabled", out var ttEl) || ttEl.ValueKind != JsonValueKind.False;
+        string ttsVoice = ReadStr(root, "ttsVoiceName") ?? _settings.Current.VoiceTtsVoiceName;
+        bool duck = !root.TryGetProperty("duckMusic", out var dkEl) || dkEl.ValueKind != JsonValueKind.False;
+        bool hotkeyOn = !root.TryGetProperty("hotkeyEnabled", out var hkEl) || hkEl.ValueKind != JsonValueKind.False;
+        int devIdx = ReadInt(root, "inputDeviceIndex", _settings.Current.VoiceInputDeviceIndex);
+
+        _isSettingsApplying = true;
+        try
+        {
+            _settings.Update(s =>
+            {
+                s.VoiceWakeWordEnabled = wakeOn;
+                s.VoiceWakeWords = wakeWords;
+                s.VoiceWhisperEnabled = whisperOn;
+                s.VoiceWhisperModel = whisperModel;
+                s.VoiceTtsEnabled = ttsOn;
+                s.VoiceTtsVoiceName = ttsVoice;
+                s.VoiceDuckMusic = duck;
+                s.VoiceHotkeyEnabled = hotkeyOn;
+                s.VoiceInputDeviceIndex = devIdx;
+            }, notify: true);
+        }
+        finally
+        {
+            _isSettingsApplying = false;
+        }
+
+        _voiceAssistant?.ApplySettings(_settings.Current);
+        PushVoiceStateUpdate();
+    }
+
+    private async Task InstallVoiceModelsForWebAsync(string mode)
+    {
+        if (_voiceAssistant == null) return;
+        PostToWeb("status", new { message = "Начинаю установку офлайн-моделей речи..." });
+        var res = await _voiceAssistant.InstallModelsAsync(mode);
+        PushVoiceStateUpdate();
+        PostToWeb("status", new { message = res.Message });
+    }
+
+    private async Task TestVoiceTtsAsync()
+    {
+        bool duck = _settings.Current.VoiceDuckMusic;
+        string voice = _settings.Current.VoiceTtsVoiceName;
+        if (duck) _player.SetDucking(true);
+        try
+        {
+            await _voiceFeedback.SpeakAsync("Привет! Голосовой помощник OmniWave готов к работе.", voice);
+        }
+        finally
+        {
+            if (duck) _player.SetDucking(false);
+        }
+    }
+
+    private async Task OnSleepTimerTickAsync()
+    {
+        if (_sleepTimer == null || !_sleepTimer.IsEnabled) return;
+        if (DateTime.UtcNow < _sleepTimerEndsUtc) return;
+
+        _sleepTimer.Stop();
+        _sleepTimerMinutes = 0;
+        _sleepTimerEndsUtc = DateTime.MinValue;
+
+        if (_controller.IsLocalActive || (_player.CurrentTrack != null && _externalActiveTrack == null))
+            _player.Pause();
+        else
+            await _controller.SendCommandAsync("pause");
+
+        PushVoiceStateUpdate();
+        PostToWeb("status", new { message = "Таймер сна: воспроизведение остановлено" });
+    }
+
+    private static UserPlaylist? FindBestPlaylistMatch(List<UserPlaylist> playlists, string rawQuery)
+    {
+        if (playlists.Count == 0 || string.IsNullOrWhiteSpace(rawQuery)) return null;
+        string normQ = rawQuery.Trim().ToLowerInvariant().Replace('ё', 'е');
+
+        var exact = playlists.FirstOrDefault(p =>
+            string.Equals(p.Name.Trim().ToLowerInvariant().Replace('ё', 'е'), normQ, StringComparison.Ordinal));
+        if (exact != null) return exact;
+
+        var contains = playlists.FirstOrDefault(p =>
+            p.Name.ToLowerInvariant().Replace('ё', 'е').Contains(normQ, StringComparison.Ordinal));
+        if (contains != null) return contains;
+
+        var words = normQ.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        return playlists.FirstOrDefault(p =>
+        {
+            var n = p.Name.ToLowerInvariant().Replace('ё', 'е');
+            return words.Length > 0 && words.All(w => n.Contains(w, StringComparison.Ordinal));
+        });
+    }
+
     private void StopVoiceListening()
     {
+        _voiceAssistant?.CancelActiveListening();
         var prev = _voiceCts;
         _voiceCts = null;
         if (prev != null)
@@ -4881,6 +5196,16 @@ public partial class PlayerWindow : Window
 
     private async Task StartVoiceListeningAsync()
     {
+        if (_voiceAssistant != null &&
+            (_voiceModels.IsVoskReady() || _voiceModels.IsWhisperReady(_settings.Current.VoiceWhisperModel)))
+        {
+            await _voiceAssistant.ToggleManualListeningAsync();
+            return;
+        }
+
+        ShowSettingsSection("alice");
+        PostToWeb("status", new { message = "Установите офлайн-модели (Vosk + Whisper) во вкладке «Алиса и голос»" });
+
         if (_isVoiceListening)
         {
             StopVoiceListening();
@@ -4912,28 +5237,7 @@ public partial class PlayerWindow : Window
                 await ExecuteAliceCommandAsync(result.Text);
                 return;
             }
-
-            if (result.FallbackReason == "cancelled")
-                return;
         }
-
-        // На Windows 10/11 без офлайн-пакета распознавания речи открываем строку Алисы и системный голосовой ввод (Win+H)
-        RestoreFromTray();
-        if (_isCompactMode)
-            SetCompactMode(false, save: true);
-
-        PostToWeb("aliceVoiceState", new
-        {
-            listening = false,
-            mode = "win-dictation",
-            focusInput = true,
-            message = "Говорите в микрофон (Windows Win+H) и нажмите Enter"
-        });
-        PostToWeb("status", new { message = "Запускаю голосовой ввод Windows (Win+H) — диктуйте команду Алисе" });
-
-        await Task.Delay(120);
-        try { PlayerWebView?.Focus(); } catch { }
-        AliceVoiceRecognizer.TriggerWindowsVoiceTyping();
     }
 
     #endregion

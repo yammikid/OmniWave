@@ -12,7 +12,8 @@ public enum HotkeyAction
     NextTrack,
     PrevTrack,
     VolumeUp,
-    VolumeDown
+    VolumeDown,
+    VoiceAssistant
 }
 
 /// <summary>
@@ -35,12 +36,15 @@ public sealed class GlobalHotkeyService : IDisposable
     private const int VK_MEDIA_STOP = 0xB2;
     private const int VK_MEDIA_PLAY_PAUSE = 0xB3;
 
+    private const uint MOD_ALT = 0x0001;
     private const uint MOD_NOREPEAT = 0x4000;
+    private const int VK_V = 0x56;
 
     private const int HOTKEY_ID_MEDIA_PLAY_PAUSE = 9101;
     private const int HOTKEY_ID_MEDIA_PREV = 9102;
     private const int HOTKEY_ID_MEDIA_NEXT = 9103;
     private const int HOTKEY_ID_MEDIA_STOP = 9104;
+    private const int HOTKEY_ID_VOICE_ASSISTANT = 9105;
 
     private const int APPCOMMAND_MEDIA_NEXTTRACK = 11;
     private const int APPCOMMAND_MEDIA_PREVIOUSTRACK = 12;
@@ -71,6 +75,8 @@ public sealed class GlobalHotkeyService : IDisposable
     private IntPtr _hwnd = IntPtr.Zero;
     private HwndSource? _hwndSource;
     private bool _rawInputRegistered;
+    private bool _voiceHotkeyEnabled = true;
+    private bool _voiceHotkeyRegistered;
     private long _lastActionTick;
     private HotkeyAction? _lastAction;
     private bool _disposed;
@@ -99,6 +105,7 @@ public sealed class GlobalHotkeyService : IDisposable
                 TryRegisterMediaHotKey(HOTKEY_ID_MEDIA_PREV, VK_MEDIA_PREV_TRACK);
                 TryRegisterMediaHotKey(HOTKEY_ID_MEDIA_NEXT, VK_MEDIA_NEXT_TRACK);
                 TryRegisterMediaHotKey(HOTKEY_ID_MEDIA_STOP, VK_MEDIA_STOP);
+                ApplyVoiceHotkeyRegistration();
 
                 var rid = new RAWINPUTDEVICE[]
                 {
@@ -128,6 +135,31 @@ public sealed class GlobalHotkeyService : IDisposable
         }
     }
 
+    public void SetVoiceHotkeyEnabled(bool enabled)
+    {
+        _voiceHotkeyEnabled = enabled;
+        ApplyVoiceHotkeyRegistration();
+    }
+
+    private void ApplyVoiceHotkeyRegistration()
+    {
+        if (_disposed || _hwnd == IntPtr.Zero) return;
+        try
+        {
+            if (_voiceHotkeyEnabled)
+            {
+                if (!_voiceHotkeyRegistered)
+                    _voiceHotkeyRegistered = RegisterHotKey(_hwnd, HOTKEY_ID_VOICE_ASSISTANT, MOD_ALT | MOD_NOREPEAT, VK_V);
+            }
+            else if (_voiceHotkeyRegistered)
+            {
+                _ = UnregisterHotKey(_hwnd, HOTKEY_ID_VOICE_ASSISTANT);
+                _voiceHotkeyRegistered = false;
+            }
+        }
+        catch { }
+    }
+
     private void TryRegisterMediaHotKey(int id, int vk)
     {
         if (RegisterHotKey(_hwnd, id, MOD_NOREPEAT, (uint)vk))
@@ -139,6 +171,13 @@ public sealed class GlobalHotkeyService : IDisposable
         if (msg == WM_HOTKEY)
         {
             int id = wParam.ToInt32();
+            if (id == HOTKEY_ID_VOICE_ASSISTANT)
+            {
+                handled = true;
+                TryTriggerAction(HotkeyAction.VoiceAssistant);
+                return IntPtr.Zero;
+            }
+
             HotkeyAction? action = id switch
             {
                 HOTKEY_ID_MEDIA_PLAY_PAUSE => HotkeyAction.PlayPause,
@@ -387,6 +426,11 @@ public sealed class GlobalHotkeyService : IDisposable
                 _ = UnregisterHotKey(_hwnd, HOTKEY_ID_MEDIA_PREV);
                 _ = UnregisterHotKey(_hwnd, HOTKEY_ID_MEDIA_NEXT);
                 _ = UnregisterHotKey(_hwnd, HOTKEY_ID_MEDIA_STOP);
+                if (_voiceHotkeyRegistered)
+                {
+                    _ = UnregisterHotKey(_hwnd, HOTKEY_ID_VOICE_ASSISTANT);
+                    _voiceHotkeyRegistered = false;
+                }
             }
             _hwndSource?.RemoveHook(WndProc);
         }

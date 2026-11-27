@@ -632,10 +632,53 @@ public static class PlayerChromaCardHtml
       border: 1px solid var(--ow-hairline);
       background: var(--ow-bg-input);
     }
+    .ow-mic-btn.is-wake {
+      color: #4ADE80;
+      border-color: rgba(34, 197, 94, 0.48);
+      background: rgba(34, 197, 94, 0.10);
+    }
     .ow-mic-btn.is-listening {
       color: rgb(var(--chroma-r), var(--chroma-g), var(--chroma-b));
-      border-color: rgba(var(--chroma-r), var(--chroma-g), var(--chroma-b), 0.85);
-      background: rgba(var(--chroma-r), var(--chroma-g), var(--chroma-b), 0.14);
+      border-color: rgba(var(--chroma-r), var(--chroma-g), var(--chroma-b), 0.9);
+      background: rgba(var(--chroma-r), var(--chroma-g), var(--chroma-b), 0.16);
+    }
+    .ow-voice-strip {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-radius: 8px;
+      border: 1px solid rgba(var(--chroma-r), var(--chroma-g), var(--chroma-b), 0.48);
+      background: #10131A;
+      padding: 5px 8px;
+    }
+    .ow-voice-bars {
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      height: 14px;
+      flex-shrink: 0;
+    }
+    .ow-voice-bars span {
+      width: 2.5px;
+      height: 12px;
+      border-radius: 2px;
+      background: rgb(var(--chroma-r), var(--chroma-g), var(--chroma-b));
+      transform-origin: center;
+      transform: scaleY(0.24);
+      transition: transform 70ms linear;
+    }
+    .ow-select {
+      width: 100%;
+      border-radius: 7px;
+      border: 1px solid var(--ow-hairline);
+      background: var(--ow-bg-input);
+      color: #FFFFFF;
+      padding: 5px 8px;
+      font-size: 11px;
+      outline: none;
+    }
+    .ow-select:focus {
+      border-color: rgba(var(--chroma-r), var(--chroma-g), var(--chroma-b), 0.65);
     }
     .ow-alice-bar {
       display: flex;
@@ -1634,6 +1677,48 @@ public static class PlayerChromaCardHtml
           enabled: true,
           port: '47510'
         },
+        voice: {
+          state: 'notInstalled',
+          statusText: 'Установите модели распознавания',
+          liveTranscript: '',
+          lastCommand: '',
+          lastReply: '',
+          audioLevel: 0,
+          voskReady: false,
+          whisperReady: false,
+          whisperRunning: false,
+          downloadBusy: false,
+          downloadPercent: 0,
+          downloadStage: '',
+          downloadMb: 0,
+          downloadTotalMb: 0,
+          diskUsageMb: 0,
+          wakeWordEnabled: false,
+          wakeWords: 'омни, волна',
+          whisperEnabled: true,
+          whisperModel: 'small-q5',
+          ttsEnabled: true,
+          ttsVoiceName: '',
+          duckMusic: true,
+          hotkeyEnabled: true,
+          inputDeviceIndex: -1,
+          activeEngineLabel: 'Модели не установлены',
+          sleepTimerMinutes: 0,
+          russianVoices: [],
+          inputDevices: []
+        },
+        voiceDraft: {
+          dirty: false,
+          wakeWordEnabled: false,
+          wakeWords: 'омни, волна',
+          whisperEnabled: true,
+          whisperModel: 'small-q5',
+          ttsEnabled: true,
+          ttsVoiceName: '',
+          duckMusic: true,
+          hotkeyEnabled: true,
+          inputDeviceIndex: -1
+        },
         telemetry: { ramMb: 0, cpuPercent: 0, gpuPercent: 0, processCount: 1 },
         suspended: false
       };
@@ -1910,12 +1995,41 @@ public static class PlayerChromaCardHtml
       /* ======================================================================
          TAB BODIES: SEARCH, QUEUE, FAVORITES/PLAYLISTS, SETTINGS/BRIDGE
          ====================================================================== */
+      function getVoiceMicMeta() {
+        const v = state.voice || {};
+        const al = state.alice || {};
+        const active = al.listening || v.state === 'commandListening' || v.state === 'processingWhisper' || v.state === 'speaking';
+        const wake = !active && v.state === 'wakeListening';
+        const cls = active ? 'is-listening' : (wake ? 'is-wake' : '');
+        const title = v.statusText
+          ? ('Голосовой помощник: ' + v.statusText)
+          : 'Голосовой помощник (Alt+V)';
+        return { active, wake, cls, title };
+      }
+
+      function buildVoiceStripHTML() {
+        const v = state.voice || {};
+        const isActive = v.state === 'commandListening' || v.state === 'processingWhisper' || v.state === 'speaking';
+        if (!isActive) return '';
+        const text = v.liveTranscript || v.statusText || 'Слушаю...';
+        const lvl = Math.max(0.2, Math.min(1, Number(v.audioLevel || 0)));
+        const scales = [0.65, 1.0, 0.82, 0.95, 0.6].map(k => Math.max(0.22, Math.min(1.0, lvl * k)).toFixed(2));
+        return '<div class="ow-voice-strip" data-role="voice-strip">' +
+          '<div class="ow-voice-bars" data-role="voice-bars">' +
+            scales.map(s => '<span style="transform:scaleY(' + s + ')"></span>').join('') +
+          '</div>' +
+          '<span data-role="voice-live-text" class="truncate" style="flex:1;min-width:0;font-size:11.5px;color:#F3F4F6">' + esc(text) + '</span>' +
+          '<button data-action="voice-cancel" class="ow-icon-btn" style="width:20px;height:20px" title="Остановить">' + ICONS.close + '</button>' +
+        '</div>';
+      }
+
       function buildSearchHeaderHTML() {
+        const mic = getVoiceMicMeta();
         const aliceBar = state.aliceBarOpen
           ? '<div class="ow-alice-bar">' +
               '<div class="ow-input-row">' +
-                '<input id="ow-alice-cmd-input" data-role="alice-cmd-input" type="text" value="' + esc(state.aliceInput) + '" placeholder="Команда Алисе: включи Кино / тише / моя волна..." class="ow-input" />' +
-                '<button data-action="alice-run" class="ow-badge-btn is-ok" title="Выполнить команду Алисе">▶</button>' +
+                '<input id="ow-alice-cmd-input" data-role="alice-cmd-input" type="text" value="' + esc(state.aliceInput) + '" placeholder="Команда помощнику: включи Кино / тише / моя волна..." class="ow-input" />' +
+                '<button data-action="alice-run" class="ow-badge-btn is-ok" title="Выполнить команду">▶</button>' +
                 '<button data-action="close-alice-bar" class="ow-icon-btn" style="width:22px;height:22px" title="Скрыть">' + ICONS.close + '</button>' +
               '</div>' +
               (state.alice.lastReply
@@ -1932,9 +2046,10 @@ public static class PlayerChromaCardHtml
               '<button data-action="clear-search-input" class="ow-clear-input-btn" style="display:' + (state.searchQuery ? 'flex' : 'none') + '" title="Очистить">' + ICONS.close + '</button>' +
               '<kbd class="ow-kbd-hint ow-mono" style="display:' + (state.searchQuery ? 'none' : 'inline-block') + '">/</kbd>' +
             '</div>' +
-            '<button data-action="alice-voice" data-role="mic-btn" class="ow-icon-btn sz-28 ow-mic-btn ' + (state.alice.listening ? 'is-listening' : '') + '" title="Голосовая команда Алисе (микрофон / Win+H)">' + ICONS.mic + '</button>' +
-            '<button data-action="toggle-alice-bar" class="ow-icon-btn sz-28 ow-mic-btn ' + (state.aliceBarOpen ? 'is-active' : '') + '" title="Строка команд Алисы">' + ICONS.sparkle + '</button>' +
+            '<button data-action="alice-voice" data-role="mic-btn" class="ow-icon-btn sz-28 ow-mic-btn ' + mic.cls + '" title="' + esc(mic.title) + '">' + ICONS.mic + '</button>' +
+            '<button data-action="toggle-alice-bar" class="ow-icon-btn sz-28 ow-mic-btn ' + (state.aliceBarOpen ? 'is-active' : '') + '" title="Текстовые команды помощника">' + ICONS.sparkle + '</button>' +
           '</div>' +
+          buildVoiceStripHTML() +
           aliceBar +
           '<div class="ow-chips-scroller" data-chips-scroller="search">' +
             '<button type="button" data-chips-nav="-1" class="ow-chips-nav is-left is-hidden" title="Листать влево">‹</button>' +
@@ -2164,7 +2279,7 @@ public static class PlayerChromaCardHtml
         const el = document.activeElement;
         if (!el) return false;
         const tag = (el.tagName || '').toUpperCase();
-        return tag === 'INPUT' || tag === 'TEXTAREA';
+        return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
       }
 
       function syncProxyDraftFromServer(force) {
@@ -2189,6 +2304,23 @@ public static class PlayerChromaCardHtml
           dirty: false,
           enabled: al.enabled !== false,
           port: String(al.port || 47510)
+        };
+      }
+
+      function syncVoiceDraftFromServer(force) {
+        const v = state.voice || {};
+        if (!force && state.voiceDraft.dirty) return;
+        state.voiceDraft = {
+          dirty: false,
+          wakeWordEnabled: Boolean(v.wakeWordEnabled),
+          wakeWords: v.wakeWords || 'омни, волна',
+          whisperEnabled: v.whisperEnabled !== false,
+          whisperModel: v.whisperModel || 'small-q5',
+          ttsEnabled: v.ttsEnabled !== false,
+          ttsVoiceName: v.ttsVoiceName || '',
+          duckMusic: v.duckMusic !== false,
+          hotkeyEnabled: v.hotkeyEnabled !== false,
+          inputDeviceIndex: typeof v.inputDeviceIndex === 'number' ? v.inputDeviceIndex : -1
         };
       }
 
@@ -2274,6 +2406,13 @@ public static class PlayerChromaCardHtml
         const pd = state.proxyDraft || {};
         const al = state.alice || {};
         const ad = state.aliceDraft || {};
+        const vc = state.voice || {};
+        const vd = state.voiceDraft || {};
+        const mic = getVoiceMicMeta();
+        const ruVoices = Array.isArray(vc.russianVoices) ? vc.russianVoices : [];
+        const micDevs = Array.isArray(vc.inputDevices) && vc.inputDevices.length > 0
+          ? vc.inputDevices
+          : [{ index: -1, name: 'Микрофон по умолчанию' }];
         const yt = state.ytDlp || {};
         const up = state.update || {};
         const ap = state.authPanel || {};
@@ -2405,43 +2544,125 @@ public static class PlayerChromaCardHtml
             '</div>' +
           '</div>' +
 
-          /* 2.5. Алиса и голосовое управление */
+          /* 2.5. Голосовой помощник (Vosk + Whisper) и локальный API Алисы */
           '<div class="ow-card-block" data-section="alice">' +
             '<div class="ow-section-head" style="margin-bottom:0">' +
-              '<span class="ow-section-label">Алиса и голос</span>' +
-              '<span data-role="alice-pill" class="ow-badge-btn ' + (al.running ? 'is-ok' : '') + '" style="cursor:default">' + (al.running ? 'Активен' : 'Выкл.') + '</span>' +
+              '<span class="ow-section-label">Голосовой помощник</span>' +
+              '<span class="ow-badge-btn ' + ((vc.voskReady || vc.whisperReady) ? 'is-ok' : '') + '" style="cursor:default">' + esc(vc.activeEngineLabel || 'Не установлен') + '</span>' +
             '</div>' +
-            renderToggleRow('aliceApiEnabled', 'Локальный API (Webhook / REST)', Boolean(ad.enabled)) +
+
+            '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
+              '<span class="ow-badge-btn ' + (vc.voskReady ? 'is-ok' : '') + '" style="cursor:default">' + (vc.voskReady ? '✓ Vosk RU' : 'Vosk RU: нет') + '</span>' +
+              '<span class="ow-badge-btn ' + (vc.whisperReady ? 'is-ok' : '') + '" style="cursor:default">' + (vc.whisperReady ? '✓ Whisper RU+EN' : 'Whisper: нет') + '</span>' +
+              (vc.diskUsageMb > 0 ? '<span class="ow-mono" style="font-size:10px;color:var(--ow-text-muted);margin-left:auto">' + vc.diskUsageMb + ' МБ</span>' : '') +
+            '</div>' +
+
+            (vc.downloadBusy
+              ? '<div style="display:flex;flex-direction:column;gap:5px">' +
+                  '<div class="ow-setting-row">' +
+                    '<span data-role="voice-dl-stage" class="ow-status-line is-warn truncate">' + esc(vc.downloadStage || 'Загрузка...') + '</span>' +
+                    '<span data-role="voice-dl-pct" class="ow-mono" style="font-size:10.5px;color:#E5E7EB">' + (vc.downloadPercent || 0) + '%</span>' +
+                  '</div>' +
+                  '<div class="ow-progress-bar"><div data-role="voice-dl-fill" class="ow-progress-fill" style="width:' + Math.max(0, Math.min(100, vc.downloadPercent || 0)) + '%"></div></div>' +
+                  '<button data-action="voice-cancel-install" class="ow-btn-secondary">Отмена загрузки</button>' +
+                '</div>'
+              : ((!vc.voskReady && !vc.whisperReady)
+                  ? '<div class="ow-btn-grid">' +
+                      '<button data-action="voice-install-hybrid" class="ow-btn-secondary" style="border-color:rgba(var(--chroma-r),var(--chroma-g),var(--chroma-b),0.5);color:#FFFFFF">Установить Гибрид</button>' +
+                      '<button data-action="voice-install-vosk" class="ow-btn-secondary">Только Vosk (58 МБ)</button>' +
+                    '</div>'
+                  : ((!vc.whisperReady || !vc.voskReady)
+                      ? '<div class="ow-btn-grid">' +
+                          (!vc.whisperReady ? '<button data-action="voice-install-whisper" class="ow-btn-secondary">Докачать Whisper</button>' : '<button data-action="voice-install-vosk" class="ow-btn-secondary">Докачать Vosk</button>') +
+                          '<button data-action="voice-delete-models" class="ow-btn-secondary">Удалить модели</button>' +
+                        '</div>'
+                      : '<div class="ow-setting-row">' +
+                          '<span class="ow-status-line is-ok truncate">' + esc(vc.statusText || 'Готов') + '</span>' +
+                          '<button data-action="voice-delete-models" class="ow-badge-btn">Удалить</button>' +
+                        '</div>'))) +
+
+            buildVoiceStripHTML() +
+
+            renderToggleRow('voiceWakeWordEnabled', 'Слушать ключевое слово в фоне', Boolean(vd.wakeWordEnabled)) +
             '<div class="ow-input-row">' +
-              '<div style="width:92px">' +
-                '<div class="ow-field-label">Порт</div>' +
-                '<input data-alice-field="port" type="text" value="' + esc(ad.port || '47510') + '" placeholder="47510" class="ow-input ow-mono" />' +
+              '<div style="flex:1;min-width:0">' +
+                '<div class="ow-field-label">Имена активации (через запятую)</div>' +
+                '<input data-voice-field="wakeWords" type="text" value="' + esc(vd.wakeWords || 'омни, волна') + '" placeholder="омни, волна" class="ow-input" />' +
               '</div>' +
-              '<div style="flex:1;min-width:0;padding-top:15px">' +
-                '<button data-action="alice-save" class="ow-btn-secondary">Применить</button>' +
-              '</div>' +
-            '</div>' +
-            '<div data-role="alice-status" class="ow-status-line ' + (al.running ? 'is-ok' : '') + '">' + esc(al.statusText || '') + '</div>' +
-            '<div class="ow-bridge-row" style="padding:5px 8px">' +
-              '<div style="min-width:0">' +
-                '<div style="font-size:10px;color:var(--ow-text-muted)">Токен доступа (X-Alice-Token)</div>' +
-                '<div class="ow-mono truncate" style="font-size:11px;color:#E5E7EB">' + esc(al.tokenPreview || '—') + '</div>' +
-              '</div>' +
-              '<div style="display:flex;align-items:center;gap:4px;flex-shrink:0">' +
-                '<button data-action="alice-copy-token" class="ow-badge-btn" title="Копировать секретный токен">' + ICONS.copy + '</button>' +
-                '<button data-action="alice-regen-token" class="ow-badge-btn">Обновить</button>' +
+              '<div style="padding-top:15px">' +
+                '<button data-action="voice-save" class="ow-badge-btn is-ok">Сохранить</button>' +
               '</div>' +
             '</div>' +
+
+            renderToggleRow('voiceWhisperEnabled', 'Уточнять треки через Whisper (RU+EN)', vd.whisperEnabled !== false) +
             '<div class="ow-btn-grid">' +
-              '<button data-action="alice-copy-webhook" class="ow-btn-secondary">Webhook (/alice)</button>' +
-              '<button data-action="alice-copy-quick" class="ow-btn-secondary">GET-команда</button>' +
+              '<button data-voice-model="small-q5" class="ow-chip ' + ((vd.whisperModel || 'small-q5') === 'small-q5' ? 'is-active' : '') + '" style="justify-content:center">Small Q5 (точнее)</button>' +
+              '<button data-voice-model="base" class="ow-chip ' + (vd.whisperModel === 'base' ? 'is-active' : '') + '" style="justify-content:center">Base (быстрее)</button>' +
             '</div>' +
+
+            renderToggleRow('voiceTtsEnabled', 'Голосовые ответы (TTS)', vd.ttsEnabled !== false) +
+            '<div class="ow-chips-row">' +
+              '<button data-tts-voice="" class="ow-chip ' + (!vd.ttsVoiceName ? 'is-active' : '') + '">Авто</button>' +
+              ruVoices.map(rv =>
+                '<button data-tts-voice="' + esc(rv.displayName) + '" class="ow-chip ' + (vd.ttsVoiceName === rv.displayName ? 'is-active' : '') + '">' + esc(rv.shortName) + '</button>'
+              ).join('') +
+              '<button data-action="voice-test-tts" class="ow-badge-btn" style="margin-left:auto">Тест</button>' +
+            '</div>' +
+
+            renderToggleRow('voiceDuckMusic', 'Приглушать музыку во время речи', vd.duckMusic !== false) +
+            renderToggleRow('voiceHotkeyEnabled', 'Глобальный хоткей Alt + V', vd.hotkeyEnabled !== false) +
+
+            '<div>' +
+              '<div class="ow-field-label">Микрофон</div>' +
+              '<select data-voice-select="device" class="ow-select">' +
+                micDevs.map(d =>
+                  '<option value="' + d.index + '"' + (Number(vd.inputDeviceIndex) === Number(d.index) ? ' selected' : '') + '>' + esc(d.name) + '</option>'
+                ).join('') +
+              '</select>' +
+            '</div>' +
+
+            (vc.sleepTimerMinutes > 0
+              ? '<div class="ow-status-line is-warn">⏱ Таймер сна активен: ~' + vc.sleepTimerMinutes + ' мин</div>'
+              : '') +
+
             '<div class="ow-input-row">' +
-              '<input data-role="alice-settings-input" type="text" value="' + esc(state.aliceSettingsInput || '') + '" placeholder="Команда: «включи Кино» / «громкость 50»" class="ow-input" />' +
-              '<button data-action="alice-voice" data-role="mic-btn" class="ow-icon-btn sz-26 ow-mic-btn ' + (al.listening ? 'is-listening' : '') + '" title="Голосовая команда">' + ICONS.mic + '</button>' +
+              '<input data-role="alice-settings-input" type="text" value="' + esc(state.aliceSettingsInput || '') + '" placeholder="Команда: «включи Кино» / «таймер 20 мин»" class="ow-input" />' +
+              '<button data-action="alice-voice" data-role="mic-btn" class="ow-icon-btn sz-26 ow-mic-btn ' + mic.cls + '" title="' + esc(mic.title) + '">' + ICONS.mic + '</button>' +
               '<button data-action="alice-run-settings" class="ow-badge-btn is-ok" title="Выполнить">▶</button>' +
             '</div>' +
             '<div data-role="alice-reply" class="ow-status-line" style="display:' + (al.lastReply ? 'block' : 'none') + '">' + esc(al.lastReply || '') + '</div>' +
+
+            '<div style="border-top:1px solid var(--ow-hairline-soft);padding-top:8px;margin-top:2px;display:flex;flex-direction:column;gap:8px">' +
+              '<div class="ow-section-head" style="margin-bottom:0">' +
+                '<span class="ow-section-label">Локальный API Алисы (HTTP)</span>' +
+                '<span data-role="alice-pill" class="ow-badge-btn ' + (al.running ? 'is-ok' : '') + '" style="cursor:default">' + (al.running ? 'Активен' : 'Выкл.') + '</span>' +
+              '</div>' +
+              renderToggleRow('aliceApiEnabled', 'Webhook / REST сервер', Boolean(ad.enabled)) +
+              '<div class="ow-input-row">' +
+                '<div style="width:92px">' +
+                  '<div class="ow-field-label">Порт</div>' +
+                  '<input data-alice-field="port" type="text" value="' + esc(ad.port || '47510') + '" placeholder="47510" class="ow-input ow-mono" />' +
+                '</div>' +
+                '<div style="flex:1;min-width:0;padding-top:15px">' +
+                  '<button data-action="alice-save" class="ow-btn-secondary">Применить</button>' +
+                '</div>' +
+              '</div>' +
+              '<div data-role="alice-status" class="ow-status-line ' + (al.running ? 'is-ok' : '') + '">' + esc(al.statusText || '') + '</div>' +
+              '<div class="ow-bridge-row" style="padding:5px 8px">' +
+                '<div style="min-width:0">' +
+                  '<div style="font-size:10px;color:var(--ow-text-muted)">Токен (X-Alice-Token)</div>' +
+                  '<div class="ow-mono truncate" style="font-size:11px;color:#E5E7EB">' + esc(al.tokenPreview || '—') + '</div>' +
+                '</div>' +
+                '<div style="display:flex;align-items:center;gap:4px;flex-shrink:0">' +
+                  '<button data-action="alice-copy-token" class="ow-badge-btn" title="Копировать секретный токен">' + ICONS.copy + '</button>' +
+                  '<button data-action="alice-regen-token" class="ow-badge-btn">Обновить</button>' +
+                '</div>' +
+              '</div>' +
+              '<div class="ow-btn-grid">' +
+                '<button data-action="alice-copy-webhook" class="ow-btn-secondary">Webhook (/alice)</button>' +
+                '<button data-action="alice-copy-quick" class="ow-btn-secondary">GET-команда</button>' +
+              '</div>' +
+            '</div>' +
           '</div>' +
 
           /* 3. Внешний вид (Chroma Card) */
@@ -2604,6 +2825,7 @@ public static class PlayerChromaCardHtml
                   '<button data-action="prev" class="ow-icon-btn sz-26" title="Предыдущий трек">' + ICONS.prev + '</button>' +
                   '<button data-action="toggle-play" class="ow-play-btn compact" title="Пуск / Пауза [Space]">' + (state.isPlaying ? ICONS.pause : ICONS.play) + '</button>' +
                   '<button data-action="next" class="ow-icon-btn sz-26" title="Следующий трек">' + ICONS.next + '</button>' +
+                  '<button data-action="alice-voice" data-role="mic-btn" class="ow-icon-btn sz-26 ow-mic-btn ' + getVoiceMicMeta().cls + '" style="border-color:transparent;background:transparent" title="' + esc(getVoiceMicMeta().title) + '">' + ICONS.mic + '</button>' +
                   '<button data-action="toggle-edge-dock" data-role="dock-edge-btn" class="ow-icon-btn sz-26 ' + (isDocked ? 'is-active' : '') + '" title="' + (isDocked ? 'Открепить от края экрана' : 'Спрятать за край экрана') + '">' + ICONS.dockEdge + '</button>' +
                   '<button data-action="toggle-mode" class="ow-icon-btn sz-26" title="Развернуть [M]">' + ICONS.expand + '</button>' +
                 '</div>' +
@@ -2855,6 +3077,22 @@ public static class PlayerChromaCardHtml
         });
       }
 
+      function sendVoiceSave() {
+        const vd = state.voiceDraft || {};
+        vd.dirty = false;
+        sendToHost('voice.saveSettings', {
+          wakeWordEnabled: Boolean(vd.wakeWordEnabled),
+          wakeWords: vd.wakeWords || 'омни, волна',
+          whisperEnabled: vd.whisperEnabled !== false,
+          whisperModel: vd.whisperModel || 'small-q5',
+          ttsEnabled: vd.ttsEnabled !== false,
+          ttsVoiceName: vd.ttsVoiceName || '',
+          duckMusic: vd.duckMusic !== false,
+          hotkeyEnabled: vd.hotkeyEnabled !== false,
+          inputDeviceIndex: typeof vd.inputDeviceIndex === 'number' ? vd.inputDeviceIndex : -1
+        });
+      }
+
       function updateHeroMetaUI() {
         const tr = state.currentTrack;
         const srcMeta = tr ? getSourceMeta(tr.brandKey) : SOURCES.all;
@@ -2953,6 +3191,28 @@ public static class PlayerChromaCardHtml
               alicePortInp.blur();
               sendAliceSave();
             }
+          };
+        }
+
+        const wakeWordsInp = appRoot.querySelector('[data-voice-field="wakeWords"]');
+        if (wakeWordsInp) {
+          wakeWordsInp.oninput = (e) => {
+            state.voiceDraft.dirty = true;
+            state.voiceDraft.wakeWords = e.target.value;
+          };
+          wakeWordsInp.onkeydown = (e) => {
+            if (e.key === 'Enter') {
+              wakeWordsInp.blur();
+              sendVoiceSave();
+            }
+          };
+        }
+
+        const micSel = appRoot.querySelector('[data-voice-select="device"]');
+        if (micSel) {
+          micSel.onchange = (e) => {
+            state.voiceDraft.inputDeviceIndex = parseInt(e.target.value, 10);
+            sendVoiceSave();
           };
         }
 
@@ -3409,6 +3669,17 @@ public static class PlayerChromaCardHtml
               sendAliceSave();
               return;
             }
+            if (key === 'voiceWakeWordEnabled' || key === 'voiceWhisperEnabled' || key === 'voiceTtsEnabled' || key === 'voiceDuckMusic' || key === 'voiceHotkeyEnabled') {
+              const draftProp = key === 'voiceWakeWordEnabled' ? 'wakeWordEnabled'
+                : (key === 'voiceWhisperEnabled' ? 'whisperEnabled'
+                : (key === 'voiceTtsEnabled' ? 'ttsEnabled'
+                : (key === 'voiceDuckMusic' ? 'duckMusic' : 'hotkeyEnabled')));
+              const nextVal = !Boolean(state.voiceDraft[draftProp]);
+              state.voiceDraft[draftProp] = nextVal;
+              sw.setAttribute('aria-checked', nextVal ? 'true' : 'false');
+              sendVoiceSave();
+              return;
+            }
 
             const nextVal = !state.windowSettings[key];
             state.windowSettings[key] = nextVal;
@@ -3449,6 +3720,20 @@ public static class PlayerChromaCardHtml
               chip.classList.toggle('is-active', Number(chip.getAttribute('data-window-scale')) === scVal);
             });
             sendToHost('window.setScale', { scale: scVal });
+            return;
+          }
+
+          const vModelBtn = e.target.closest('[data-voice-model]');
+          if (vModelBtn) {
+            state.voiceDraft.whisperModel = vModelBtn.getAttribute('data-voice-model') || 'small-q5';
+            sendVoiceSave();
+            return;
+          }
+
+          const ttsVoiceBtn = e.target.closest('[data-tts-voice]');
+          if (ttsVoiceBtn) {
+            state.voiceDraft.ttsVoiceName = ttsVoiceBtn.getAttribute('data-tts-voice') || '';
+            sendVoiceSave();
             return;
           }
 
@@ -3591,7 +3876,31 @@ public static class PlayerChromaCardHtml
             case 'check-update': sendToHost('system.checkUpdate'); break;
             case 'install-update': sendToHost('system.installUpdate'); break;
             case 'alice-voice':
-              sendToHost(state.alice && state.alice.listening ? 'alice.stopVoice' : 'alice.startVoice');
+              sendToHost('voice.toggle');
+              break;
+            case 'voice-cancel':
+              sendToHost('voice.cancel');
+              break;
+            case 'voice-install-hybrid':
+              sendToHost('voice.installModels', { mode: 'hybrid' });
+              break;
+            case 'voice-install-vosk':
+              sendToHost('voice.installModels', { mode: 'vosk' });
+              break;
+            case 'voice-install-whisper':
+              sendToHost('voice.installModels', { mode: 'whisper' });
+              break;
+            case 'voice-cancel-install':
+              sendToHost('voice.cancelInstall');
+              break;
+            case 'voice-delete-models':
+              sendToHost('voice.deleteModels');
+              break;
+            case 'voice-save':
+              sendVoiceSave();
+              break;
+            case 'voice-test-tts':
+              sendToHost('voice.testTts');
               break;
             case 'toggle-alice-bar':
               state.aliceBarOpen = !state.aliceBarOpen;
@@ -3946,6 +4255,10 @@ public static class PlayerChromaCardHtml
         if (msg.alice && typeof msg.alice === 'object') {
           state.alice = Object.assign({}, state.alice, msg.alice);
           syncAliceDraftFromServer(isInit);
+        }
+        if (msg.voice && typeof msg.voice === 'object') {
+          state.voice = Object.assign({}, state.voice, msg.voice);
+          syncVoiceDraftFromServer(isInit);
         }
         if (isInit || 'yandexConnected' in msg) {
           state.accounts = {
@@ -4345,9 +4658,14 @@ public static class PlayerChromaCardHtml
                 break;
               case 'aliceVoiceState':
                 state.alice.listening = Boolean(msg.listening);
-                appRoot.querySelectorAll('[data-role="mic-btn"]').forEach(btn => {
-                  btn.classList.toggle('is-listening', state.alice.listening);
-                });
+                {
+                  const mic = getVoiceMicMeta();
+                  appRoot.querySelectorAll('[data-role="mic-btn"]').forEach(btn => {
+                    btn.classList.toggle('is-listening', mic.active);
+                    btn.classList.toggle('is-wake', mic.wake);
+                    btn.title = mic.title;
+                  });
+                }
                 if (msg.focusInput) {
                   if (!state.compact && state.activeTab === 'settings') {
                     const sInp = appRoot.querySelector('[data-role="alice-settings-input"]');
@@ -4364,6 +4682,69 @@ public static class PlayerChromaCardHtml
                       refreshWholeTabPanel();
                     }
                   }
+                }
+                break;
+              case 'voiceState':
+                {
+                  const prevSt = state.voice ? state.voice.state : '';
+                  const prevBusy = Boolean(state.voice && state.voice.downloadBusy);
+                  const prevStrip = prevSt === 'commandListening' || prevSt === 'processingWhisper' || prevSt === 'speaking';
+                  state.voice = Object.assign({}, state.voice, msg);
+                  syncVoiceDraftFromServer(false);
+                  const nextSt = state.voice.state || '';
+                  const nextBusy = Boolean(state.voice.downloadBusy);
+                  const nextStrip = nextSt === 'commandListening' || nextSt === 'processingWhisper' || nextSt === 'speaking';
+                  const mic = getVoiceMicMeta();
+                  appRoot.querySelectorAll('[data-role="mic-btn"]').forEach(btn => {
+                    btn.classList.toggle('is-listening', mic.active);
+                    btn.classList.toggle('is-wake', mic.wake);
+                    btn.title = mic.title;
+                  });
+                  if (!state.compact) {
+                    if (state.activeTab === 'search') {
+                      if (prevStrip !== nextStrip) {
+                        refreshWholeTabPanel();
+                      } else if (nextStrip) {
+                        const vt = appRoot.querySelector('[data-role="voice-live-text"]');
+                        if (vt) vt.textContent = state.voice.liveTranscript || state.voice.statusText || 'Слушаю...';
+                      }
+                    } else if (state.activeTab === 'settings') {
+                      if (prevBusy && nextBusy) {
+                        const dSt = appRoot.querySelector('[data-role="voice-dl-stage"]');
+                        const dPct = appRoot.querySelector('[data-role="voice-dl-pct"]');
+                        const dFill = appRoot.querySelector('[data-role="voice-dl-fill"]');
+                        if (dSt) dSt.textContent = state.voice.downloadStage || 'Загрузка...';
+                        if (dPct) dPct.textContent = (state.voice.downloadPercent || 0) + '%';
+                        if (dFill) dFill.style.width = Math.max(0, Math.min(100, state.voice.downloadPercent || 0)) + '%';
+                      } else if (prevStrip && nextStrip) {
+                        const vt = appRoot.querySelector('[data-role="voice-live-text"]');
+                        if (vt) vt.textContent = state.voice.liveTranscript || state.voice.statusText || 'Слушаю...';
+                      } else if (!isTypingInSettings()) {
+                        refreshTabBodyOnly();
+                      }
+                    }
+                  }
+                }
+                break;
+              case 'voiceLevel':
+                if (state.voice) {
+                  state.voice.audioLevel = Number(msg.audioLevel || 0);
+                  if (typeof msg.liveTranscript === 'string' && msg.liveTranscript)
+                    state.voice.liveTranscript = msg.liveTranscript;
+                }
+                {
+                  const lvl = Math.max(0.2, Math.min(1, Number(msg.audioLevel || 0)));
+                  const mults = [0.65, 1.0, 0.82, 0.95, 0.6];
+                  const bars = appRoot.querySelector('[data-role="voice-bars"]');
+                  if (bars && bars.children) {
+                    for (let i = 0; i < bars.children.length && i < mults.length; i++) {
+                      const s = Math.max(0.22, Math.min(1.0, lvl * mults[i])).toFixed(2);
+                      bars.children[i].style.transform = 'scaleY(' + s + ')';
+                    }
+                  }
+                  const vt = appRoot.querySelector('[data-role="voice-live-text"]');
+                  if (vt && msg.liveTranscript)
+                    vt.textContent = msg.liveTranscript;
                 }
                 break;
               case 'aliceReply':

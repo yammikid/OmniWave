@@ -56,6 +56,7 @@ public class AudioPlayerService : IDisposable
     private List<TrackItem>? _unshuffledQueue;
     private int _currentIndex = -1;
     private int _softwareVolume = 80;
+    private bool _isDucked;
     private long _lastTimeMs;
     private long _cachedLengthMs;
     private RepeatMode _repeatMode = RepeatMode.Off;
@@ -1160,6 +1161,13 @@ public class AudioPlayerService : IDisposable
         VolumeChanged?.Invoke(clamped);
     }
 
+    public void SetDucking(bool ducked)
+    {
+        if (_isDucked == ducked) return;
+        _isDucked = ducked;
+        ApplyAudioFxToPlayer();
+    }
+
     public void ApplyEqualizer(bool enabled, float preamp, float[] bands)
     {
         EqualizerEnabled = enabled;
@@ -1189,8 +1197,13 @@ public class AudioPlayerService : IDisposable
             try
             {
                 bool muted = _softwareVolume <= 0;
+                int effectiveVol = muted
+                    ? 0
+                    : (_isDucked
+                        ? Math.Min(_softwareVolume, Math.Max(8, (int)Math.Round(_softwareVolume * 0.20)))
+                        : _softwareVolume);
                 _player.Mute = muted;
-                _player.Volume = muted ? 0 : _softwareVolume;
+                _player.Volume = effectiveVol;
 
                 if (EqualizerEnabled)
                 {

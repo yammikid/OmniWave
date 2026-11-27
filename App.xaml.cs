@@ -110,6 +110,8 @@ public partial class App : Application
         _hotkeys = new GlobalHotkeyService(() => _controller.IsLocalActive || _audioPlayer.CurrentTrack != null);
         _hotkeys.HotkeyTriggered += OnGlobalHotkeyTriggered;
         _hotkeys.Attach(_playerWindow);
+        _hotkeys.SetVoiceHotkeyEnabled(_settings.Current.VoiceHotkeyEnabled);
+        _settings.SettingsChanged += s => _ = Dispatcher.BeginInvoke(() => _hotkeys?.SetVoiceHotkeyEnabled(s.VoiceHotkeyEnabled));
 
         _trayIcon = new TrayIconService(_playerWindow, BuildTrayContextMenu(), ToggleMainWindowVisibility);
         SyncTrayChecks();
@@ -339,6 +341,10 @@ public partial class App : Application
 
             case HotkeyAction.VolumeDown:
                 _controller.AdjustVolumeStep(-1);
+                break;
+
+            case HotkeyAction.VoiceAssistant:
+                _playerWindow?.TriggerVoiceAssistantFromHotkey();
                 break;
         }
     }
