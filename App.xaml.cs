@@ -24,7 +24,6 @@ public partial class App : Application
     private TrayIconService? _trayIcon;
 
     private PlayerWindow? _playerWindow;
-    private MenuItem? _trayCompactModeMenuItem;
     private MenuItem? _trayAlwaysOnTopMenuItem;
 
     private bool _isShuttingDown;
@@ -157,18 +156,6 @@ public partial class App : Application
         var miShowHide = new MenuItem { Header = "Показать / Скрыть", Style = itemStyle };
         miShowHide.Click += (_, _) => ToggleMainWindowVisibility();
 
-        _trayCompactModeMenuItem = new MenuItem
-        {
-            Header = "Компактный режим",
-            IsCheckable = true,
-            IsChecked = _settings.Current.IsCompactMode,
-            Style = itemStyle
-        };
-        _trayCompactModeMenuItem.Click += (_, _) =>
-        {
-            _playerWindow?.SetCompactMode(_trayCompactModeMenuItem.IsChecked, save: true);
-        };
-
         _trayAlwaysOnTopMenuItem = new MenuItem
         {
             Header = "Поверх всех окон",
@@ -190,9 +177,6 @@ public partial class App : Application
         var miPrev = new MenuItem { Header = "Предыдущий трек", Style = itemStyle };
         miPrev.Click += (_, _) => OnGlobalHotkeyTriggered(HotkeyAction.PrevTrack);
 
-        var miCenter = new MenuItem { Header = "Центрировать окно", Style = itemStyle };
-        miCenter.Click += (_, _) => _playerWindow?.CenterOnPrimaryMonitor();
-
         var miSettings = new MenuItem { Header = "Настройки (прокси и обновления)", Style = itemStyle };
         miSettings.Click += (_, _) => _playerWindow?.ShowSettingsSection("settings");
 
@@ -203,14 +187,12 @@ public partial class App : Application
         miExit.Click += (_, _) => ShutdownApp();
 
         menu.Items.Add(miShowHide);
-        menu.Items.Add(_trayCompactModeMenuItem);
         menu.Items.Add(_trayAlwaysOnTopMenuItem);
         menu.Items.Add(new Separator { Style = sepStyle });
         menu.Items.Add(miPlayPause);
         menu.Items.Add(miNext);
         menu.Items.Add(miPrev);
         menu.Items.Add(new Separator { Style = sepStyle });
-        menu.Items.Add(miCenter);
         menu.Items.Add(miSettings);
         menu.Items.Add(miAccounts);
         menu.Items.Add(new Separator { Style = sepStyle });
@@ -220,8 +202,6 @@ public partial class App : Application
 
     public void SyncTrayChecks()
     {
-        if (_trayCompactModeMenuItem != null && _playerWindow != null)
-            _trayCompactModeMenuItem.IsChecked = _playerWindow.IsCompactMode;
         if (_trayAlwaysOnTopMenuItem != null)
             _trayAlwaysOnTopMenuItem.IsChecked = _settings.Current.WindowAlwaysOnTop;
     }

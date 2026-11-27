@@ -48,8 +48,6 @@ public class AppSettings
     public string? SpotifyUserId { get; set; }
     public string? SpotifyUserName { get; set; }
 
-    public string? BridgeSecret { get; set; }
-
     public bool ProxyEnabled { get; set; }
     public string ProxyType { get; set; } = "http"; // "http", "https", "socks5", "socks4"
     public string ProxyHost { get; set; } = "";
@@ -74,10 +72,6 @@ public class AppSettings
         VkUserId = Math.Max(0, VkUserId);
         YandexUserId = Math.Max(0, YandexUserId);
         SpotifyTokenExpiresUnixMs = Math.Max(0, SpotifyTokenExpiresUnixMs);
-
-        BridgeSecret = (BridgeSecret ?? "").Trim();
-        if (string.IsNullOrWhiteSpace(BridgeSecret) || BridgeSecret.Length < 24)
-            BridgeSecret = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
 
         Volume = Math.Clamp(Volume, 0, 100);
         EqualizerPreset = string.IsNullOrWhiteSpace(EqualizerPreset) ? "Flat" : EqualizerPreset;

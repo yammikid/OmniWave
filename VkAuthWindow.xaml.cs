@@ -3,20 +3,37 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Threading;
 using DynamicIsland.Services;
 using Microsoft.Web.WebView2.Wpf;
 
 namespace DynamicIsland;
 
+public enum BrowserAuthMode
+{
+    Vk,
+    YouTube
+}
+
+public sealed record BrowserAuthResult(
+    bool Completed,
+    string? Token,
+    string? CookieHeader,
+    long UserId,
+    string? UserName);
+
 public partial class VkAuthWindow : Window
 {
     private const string VkWebAudiosUrl = "https://vk.ru/audios";
+    private const string YouTubeLoginUrl =
+        "https://accounts.google.com/ServiceLogin?service=youtube&uilel=3&passive=true&continue=https%3A%2F%2Fwww.youtube.com%2Fsignin%3Faction_handle_signin%3Dtrue%26next%3Dhttps%253A%252F%252Fwww.youtube.com%252F";
 
     private static readonly Regex AudiosPathUidRegex = new(
         @"/audios(-?\d+)",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    private readonly BrowserAuthMode _mode;
     private readonly bool _clearSession;
     private readonly DispatcherTimer _pollTimer;
     private bool _isFinished;
@@ -25,15 +42,19 @@ public partial class VkAuthWindow : Window
     private string? _pendingVkToken;
     private long _pendingVkUserId;
 
+    public bool ResultCompleted { get; private set; }
     public string? ResultToken { get; private set; }
     public string? ResultCookieHeader { get; private set; }
     public long ResultUserId { get; private set; }
     public string? ResultUserName { get; private set; }
 
-    public VkAuthWindow(bool clearSession = false)
+    public VkAuthWindow(BrowserAuthMode mode = BrowserAuthMode.Vk, bool clearSession = false)
     {
         InitializeComponent();
+        _mode = mode;
         _clearSession = clearSession;
+
+        ApplyHeaderAppearance();
 
         var work = SystemParameters.WorkArea;
         Width = Math.Min(980, Math.Max(MinWidth, work.Width - 48));
@@ -56,20 +77,59 @@ public partial class VkAuthWindow : Window
         Closed += VkAuthWindow_Closed;
     }
 
-    /// <summary>
-    /// Открывает отдельное масштабируемое окно браузера для входа в VK (QR-код или логин).
-    /// </summary>
-    public static (string? Token, string? CookieHeader, long UserId, string? UserName) ShowVkAuth(
-        Window? owner,
-        bool clearSession = false)
+    private void ApplyHeaderAppearance()
     {
-        var win = new VkAuthWindow(clearSession);
+        if (_mode == BrowserAuthMode.YouTube)
+        {
+            Title = "Вход в YouTube — OmniWave";
+            HeaderDot.Fill = new SolidColorBrush(Color.FromRgb(255, 59, 48));
+            TxtHeaderTitle.Text = "Вход в YouTube (cookies)";
+            TxtHeaderHint.Text = "• Войдите в аккаунт Google — cookies сохранятся автоматически";
+            BtnManualToggle.Visibility = Visibility.Collapsed;
+            TxtStatus.Text = "Инициализация встроенного браузера...";
+        }
+        else
+        {
+            Title = "Вход в VK Музыку — OmniWave";
+            HeaderDot.Fill = new SolidColorBrush(Color.FromRgb(38, 136, 235));
+            TxtHeaderTitle.Text = "Вход в VK Музыку";
+            TxtHeaderHint.Text = "• QR-код или логин (Ctrl + колесо для масштаба)";
+            BtnManualToggle.Visibility = Visibility.Visible;
+            TxtStatus.Text = "Инициализация встроенного браузера...";
+        }
+    }
+
+    /// <summary>
+    /// Немодально открывает отдельное масштабируемое окно WebView2 для входа (VK QR / YouTube Google)
+    /// и возвращает результат после завершения авторизации или закрытия окна.
+    /// Не использует ShowDialog(), чтобы не блокировать COM-коллбэк WebMessageReceived.
+    /// </summary>
+    public static Task<BrowserAuthResult> ShowAuthAsync(
+        Window? owner,
+        BrowserAuthMode mode,
+        bool clearSession = false,
+        Action<VkAuthWindow>? onCreated = null)
+    {
+        var tcs = new TaskCompletionSource<BrowserAuthResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var win = new VkAuthWindow(mode, clearSession);
         if (owner != null && owner.IsVisible)
             win.Owner = owner;
 
         win.WindowStartupLocation = WindowStartupLocation.CenterScreen;
-        win.ShowDialog();
-        return (win.ResultToken, win.ResultCookieHeader, win.ResultUserId, win.ResultUserName);
+        win.Closed += (_, _) =>
+        {
+            tcs.TrySetResult(new BrowserAuthResult(
+                win.ResultCompleted,
+                win.ResultToken,
+                win.ResultCookieHeader,
+                win.ResultUserId,
+                win.ResultUserName));
+        };
+
+        onCreated?.Invoke(win);
+        win.Show();
+        win.Activate();
+        return tcs.Task;
     }
 
     protected override void OnSourceInitialized(EventArgs e)
@@ -111,23 +171,54 @@ public partial class VkAuthWindow : Window
     {
         try
         {
+            TxtStatus.Text = "Инициализация встроенного браузера...";
+
+            var profileFolder = _mode == BrowserAuthMode.YouTube ? "WebView2YouTube" : "WebView2Auth";
             var userDataFolder = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                 "OmniWave",
-                "WebView2Auth");
+                profileFolder);
             Directory.CreateDirectory(userDataFolder);
 
-            // Общий профиль с VkWebSessionBridge без AdditionalBrowserArguments во избежание 0x8007139F
-            AuthWebView.CreationProperties = new CoreWebView2CreationProperties
+            AuthWebView.CoreWebView2InitializationCompleted += (_, ev) =>
             {
-                UserDataFolder = userDataFolder
+                if (!ev.IsSuccess)
+                {
+                    var errText = $"Ошибка WebView2: {ev.InitializationException?.Message ?? "не удалось инициализировать"}";
+                    if (_mode == BrowserAuthMode.Vk)
+                        EnableManualFallback(errText);
+                    else
+                        TxtStatus.Text = errText;
+                }
             };
+
+            if (_mode == BrowserAuthMode.YouTube)
+            {
+                var wvProxyArgs = ProxyService.GetWebView2ProxyArguments();
+                AuthWebView.CreationProperties = new CoreWebView2CreationProperties
+                {
+                    UserDataFolder = userDataFolder,
+                    AdditionalBrowserArguments = string.IsNullOrWhiteSpace(wvProxyArgs) ? null : wvProxyArgs
+                };
+            }
+            else
+            {
+                // Общий профиль с VkWebSessionBridge без AdditionalBrowserArguments во избежание 0x8007139F
+                AuthWebView.CreationProperties = new CoreWebView2CreationProperties
+                {
+                    UserDataFolder = userDataFolder
+                };
+            }
+
             await AuthWebView.EnsureCoreWebView2Async();
 
             var core = AuthWebView.CoreWebView2;
             if (core == null)
             {
-                EnableManualFallback("Не удалось инициализировать WebView2. Вставьте cookie или токен вручную.");
+                if (_mode == BrowserAuthMode.Vk)
+                    EnableManualFallback("Не удалось инициализировать WebView2. Вставьте cookie или токен вручную.");
+                else
+                    TxtStatus.Text = "Не удалось инициализировать WebView2.";
                 return;
             }
 
@@ -142,37 +233,58 @@ public partial class VkAuthWindow : Window
 
             if (_clearSession)
             {
-                await ClearVkCookiesAsync();
+                await ClearModeCookiesAsync();
             }
 
             AuthWebView.NavigationStarting += (_, ev) =>
             {
-                if (TryStashVkTokenFromUrl(ev.Uri))
+                if (_mode == BrowserAuthMode.Vk)
                 {
-                    ev.Cancel = true;
-                    RedirectVkAfterToken();
-                    return;
+                    if (TryStashVkTokenFromUrl(ev.Uri))
+                    {
+                        ev.Cancel = true;
+                        RedirectVkAfterToken();
+                        return;
+                    }
+                    TxtStatus.Text = "Загрузка страницы ВКонтакте...";
                 }
-                TxtStatus.Text = "Загрузка страницы ВКонтакте...";
+                else
+                {
+                    TxtStatus.Text = "Загрузка страницы Google / YouTube...";
+                }
             };
 
             AuthWebView.SourceChanged += async (_, _) =>
             {
                 var uri = AuthWebView.Source?.ToString();
-                if (TryStashVkTokenFromUrl(uri))
+                if (_mode == BrowserAuthMode.Vk)
                 {
-                    RedirectVkAfterToken();
-                    return;
+                    if (TryStashVkTokenFromUrl(uri))
+                    {
+                        RedirectVkAfterToken();
+                        return;
+                    }
+                    if (IsVkAuthenticatedPage(uri))
+                        await TryCaptureVkSessionAsync(uri);
                 }
-                if (IsVkAuthenticatedPage(uri))
-                    await TryCaptureVkSessionAsync(uri);
+                else if (IsYouTubeUrl(uri))
+                {
+                    await TryCaptureYouTubeCookiesAsync();
+                }
             };
 
             core.HistoryChanged += async (_, _) =>
             {
                 var uri = AuthWebView.Source?.ToString();
-                if (IsVkAuthenticatedPage(uri))
-                    await TryCaptureVkSessionAsync(uri);
+                if (_mode == BrowserAuthMode.Vk)
+                {
+                    if (IsVkAuthenticatedPage(uri))
+                        await TryCaptureVkSessionAsync(uri);
+                }
+                else if (IsYouTubeUrl(uri))
+                {
+                    await TryCaptureYouTubeCookiesAsync();
+                }
             };
 
             AuthWebView.NavigationCompleted += async (_, ev) =>
@@ -180,34 +292,55 @@ public partial class VkAuthWindow : Window
                 var currentUri = AuthWebView.Source?.ToString();
                 if (!ev.IsSuccess)
                 {
-                    TxtStatus.Text = $"Ошибка загрузки ({ev.WebErrorStatus}). Можно обновить страницу или ввести данные вручную.";
+                    TxtStatus.Text = _mode == BrowserAuthMode.Vk
+                        ? $"Ошибка загрузки ({ev.WebErrorStatus}). Можно обновить страницу или ввести данные вручную."
+                        : $"Ошибка загрузки ({ev.WebErrorStatus}). Нажмите ↻ чтобы повторить.";
                 }
                 else
                 {
-                    TxtStatus.Text = "Отсканируйте QR-код или войдите в VK — окно закроется автоматически.";
+                    TxtStatus.Text = _mode == BrowserAuthMode.Vk
+                        ? "Отсканируйте QR-код или войдите в VK — окно закроется автоматически."
+                        : "Войдите в Google-аккаунт — окно закроется после перехода на YouTube.";
                 }
 
-                if (TryStashVkTokenFromUrl(currentUri))
+                if (_mode == BrowserAuthMode.Vk)
                 {
-                    RedirectVkAfterToken();
-                    return;
+                    if (TryStashVkTokenFromUrl(currentUri))
+                    {
+                        RedirectVkAfterToken();
+                        return;
+                    }
+                    if (IsVkAuthenticatedPage(currentUri))
+                        await TryCaptureVkSessionAsync(currentUri);
                 }
-
-                if (IsVkAuthenticatedPage(currentUri))
-                    await TryCaptureVkSessionAsync(currentUri);
+                else if (IsYouTubeUrl(currentUri))
+                {
+                    await TryCaptureYouTubeCookiesAsync();
+                }
             };
 
             _pollTimer.Start();
-            TxtStatus.Text = "Открываем страницу ВКонтакте — отсканируйте QR-код или введите логин...";
-            core.Navigate(VkWebAudiosUrl);
+            if (_mode == BrowserAuthMode.YouTube)
+            {
+                TxtStatus.Text = "Открываем вход Google / YouTube...";
+                core.Navigate(YouTubeLoginUrl);
+            }
+            else
+            {
+                TxtStatus.Text = "Открываем страницу ВКонтакте — отсканируйте QR-код или введите логин...";
+                core.Navigate(VkWebAudiosUrl);
+            }
         }
         catch (Exception ex)
         {
-            EnableManualFallback($"WebView2 недоступен ({ex.Message}). Воспользуйтесь вводом вручную.");
+            if (_mode == BrowserAuthMode.Vk)
+                EnableManualFallback($"WebView2 недоступен ({ex.Message}). Воспользуйтесь вводом вручную.");
+            else
+                TxtStatus.Text = $"WebView2 недоступен: {ex.Message}";
         }
     }
 
-    private async Task ClearVkCookiesAsync()
+    private async Task ClearModeCookiesAsync()
     {
         var core = AuthWebView.CoreWebView2;
         if (core == null) return;
@@ -215,19 +348,27 @@ public partial class VkAuthWindow : Window
         try
         {
             var cm = core.CookieManager;
-            var urls = new[]
-            {
-                "https://vk.ru",
-                "https://m.vk.ru",
-                "https://id.vk.ru",
-                "https://login.vk.ru",
-                "https://oauth.vk.ru",
-                "https://vk.com",
-                "https://m.vk.com",
-                "https://id.vk.com",
-                "https://login.vk.com",
-                "https://oauth.vk.com"
-            };
+            var urls = _mode == BrowserAuthMode.YouTube
+                ? new[]
+                {
+                    "https://www.youtube.com",
+                    "https://music.youtube.com",
+                    "https://accounts.google.com",
+                    "https://youtube.com"
+                }
+                : new[]
+                {
+                    "https://vk.ru",
+                    "https://m.vk.ru",
+                    "https://id.vk.ru",
+                    "https://login.vk.ru",
+                    "https://oauth.vk.ru",
+                    "https://vk.com",
+                    "https://m.vk.com",
+                    "https://id.vk.com",
+                    "https://login.vk.com",
+                    "https://oauth.vk.com"
+                };
 
             foreach (var url in urls)
             {
@@ -242,7 +383,8 @@ public partial class VkAuthWindow : Window
     private void EnableManualFallback(string message)
     {
         TxtStatus.Text = message;
-        ManualPanel.Visibility = Visibility.Visible;
+        if (_mode == BrowserAuthMode.Vk)
+            ManualPanel.Visibility = Visibility.Visible;
     }
 
     private async Task PollSessionTickAsync()
@@ -251,14 +393,21 @@ public partial class VkAuthWindow : Window
             return;
 
         var currentUri = AuthWebView.Source?.ToString();
-        if (TryStashVkTokenFromUrl(currentUri))
+        if (_mode == BrowserAuthMode.Vk)
         {
-            RedirectVkAfterToken();
-            return;
-        }
+            if (TryStashVkTokenFromUrl(currentUri))
+            {
+                RedirectVkAfterToken();
+                return;
+            }
 
-        if (IsVkAuthenticatedPage(currentUri))
-            await TryCaptureVkSessionAsync(currentUri);
+            if (IsVkAuthenticatedPage(currentUri))
+                await TryCaptureVkSessionAsync(currentUri);
+        }
+        else if (IsYouTubeUrl(currentUri))
+        {
+            await TryCaptureYouTubeCookiesAsync();
+        }
     }
 
     private bool TryStashVkTokenFromUrl(string? url)
@@ -303,6 +452,15 @@ public partial class VkAuthWindow : Window
         }
 
         return true;
+    }
+
+    private static bool IsYouTubeUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return false;
+
+        var host = uri.Host.ToLowerInvariant();
+        return host is "www.youtube.com" or "youtube.com" or "music.youtube.com" or "m.youtube.com";
     }
 
     private async Task TryCaptureVkSessionAsync(string? currentUrl)
@@ -405,8 +563,6 @@ public partial class VkAuthWindow : Window
                     uid = pathUid;
             }
 
-            // Если вход завершился (например, через QR на id.vk.ru -> vk.ru), но UID ещё не проявился,
-            // один раз переходим на /audios чтобы VK отдал /audios<uid>
             if (uid <= 0 && !_redirectedToAudiosAfterAuth)
             {
                 _redirectedToAudiosAfterAuth = true;
@@ -420,8 +576,7 @@ public partial class VkAuthWindow : Window
             if (string.IsNullOrWhiteSpace(cookieHeader))
                 return;
 
-            // Даже если uid <= 0 после редиректа, передаём cookieHeader: VerifyAndSaveSessionAsync определит uid через ProbeUserIdentityAsync
-            CompleteVkSession(_pendingVkToken, cookieHeader, uid, uname);
+            CompleteAuthSuccess(_pendingVkToken, cookieHeader, uid, uname);
         }
         catch { }
         finally
@@ -430,16 +585,63 @@ public partial class VkAuthWindow : Window
         }
     }
 
-    private void CompleteVkSession(string? token, string? cookieHeader, long userId, string? userName)
+    private async Task TryCaptureYouTubeCookiesAsync()
+    {
+        if (_isFinished || _isCapturingSession || AuthWebView.CoreWebView2 == null)
+            return;
+
+        _isCapturingSession = true;
+        try
+        {
+            var cm = AuthWebView.CoreWebView2.CookieManager;
+            var ytCookies = await cm.GetCookiesAsync("https://www.youtube.com");
+            var musicCookies = await cm.GetCookiesAsync("https://music.youtube.com");
+            var rootCookies = await cm.GetCookiesAsync("https://youtube.com");
+            var merged = ytCookies.Concat(musicCookies).Concat(rootCookies)
+                .Where(c => !string.IsNullOrWhiteSpace(c.Domain) && !string.IsNullOrWhiteSpace(c.Name))
+                .GroupBy(c => $"{c.Domain}|{c.Path}|{c.Name}", StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .ToList();
+
+            bool signedIn = merged.Any(c =>
+                string.Equals(c.Name, "SAPISID", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(c.Name, "__Secure-3PAPISID", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(c.Name, "SID", StringComparison.OrdinalIgnoreCase));
+
+            if (!signedIn)
+                return;
+
+            var rows = merged.Select(c =>
+            {
+                var utcExp = c.Expires.Kind == DateTimeKind.Unspecified
+                    ? DateTime.SpecifyKind(c.Expires, DateTimeKind.Utc)
+                    : c.Expires.ToUniversalTime();
+                long exp = utcExp.Year >= 1971
+                    ? new DateTimeOffset(utcExp).ToUnixTimeSeconds()
+                    : 0;
+                return (c.Domain, c.Domain.StartsWith('.'), c.Path, c.IsSecure, exp, c.Name, c.Value);
+            });
+
+            YtDlpMusicProvider.SaveNetscapeCookies(rows);
+            CompleteAuthSuccess("ok", null, 0, null);
+        }
+        catch { }
+        finally
+        {
+            _isCapturingSession = false;
+        }
+    }
+
+    private void CompleteAuthSuccess(string? token, string? cookieHeader, long userId, string? userName)
     {
         if (_isFinished) return;
         _isFinished = true;
         _pollTimer.Stop();
+        ResultCompleted = true;
         ResultToken = token;
         ResultCookieHeader = cookieHeader;
         ResultUserId = userId;
         ResultUserName = userName;
-        try { DialogResult = true; } catch { }
         Close();
     }
 
@@ -481,6 +683,7 @@ public partial class VkAuthWindow : Window
 
     private void ManualToggle_Click(object sender, RoutedEventArgs e)
     {
+        if (_mode != BrowserAuthMode.Vk) return;
         bool open = ManualPanel.Visibility != Visibility.Visible;
         ManualPanel.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
         if (open)
@@ -496,15 +699,16 @@ public partial class VkAuthWindow : Window
 
     private void ApplyManual_Click(object sender, RoutedEventArgs e)
     {
+        if (_mode != BrowserAuthMode.Vk) return;
         var input = TxtManualInput.Text.Trim();
         if (string.IsNullOrWhiteSpace(input)) return;
 
         var vkToken = VkMusicProvider.ExtractAccessToken(input);
         var vkUid = VkMusicProvider.ExtractUserIdFromUrl(input);
         if (!string.IsNullOrWhiteSpace(vkToken))
-            CompleteVkSession(vkToken, null, vkUid, null);
+            CompleteAuthSuccess(vkToken, null, vkUid, null);
         else
-            CompleteVkSession(null, input, vkUid, null);
+            CompleteAuthSuccess(null, input, vkUid, null);
     }
 
     private void Minimize_Click(object sender, RoutedEventArgs e)
@@ -518,7 +722,6 @@ public partial class VkAuthWindow : Window
         if (_isFinished) return;
         _isFinished = true;
         _pollTimer.Stop();
-        try { DialogResult = false; } catch { }
         Close();
     }
 

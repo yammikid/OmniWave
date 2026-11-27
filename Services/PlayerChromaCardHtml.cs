@@ -1522,12 +1522,8 @@ public static class PlayerChromaCardHtml
           spotifyConnected: false,
           spotifyUserName: '',
           youtubeCookiesConnected: false,
-          bridgeConnected: false,
-          bridgeBrowserName: 'Браузер',
-          bridgeExtUrl: 'chrome://extensions',
           proxyActive: false
         },
-        bridgeSetupOpen: false,
         externalSource: null,
         windowSettings: {
           alwaysOnTop: true,
@@ -1753,7 +1749,7 @@ public static class PlayerChromaCardHtml
         const acc = state.accounts;
         const count = [acc.yandexConnected, acc.vkConnected, acc.spotifyConnected].filter(Boolean).length;
         if (state.externalSource || count >= 2) {
-          return { color: 'var(--status-ok)', label: state.externalSource ? 'Мост: активна сессия браузера/плеера' : ('Подключено аккаунтов: ' + count) };
+          return { color: 'var(--status-ok)', label: state.externalSource ? 'Активна системная медиа-сессия' : ('Подключено аккаунтов: ' + count) };
         }
         if (count === 1) return { color: 'var(--status-warn)', label: 'Подключён 1 сервис · гостевой поиск активен' };
         return { color: 'var(--status-warn)', label: 'Гостевой режим · откройте Настройки для входа' };
@@ -2135,49 +2131,18 @@ public static class PlayerChromaCardHtml
         }, 20);
       }
 
-      function buildBridgeSetupHTML(acc) {
-        const bName = (acc && acc.bridgeBrowserName) || 'браузере';
-        const bUrl = (acc && acc.bridgeExtUrl) || 'chrome://extensions';
-        return '<div class="ow-inline-auth ow-bridge-setup">' +
-          '<div style="font-size:11px;font-weight:600;color:#FFFFFF">Мост OmniWave для ' + esc(bName) + ' (настройка 1 раз)</div>' +
-          '<div style="font-size:10.5px;line-height:1.4;color:var(--ow-text-secondary)">' +
-            '1. Нажмите «Скопировать ссылку», вставьте в адресную строку браузера и включите <b>Режим разработчика</b>.<br>' +
-            '2. Откройте папку Моста и перетащите папку <b>BrowserBridge</b> на вкладку расширений — после этого все аккаунты подключатся в 1 клик.' +
-          '</div>' +
-          '<div class="ow-btn-grid">' +
-            '<button data-action="bridge-copy-url" class="ow-btn-secondary" style="font-size:11px;padding:5px 8px">Скопировать ' + esc(bUrl) + '</button>' +
-            '<button data-action="bridge-open-folder" class="ow-btn-secondary" style="font-size:11px;padding:5px 8px;border-color:rgba(var(--chroma-r),var(--chroma-g),var(--chroma-b),0.45);color:#FFFFFF">Открыть папку Моста</button>' +
-          '</div>' +
-        '</div>';
-      }
-
       function getAuthInstruction(provider, mode) {
         if (provider === 'yandex') {
           if (mode === 'device') {
             return 'Введите одноразовый код в открывшейся вкладке Яндекса (он уже скопирован — просто нажмите Ctrl+V) и подтвердите вход.';
           }
-          if (mode === 'bridge') {
-            return 'Подтвердите вход в Яндексе — Мост браузера перехватит токен автоматически.';
-          }
           return 'Подтвердите вход в Яндексе или вставьте токен y0_... вручную ниже.';
-        }
-        if (provider === 'vk') {
-          if (mode === 'bridge') {
-            return 'Синхронизация VK Музыки через Мост браузера — просто убедитесь, что вы вошли на vk.ru (OAuth не требуется).';
-          }
-          return 'Подтвердите вход в браузере и скопируйте адресную строку oauth.vk.ru (Ctrl+C). Если страница ВКонтакте крутит загрузку, включите «Мост браузера (1 клик)» выше — он подключит ВК напрямую без OAuth!';
         }
         if (provider === 'spotify') {
           if (mode === 'pkce') {
             return 'В открывшейся вкладке браузера нажмите «Принять / Agree» — Spotify подключится к OmniWave автоматически.';
           }
-          if (mode === 'bridge') {
-            return 'Синхронизация Spotify через Мост браузера — просто убедитесь, что вы вошли в open.spotify.com.';
-          }
           return 'Подтвердите доступ Spotify в браузере или вставьте cookie sp_dc=... вручную ниже.';
-        }
-        if (provider === 'youtube') {
-          return 'Поиск и воспроизведение YouTube уже работают без входа. Для передачи cookies выберите Мост браузера или импортируйте cookies.txt.';
         }
         return '';
       }
@@ -2185,12 +2150,10 @@ public static class PlayerChromaCardHtml
       function buildInlineAuthBoxHTML() {
         const ap = state.authPanel || {};
         if (!ap.provider) return '';
-        const names = { yandex: 'Яндекс Музыка', vk: 'VK Музыка', spotify: 'Spotify', youtube: 'YouTube' };
+        const names = { yandex: 'Яндекс Музыка', spotify: 'Spotify' };
         const ph = ap.provider === 'yandex'
           ? 'Или вставьте токен y0_... / URL вручную'
-          : (ap.provider === 'vk'
-            ? 'Или вставьте URL blank.html#access_token=... / vk1.a...'
-            : 'Или вставьте cookie sp_dc=... / Bearer BQ...');
+          : 'Или вставьте cookie sp_dc=... / Bearer BQ...';
         const stCls = ap.statusOk === true ? 'is-ok' : (ap.statusOk === false ? 'is-err' : 'is-warn');
 
         let specialHtml = '';
@@ -2207,19 +2170,6 @@ public static class PlayerChromaCardHtml
           }
         } else if (ap.provider === 'spotify' && ap.mode === 'pkce') {
           specialHtml = '<div style="font-size:10.5px;color:#4ADE80">⏳ Ожидание подтверждения Spotify в системном браузере...</div>';
-        } else if (ap.provider === 'youtube' && ap.mode === 'youtube_setup') {
-          return '<div class="ow-inline-auth">' +
-            '<div class="ow-setting-row">' +
-              '<span style="font-size:11px;font-weight:600;color:#FFFFFF">YouTube из вашего браузера</span>' +
-              '<button data-action="auth-cancel" class="ow-link-btn">Закрыть</button>' +
-            '</div>' +
-            '<div style="font-size:10.5px;line-height:1.38;color:var(--ow-text-secondary)">' + esc(getAuthInstruction('youtube', ap.mode)) + '</div>' +
-            buildBridgeSetupHTML(state.accounts) +
-            '<div class="ow-input-row">' +
-              '<button data-action="auth-import-yt-cookies" class="ow-btn-secondary" style="font-size:11px;padding:5px 8px">Выбрать файл cookies.txt</button>' +
-            '</div>' +
-            (ap.statusText ? '<div class="ow-status-line ' + stCls + '">' + esc(ap.statusText) + '</div>' : '') +
-          '</div>';
         }
 
         return '<div class="ow-inline-auth">' +
@@ -2252,13 +2202,10 @@ public static class PlayerChromaCardHtml
         const eqPresetNames = ['Flat', 'Bass Boost', 'Rock', 'Electronic', 'Vocal', 'Club', 'Acoustic', 'Late Night'];
 
         return '<div class="ow-stack">' +
-          /* 1. Аккаунты и браузерный вход */
+          /* 1. Аккаунты */
           '<div class="ow-card-block" data-section="accounts">' +
             '<div class="ow-section-head" style="margin-bottom:0">' +
-              '<span class="ow-section-label">Аккаунты и Мост</span>' +
-              (acc.bridgeConnected
-                ? '<span class="ow-mono" style="font-size:10px;color:#4ADE80;display:inline-flex;align-items:center;gap:4px"><span class="ow-dot" style="background:#4ADE80"></span>Мост активен</span>'
-                : '<button data-action="toggle-bridge-setup" class="ow-badge-btn" style="font-size:10px;padding:2px 7px">Мост браузера (1 клик)</button>') +
+              '<span class="ow-section-label">Аккаунты</span>' +
             '</div>' +
 
             '<div style="display:flex;flex-direction:column;gap:6px">' +
@@ -2267,7 +2214,7 @@ public static class PlayerChromaCardHtml
                   '<span class="ow-dot-lg" style="background:var(--src-ym)"></span>' +
                   '<div style="min-width:0">' +
                     '<div style="font-size:12px;color:#E5E7EB">Яндекс Музыка</div>' +
-                    '<div class="ow-bridge-sub truncate">' + esc(acc.yandexConnected ? (acc.yandexUserName || 'Подключён') : 'Войдите по коду в браузере или через Мост') + '</div>' +
+                    '<div class="ow-bridge-sub truncate">' + esc(acc.yandexConnected ? (acc.yandexUserName || 'Подключён') : 'Вход по коду в вашем браузере') + '</div>' +
                   '</div>' +
                 '</div>' +
                 '<div style="display:flex;align-items:center;gap:4px;flex-shrink:0">' +
@@ -2316,7 +2263,7 @@ public static class PlayerChromaCardHtml
                   '</div>' +
                 '</div>' +
                 '<div style="display:flex;align-items:center;gap:4px;flex-shrink:0">' +
-                  '<button data-auth-login="youtube" class="ow-badge-btn" title="Подключить cookies из браузера">' + (acc.bridgeConnected ? 'Из браузера' : 'Подключить') + '</button>' +
+                  '<button data-auth-login="youtube" class="ow-badge-btn" title="Войти в YouTube в отдельном окне для сохранения cookies">Войти</button>' +
                   '<button data-action="auth-import-yt-cookies" class="ow-badge-btn ' + (acc.youtubeCookiesConnected ? 'is-ok' : '') + '">cookies.txt</button>' +
                   (acc.youtubeCookiesConnected ? '<button data-auth-logout="youtube" class="ow-badge-btn">✕</button>' : '') +
                 '</div>' +
@@ -2333,10 +2280,6 @@ public static class PlayerChromaCardHtml
                 '<span class="ow-badge-btn is-ok" style="cursor:default">Активен</span>' +
               '</div>' +
             '</div>' +
-
-            (acc.bridgeConnected
-              ? '<button data-action="bridge-sync-all" class="ow-btn-secondary" style="border-color:rgba(74,222,128,0.45);color:#FFFFFF">⚡ Подключить ВК, Spotify и YouTube из браузера</button>'
-              : (state.bridgeSetupOpen && !(ap.provider === 'youtube' && ap.mode === 'youtube_setup') ? buildBridgeSetupHTML(acc) : '')) +
 
             buildInlineAuthBoxHTML() +
 
@@ -3129,10 +3072,21 @@ public static class PlayerChromaCardHtml
             const row = sSrc.closest('.ow-chips-row');
             if (row && Number(row.dataset.dragSuppressUntil || 0) > Date.now()) return;
             if (row && state.chipsScroll) state.chipsScroll.search = row.scrollLeft;
+            clearTimeout(searchDebounceTimer);
             state.searchFilter = sSrc.getAttribute('data-search-src');
-            refreshWholeTabPanel();
-            if (state.searchQuery.trim() || state.searchFilter === 'radio') {
-              sendToHost('search.run', { query: state.searchQuery.trim(), filter: state.searchFilter });
+            state.searchResults = [];
+            state.canLoadMore = false;
+            const qTrim = state.searchQuery.trim();
+            if (!qTrim && state.searchFilter !== 'radio') {
+              state.searchLoading = false;
+              state.searchStatus = '';
+              refreshWholeTabPanel();
+              sendToHost('search.run', { query: '', filter: state.searchFilter });
+            } else {
+              state.searchLoading = true;
+              state.searchStatus = state.searchFilter === 'radio' ? 'Загрузка радиостанций...' : 'Поиск...';
+              refreshWholeTabPanel();
+              sendToHost('search.run', { query: qTrim, filter: state.searchFilter });
             }
             return;
           }
@@ -3158,7 +3112,7 @@ public static class PlayerChromaCardHtml
           const authLogin = e.target.closest('[data-auth-login]');
           if (authLogin) {
             const prov = authLogin.getAttribute('data-auth-login');
-            if (prov === 'vk') {
+            if (prov === 'vk' || prov === 'youtube') {
               state.authPanel = {
                 provider: '',
                 mode: '',
@@ -3170,7 +3124,7 @@ public static class PlayerChromaCardHtml
                 statusOk: null
               };
               refreshTabBodyOnly();
-              sendToHost('auth.openBrowser', { provider: 'vk' });
+              sendToHost('auth.openBrowser', { provider: prov });
               return;
             }
             state.authPanel = {
@@ -3394,14 +3348,6 @@ public static class PlayerChromaCardHtml
                 refreshTabBodyOnly();
               }
               break;
-            case 'toggle-bridge-setup':
-              state.bridgeSetupOpen = !state.bridgeSetupOpen;
-              refreshTabBodyOnly();
-              if (state.bridgeSetupOpen) scrollElementIntoViewSoon('.ow-bridge-setup');
-              break;
-            case 'bridge-copy-url': sendToHost('bridge.copyExtUrl'); break;
-            case 'bridge-open-folder': sendToHost('bridge.openExtFolder'); break;
-            case 'bridge-sync-all': sendToHost('bridge.syncAll'); break;
             case 'toggle-proxy-pass':
               state.proxyPassVisible = !state.proxyPassVisible;
               refreshTabBodyOnly();
@@ -3734,20 +3680,10 @@ public static class PlayerChromaCardHtml
             spotifyConnected: Boolean(msg.spotifyConnected),
             spotifyUserName: msg.spotifyUserName || '',
             youtubeCookiesConnected: Boolean(msg.youtubeCookiesConnected),
-            bridgeConnected: Boolean(msg.bridgeConnected),
-            bridgeBrowserName: msg.bridgeBrowserName || state.accounts.bridgeBrowserName || 'Браузер',
-            bridgeExtUrl: msg.bridgeExtUrl || state.accounts.bridgeExtUrl || 'chrome://extensions',
             proxyActive: Boolean(msg.proxyActive)
           };
-          if (state.accounts.bridgeConnected) state.bridgeSetupOpen = false;
         } else {
           if ('youtubeCookiesConnected' in msg) state.accounts.youtubeCookiesConnected = Boolean(msg.youtubeCookiesConnected);
-          if ('bridgeConnected' in msg) {
-            state.accounts.bridgeConnected = Boolean(msg.bridgeConnected);
-            if (state.accounts.bridgeConnected) state.bridgeSetupOpen = false;
-          }
-          if (msg.bridgeBrowserName) state.accounts.bridgeBrowserName = msg.bridgeBrowserName;
-          if (msg.bridgeExtUrl) state.accounts.bridgeExtUrl = msg.bridgeExtUrl;
           if ('proxyActive' in msg) state.accounts.proxyActive = Boolean(msg.proxyActive);
         }
         ChromaEngine.updateForTrack(state.currentTrack, state.coverDataUrl);
@@ -3814,12 +3750,8 @@ public static class PlayerChromaCardHtml
                   spotifyConnected: Boolean(msg.spotifyConnected),
                   spotifyUserName: msg.spotifyUserName || '',
                   youtubeCookiesConnected: Boolean(msg.youtubeCookiesConnected),
-                  bridgeConnected: Boolean(msg.bridgeConnected),
-                  bridgeBrowserName: msg.bridgeBrowserName || state.accounts.bridgeBrowserName || 'Браузер',
-                  bridgeExtUrl: msg.bridgeExtUrl || state.accounts.bridgeExtUrl || 'chrome://extensions',
                   proxyActive: Boolean(msg.proxyActive)
                 };
-                if (state.accounts.bridgeConnected) state.bridgeSetupOpen = false;
                 if (!state.compact) {
                   const bDot = appRoot.querySelector('[data-role="bridge-dot"]');
                   const bm = getBridgeMeta();

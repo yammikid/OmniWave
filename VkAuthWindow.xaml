@@ -185,16 +185,19 @@
                                 Orientation="Horizontal"
                                 VerticalAlignment="Center"
                                 Margin="14,0,8,0">
-                        <Ellipse Width="9" Height="9"
+                        <Ellipse x:Name="HeaderDot"
+                                 Width="9" Height="9"
                                  Fill="#2688EB"
                                  VerticalAlignment="Center"
                                  Margin="0,0,8,0"/>
-                        <TextBlock Text="Вход в VK Музыку"
+                        <TextBlock x:Name="TxtHeaderTitle"
+                                   Text="Вход в VK Музыку"
                                    FontSize="12.5"
                                    FontWeight="SemiBold"
                                    Foreground="#F3F4F6"
                                    VerticalAlignment="Center"/>
-                        <TextBlock Text="• QR-код или логин (Ctrl + колесо для масштаба)"
+                        <TextBlock x:Name="TxtHeaderHint"
+                                   Text="• QR-код или логин (Ctrl + колесо для масштаба)"
                                    FontSize="11"
                                    Foreground="#6B7280"
                                    VerticalAlignment="Center"

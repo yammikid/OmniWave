@@ -62,7 +62,7 @@ public partial class PlayerWindow : Window
     private readonly Process _selfProcess = Process.GetCurrentProcess();
 
     private HwndSource? _hwndSource;
-    private BrowserBridgeServer? _browserBridge;
+    private VkAuthWindow? _activeAuthWindow;
     private CancellationTokenSource? _searchCts;
     private CancellationTokenSource? _proxyTestCts;
     private CancellationTokenSource? _authFlowCts;
@@ -171,14 +171,6 @@ public partial class PlayerWindow : Window
 
         _clipboardWatchTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(450) };
         _clipboardWatchTimer.Tick += async (_, _) => await OnClipboardWatchTickAsync();
-
-        _browserBridge = new BrowserBridgeServer(
-            _settings,
-            payload => Dispatcher.InvokeAsync(() => OnBridgeAuthReceivedAsync(payload)).Task.Unwrap());
-        _browserBridge.StatusChanged += _ => Dispatcher.BeginInvoke(() =>
-        {
-            if (!_isUiSuspended) PushAccountsUpdate();
-        });
 
         RestoreSavedGeometry();
 
@@ -377,7 +369,7 @@ public partial class PlayerWindow : Window
         _hwndSource = null;
 
         try { _authFlowCts?.Cancel(); _authFlowCts?.Dispose(); } catch { }
-        try { _browserBridge?.Dispose(); _browserBridge = null; } catch { }
+        try { _activeAuthWindow?.Close(); _activeAuthWindow = null; } catch { }
         try { _searchCts?.Cancel(); _searchCts?.Dispose(); } catch { }
         try { _proxyTestCts?.Cancel(); _proxyTestCts?.Dispose(); } catch { }
         try { _selfProcess.Dispose(); } catch { }
@@ -397,6 +389,7 @@ public partial class PlayerWindow : Window
         {
             Width = w;
             Height = h;
+            ShowInTaskbar = !_isCompactMode;
             Topmost = s.WindowAlwaysOnTop;
 
             var area = SystemParameters.WorkArea;
@@ -497,6 +490,8 @@ public partial class PlayerWindow : Window
         _isApplyingGeometry = true;
         try
         {
+            if (ShowInTaskbar != !compact)
+                ShowInTaskbar = !compact;
             Width = targetW;
             Height = targetH;
 
@@ -526,7 +521,9 @@ public partial class PlayerWindow : Window
             _isApplyingGeometry = false;
         }
 
+        Topmost = _settings.Current.WindowAlwaysOnTop;
         WindowBlurHelper.ApplyChromaWindowStyle(this, compact ? 12 : 16);
+        WindowBlurHelper.SetWindowAlpha(this, _settings.Current.WindowOpacityPercent / 100.0);
         Dispatcher.BeginInvoke(DispatcherPriority.Render, () => WindowBlurHelper.UpdateWin10RoundedRegion(this, _isCompactMode ? 12 : 16));
 
         if (save)
@@ -903,10 +900,15 @@ public partial class PlayerWindow : Window
 
     public void RestoreFromTray()
     {
+        ShowInTaskbar = !_isCompactMode;
         Show();
         if (WindowState == WindowState.Minimized)
             WindowState = WindowState.Normal;
         Activate();
+        Topmost = _settings.Current.WindowAlwaysOnTop;
+        WindowBlurHelper.ApplyChromaWindowStyle(this, _isCompactMode ? 12 : 16);
+        WindowBlurHelper.SetWindowAlpha(this, _settings.Current.WindowOpacityPercent / 100.0);
+        Dispatcher.BeginInvoke(DispatcherPriority.Render, () => WindowBlurHelper.UpdateWin10RoundedRegion(this, _isCompactMode ? 12 : 16));
         UpdateSuspensionState();
     }
 
@@ -1126,72 +1128,56 @@ public partial class PlayerWindow : Window
         _authFlowCts = new CancellationTokenSource();
         var ct = _authFlowCts.Token;
 
-        bool bridgeConnected = _browserBridge?.IsExtensionConnected == true;
-
         switch (provider)
         {
             case "yandex":
                 StartClipboardWatcher("yandex");
-                if (bridgeConnected)
-                {
-                    if (!TryOpenUrlInBrowser(YandexMusicProvider.OAuthAuthorizeUrl))
-                        return;
-                    PostToWeb("authPending", new { provider = "yandex", active = true, busy = false, mode = "bridge" });
-                    PostToWeb("status", new { message = "Подтвердите вход в Яндексе — Мост браузера перехватит токен сам" });
-                }
-                else
-                {
-                    _ = StartYandexDeviceAuthUiFlowAsync(ct);
-                }
+                _ = StartYandexDeviceAuthUiFlowAsync(ct);
                 break;
 
             case "vk":
-                _ = OpenVkBrowserAuthWindowAsync();
+                Dispatcher.BeginInvoke(DispatcherPriority.Background, () => _ = OpenVkBrowserAuthWindowAsync());
                 break;
 
             case "spotify":
                 StartClipboardWatcher("spotify");
-                if (bridgeConnected && _browserBridge != null)
-                {
-                    if (!TryOpenUrlInBrowser(_browserBridge.GetConnectUrl("spotify")))
-                        return;
-                    PostToWeb("authPending", new { provider = "spotify", active = true, busy = true, mode = "bridge" });
-                    PostToWeb("status", new { message = "Синхронизация Spotify через Мост браузера..." });
-                }
-                else
-                {
-                    _ = StartSpotifyPkceUiFlowAsync(ct);
-                }
+                _ = StartSpotifyPkceUiFlowAsync(ct);
                 break;
 
             case "youtube":
-                StartClipboardWatcher("youtube");
-                if (bridgeConnected && _browserBridge != null)
-                {
-                    if (!TryOpenUrlInBrowser(_browserBridge.GetConnectUrl("youtube")))
-                        return;
-                    PostToWeb("authPending", new { provider = "youtube", active = true, busy = true, mode = "bridge" });
-                    PostToWeb("status", new { message = "Синхронизация YouTube cookies через Мост браузера..." });
-                }
-                else
-                {
-                    PostToWeb("authPending", new { provider = "youtube", active = true, busy = false, mode = "youtube_setup" });
-                    PostToWeb("status", new { message = "Настройте Мост браузера (1 клик) или выберите cookies.txt для YouTube" });
-                }
+                Dispatcher.BeginInvoke(DispatcherPriority.Background, () => _ = OpenYouTubeBrowserAuthWindowAsync());
                 break;
         }
     }
 
     private async Task OpenVkBrowserAuthWindowAsync()
     {
+        if (_activeAuthWindow != null)
+        {
+            try { _activeAuthWindow.Activate(); } catch { }
+            return;
+        }
         if (_isAuthBusy) return;
         CancelActiveAuthFlow();
 
         PostToWeb("authPending", new { provider = "vk", active = false, busy = false });
         PostToWeb("status", new { message = "Откройте QR-код или войдите в аккаунт VK в отдельном окне..." });
 
-        var (token, cookieHeader, userId, userName) = VkAuthWindow.ShowVkAuth(this, clearSession: !_vk.IsAuthenticated);
-        if (string.IsNullOrWhiteSpace(token) && string.IsNullOrWhiteSpace(cookieHeader))
+        BrowserAuthResult res;
+        try
+        {
+            res = await VkAuthWindow.ShowAuthAsync(
+                this,
+                BrowserAuthMode.Vk,
+                clearSession: !_vk.IsAuthenticated,
+                onCreated: w => _activeAuthWindow = w);
+        }
+        finally
+        {
+            _activeAuthWindow = null;
+        }
+
+        if (!res.Completed || (string.IsNullOrWhiteSpace(res.Token) && string.IsNullOrWhiteSpace(res.CookieHeader)))
         {
             PostToWeb("status", new { message = "Вход в VK Музыку отменён" });
             return;
@@ -1204,7 +1190,7 @@ public partial class PlayerWindow : Window
 
         try
         {
-            (ok, message) = await _vk.VerifyAndSaveSessionAsync(token, cookieHeader, userId, userName);
+            (ok, message) = await _vk.VerifyAndSaveSessionAsync(res.Token, res.CookieHeader, res.UserId, res.UserName);
             if (ok)
             {
                 PostToWeb("status", new { message = $"{message}. Загрузка плейлистов ВК..." });
@@ -1226,6 +1212,44 @@ public partial class PlayerWindow : Window
         PushAccountsUpdate();
         PostToWeb("authResult", new { provider = "vk", ok, message });
         PostToWeb("status", new { message });
+    }
+
+    private async Task OpenYouTubeBrowserAuthWindowAsync()
+    {
+        if (_activeAuthWindow != null)
+        {
+            try { _activeAuthWindow.Activate(); } catch { }
+            return;
+        }
+        if (_isAuthBusy) return;
+        CancelActiveAuthFlow();
+
+        PostToWeb("authPending", new { provider = "youtube", active = false, busy = false });
+        PostToWeb("status", new { message = "Войдите в аккаунт Google / YouTube в отдельном окне..." });
+
+        BrowserAuthResult res;
+        try
+        {
+            res = await VkAuthWindow.ShowAuthAsync(
+                this,
+                BrowserAuthMode.YouTube,
+                clearSession: !YtDlpMusicProvider.HasYouTubeCookies,
+                onCreated: w => _activeAuthWindow = w);
+        }
+        finally
+        {
+            _activeAuthWindow = null;
+        }
+
+        if (!res.Completed)
+        {
+            PostToWeb("status", new { message = "Вход в YouTube отменён" });
+            return;
+        }
+
+        PushAccountsUpdate();
+        PostToWeb("authResult", new { provider = "youtube", ok = true, message = "YouTube cookies сохранены" });
+        PostToWeb("status", new { message = "YouTube cookies подключены" });
     }
 
     private bool TryOpenUrlInBrowser(string url)
@@ -1324,52 +1348,6 @@ public partial class PlayerWindow : Window
             PostToWeb("authResult", new { provider = "spotify", ok = false, message = errMsg });
             PostToWeb("status", new { message = errMsg });
         }
-    }
-
-    private async Task<(bool Ok, string Message)> OnBridgeAuthReceivedAsync(BridgeAuthPayload payload)
-    {
-        string prov = (payload.Provider ?? "").Trim().ToLowerInvariant();
-        if (prov == "spotify" && !string.IsNullOrWhiteSpace(payload.SpDc))
-        {
-            CancelActiveAuthFlow();
-            return await CompleteProviderAuthInternalAsync("spotify", $"sp_dc={payload.SpDc}");
-        }
-
-        if (prov == "youtube" && payload.Cookies != null && payload.Cookies.Count > 0)
-        {
-            CancelActiveAuthFlow();
-            var rows = payload.Cookies.Select(c =>
-            {
-                long exp = c.ExpirationDate > 0 ? (long)Math.Round(c.ExpirationDate) : 0;
-                string path = string.IsNullOrWhiteSpace(c.Path) ? "/" : c.Path;
-                bool sub = !c.HostOnly || c.Domain.StartsWith('.');
-                return (c.Domain, sub, path, c.Secure, exp, c.Name, c.Value);
-            });
-            YtDlpMusicProvider.SaveNetscapeCookies(rows);
-            PushAccountsUpdate();
-            string ytMsg = $"YouTube cookies синхронизированы ({payload.Cookies.Count} шт.)";
-            PostToWeb("authResult", new { provider = "youtube", ok = true, message = ytMsg });
-            PostToWeb("status", new { message = ytMsg });
-            return (true, ytMsg);
-        }
-
-        if (prov == "vk")
-        {
-            var vkInput = !string.IsNullOrWhiteSpace(payload.Raw) ? payload.Raw : payload.CookieHeader;
-            if (!string.IsNullOrWhiteSpace(vkInput))
-            {
-                CancelActiveAuthFlow();
-                return await CompleteProviderAuthInternalAsync("vk", vkInput);
-            }
-        }
-
-        if (prov == "yandex" && !string.IsNullOrWhiteSpace(payload.Raw))
-        {
-            CancelActiveAuthFlow();
-            return await CompleteProviderAuthInternalAsync("yandex", payload.Raw);
-        }
-
-        return (false, "Неподдерживаемый ответ от Моста браузера.");
     }
 
     private Task CompleteProviderAuthAsync(string provider, string rawInput)
@@ -2196,45 +2174,6 @@ public partial class PlayerWindow : Window
                 break;
             }
 
-            case "bridge.copyExtUrl":
-                if (_browserBridge != null)
-                {
-                    SafeSetClipboardText(_browserBridge.ExtensionsUrl);
-                    PostToWeb("status", new { message = $"Скопировано: {_browserBridge.ExtensionsUrl} — вставьте в адресную строку браузера и включите Режим разработчика" });
-                }
-                break;
-
-            case "bridge.openExtFolder":
-                if (_browserBridge != null)
-                {
-                    try
-                    {
-                        Directory.CreateDirectory(_browserBridge.ExtensionDirectory);
-                        Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{_browserBridge.ManifestPath}\"")
-                        {
-                            UseShellExecute = true
-                        });
-                        PostToWeb("status", new { message = "Нажмите «Загрузить распакованное расширение» и укажите папку BrowserBridge" });
-                    }
-                    catch (Exception ex)
-                    {
-                        PostToWeb("status", new { message = $"Не удалось открыть папку: {ex.Message}" });
-                    }
-                }
-                break;
-
-            case "bridge.syncAll":
-                if (_browserBridge?.IsExtensionConnected == true)
-                {
-                    TryOpenUrlInBrowser(_browserBridge.GetConnectUrl("all"));
-                    PostToWeb("status", new { message = "Синхронизация Spotify и YouTube через Мост браузера..." });
-                }
-                else
-                {
-                    PostToWeb("status", new { message = "Сначала добавьте папку BrowserBridge в расширения вашего браузера (1 раз)." });
-                }
-                break;
-
             case "auth.disconnect":
             {
                 var prov = ReadStr(root, "provider") ?? "";
@@ -2669,9 +2608,6 @@ public partial class PlayerWindow : Window
             windowSettings = BuildWindowSettingsDto(),
             proxy = BuildProxyDto(_settings.Current),
             youtubeCookiesConnected = YtDlpMusicProvider.HasYouTubeCookies,
-            bridgeConnected = _browserBridge?.IsExtensionConnected == true,
-            bridgeBrowserName = _browserBridge?.BrowserName ?? "Браузер",
-            bridgeExtUrl = _browserBridge?.ExtensionsUrl ?? "chrome://extensions",
             externalSource = !_controller.IsLocalActive ? _controller.CurrentMediaState?.ActiveBrand : null,
             proxyActive = ProxyService.IsActive
         });
@@ -2710,9 +2646,6 @@ public partial class PlayerWindow : Window
             spotifyConnected = _spotify.IsAuthenticated,
             spotifyUserName = s.SpotifyUserName ?? "",
             youtubeCookiesConnected = YtDlpMusicProvider.HasYouTubeCookies,
-            bridgeConnected = _browserBridge?.IsExtensionConnected == true,
-            bridgeBrowserName = _browserBridge?.BrowserName ?? "Браузер",
-            bridgeExtUrl = _browserBridge?.ExtensionsUrl ?? "chrome://extensions",
             favorites = _favorites.Select(ToDto).ToList(),
             playlists = playlists.Select(ToPlaylistDto).ToList(),
             queue = queueItems.Select(ToDto).ToList(),
@@ -2796,9 +2729,6 @@ public partial class PlayerWindow : Window
             spotifyConnected = _spotify.IsAuthenticated,
             spotifyUserName = s.SpotifyUserName ?? "",
             youtubeCookiesConnected = YtDlpMusicProvider.HasYouTubeCookies,
-            bridgeConnected = _browserBridge?.IsExtensionConnected == true,
-            bridgeBrowserName = _browserBridge?.BrowserName ?? "Браузер",
-            bridgeExtUrl = _browserBridge?.ExtensionsUrl ?? "chrome://extensions",
             proxyActive = ProxyService.IsActive
         });
     }
@@ -2859,7 +2789,22 @@ public partial class PlayerWindow : Window
 
     private async Task PerformSearchAsync(string query)
     {
-        if (string.IsNullOrEmpty(query) && _activeSearchFilter != "radio") return;
+        if (string.IsNullOrWhiteSpace(query) && _activeSearchFilter != "radio")
+        {
+            _searchCts?.Cancel();
+            _lastQuery = "";
+            _rawSearchTracks.Clear();
+            _currentSearchGroups.Clear();
+            _currentResults.Clear();
+            PostToWeb("searchResults", new
+            {
+                items = Array.Empty<object>(),
+                status = "",
+                canLoadMore = false,
+                isLoading = false
+            });
+            return;
+        }
 
         if (SpotifyMusicProvider.IsSpotifyUrl(query))
         {
