@@ -6,7 +6,7 @@ namespace DynamicIsland.Services;
 
 /// <summary>
 /// Лёгкий нейросетевой детектор речи Silero VAD v5 поверх onnxruntime.dll (~2.2 МБ на диске).
-/// Используется для точного определения границ речи в реальном времени и обрезки тишины перед Whisper.
+/// Используется для точного определения границ речи в реальном времени и обрезки тишины перед GigaAM v3.
 /// </summary>
 public sealed class SileroVadEngine : IDisposable
 {

@@ -1,7 +1,7 @@
 namespace DynamicIsland.Services;
 
 /// <summary>
-/// Общая 16 кГц DSP-предобработка речи перед локальными ASR-движками (GigaAM v3 и Whisper Turbo):
+/// Общая 16 кГц DSP-предобработка речи перед локальными ASR-движками (GigaAM v3):
 /// удаление DC-смещения, ФВЧ ~85 Гц, мягкое адаптивное подавление стационарного шума, AGC и tanh-лимитер.
 /// </summary>
 public static class VoiceAudioDsp

@@ -53,8 +53,6 @@ public class AppSettings
     public int VoiceAssistantVolume { get; set; } = 85;
     public bool VoiceWakeWordEnabled { get; set; }
     public string VoiceWakeWords { get; set; } = "омни, волна";
-    public bool VoiceWhisperEnabled { get; set; } = true;
-    public string VoiceWhisperModel { get; set; } = "turbo-q5";
     public bool VoiceTtsEnabled { get; set; } = true;
     public string VoiceTtsVoiceName { get; set; } = "supertonic:F1";
     public bool VoiceDuckMusic { get; set; } = true;
@@ -103,7 +101,6 @@ public class AppSettings
         VoiceWakeWords = (VoiceWakeWords ?? "").Trim();
         if (string.IsNullOrWhiteSpace(VoiceWakeWords))
             VoiceWakeWords = "омни, волна";
-        VoiceWhisperModel = "turbo-q5";
 
         var tts = (VoiceTtsVoiceName ?? "").Trim().ToUpperInvariant();
         VoiceTtsVoiceName = tts switch

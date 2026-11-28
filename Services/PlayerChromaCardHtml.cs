@@ -1709,10 +1709,7 @@ public static class PlayerChromaCardHtml
           volume: 85,
           voskReady: false,
           gigaAmReady: false,
-          whisperReady: false,
-          whisperRunning: false,
           neuralTtsReady: false,
-          vadReady: false,
           downloadBusy: false,
           downloadPercent: 0,
           downloadStage: '',
@@ -1721,14 +1718,11 @@ public static class PlayerChromaCardHtml
           diskUsageMb: 0,
           wakeWordEnabled: false,
           wakeWords: 'омни, волна',
-          whisperEnabled: true,
-          whisperModel: 'turbo-q5',
           ttsEnabled: true,
           ttsVoiceName: 'supertonic:F1',
           duckMusic: true,
           hotkeyEnabled: true,
           inputDeviceIndex: -1,
-          activeEngineLabel: 'Модели не установлены',
           sleepTimerMinutes: 0,
           russianVoices: [],
           inputDevices: []
@@ -1739,8 +1733,6 @@ public static class PlayerChromaCardHtml
           volume: 85,
           wakeWordEnabled: false,
           wakeWords: 'омни, волна',
-          whisperEnabled: true,
-          whisperModel: 'turbo-q5',
           ttsEnabled: true,
           ttsVoiceName: 'supertonic:F1',
           duckMusic: true,
@@ -2035,7 +2027,7 @@ public static class PlayerChromaCardHtml
             title: 'Голосовой помощник выключен (нажмите, чтобы открыть настройки)'
           };
         }
-        const active = al.listening || v.state === 'commandListening' || v.state === 'processingWhisper' || v.state === 'speaking';
+        const active = al.listening || v.state === 'commandListening' || v.state === 'processing' || v.state === 'speaking';
         const wake = !active && v.state === 'wakeListening';
         const cls = active ? 'is-listening' : (wake ? 'is-wake' : '');
         const title = v.statusText
@@ -2046,7 +2038,7 @@ public static class PlayerChromaCardHtml
 
       function buildVoiceStripHTML() {
         const v = state.voice || {};
-        const isActive = v.state === 'commandListening' || v.state === 'processingWhisper' || v.state === 'speaking';
+        const isActive = v.state === 'commandListening' || v.state === 'processing' || v.state === 'speaking';
         if (!isActive) return '';
         const text = v.liveTranscript || v.statusText || 'Слушаю...';
         const lvl = Math.max(0.2, Math.min(1, Number(v.audioLevel || 0)));
@@ -2328,8 +2320,6 @@ public static class PlayerChromaCardHtml
           volume: typeof v.volume === 'number' ? v.volume : 85,
           wakeWordEnabled: Boolean(v.wakeWordEnabled),
           wakeWords: v.wakeWords || 'омни, волна',
-          whisperEnabled: v.whisperEnabled !== false,
-          whisperModel: 'turbo-q5',
           ttsEnabled: v.ttsEnabled !== false,
           ttsVoiceName: v.ttsVoiceName || 'supertonic:F1',
           duckMusic: v.duckMusic !== false,
@@ -2416,7 +2406,6 @@ public static class PlayerChromaCardHtml
         const activeTtsVoice = (vd.ttsVoiceName && vd.ttsVoiceName.startsWith('supertonic:'))
           ? vd.ttsVoiceName
           : (ruVoices[0] ? ruVoices[0].id : 'supertonic:F1');
-        const whisperInstallLabel = 'Скачать Whisper Turbo v3 (547 МБ)';
         const micDevs = Array.isArray(vc.inputDevices) && vc.inputDevices.length > 0
           ? vc.inputDevices
           : [{ index: -1, name: 'Микрофон по умолчанию' }];
@@ -2511,23 +2500,22 @@ public static class PlayerChromaCardHtml
             '<button data-action="pl-sync" class="ow-btn-secondary">↻ Синхронизировать все плейлисты</button>' +
           '</div>' +
 
-          /* 2. Голосовой помощник (Silero VAD v5 + Vosk + GigaAM v3 + Whisper + Supertonic 3) */
+          /* 2. Голосовой помощник (Sber GigaAM v3 + Wake Vosk + Supertonic 3) */
           '<div class="ow-card-block" data-section="alice">' +
             '<div class="ow-section-head" style="margin-bottom:0">' +
               '<span class="ow-section-label">Голосовой помощник</span>' +
-              '<div style="display:flex;align-items:center;gap:6px;flex-shrink:0">' +
-                '<span class="ow-badge-btn ' + (vd.enabled !== false && (vc.voskReady || vc.gigaAmReady || vc.whisperReady || vc.neuralTtsReady) ? 'is-ok' : '') + '" style="cursor:default">' + esc(vd.enabled === false ? 'Выключен' : (vc.activeEngineLabel || 'Не установлен')) + '</span>' +
+              '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0">' +
+                (vd.enabled === false
+                  ? '<span class="ow-badge-btn" style="cursor:default">Выкл.</span>'
+                  : (vc.diskUsageMb > 0 ? '<span class="ow-mono" style="font-size:10px;color:var(--ow-text-muted)">' + vc.diskUsageMb + ' МБ</span>' : '')) +
                 '<button data-setting-toggle="voiceAssistantEnabled" role="switch" aria-checked="' + (vd.enabled !== false ? 'true' : 'false') + '" class="ow-switch" title="Включить / полностью отключить голосового помощника"></button>' +
               '</div>' +
             '</div>' +
 
             '<div class="ow-chips-wrap">' +
-              '<span class="ow-badge-btn ' + (vc.voskReady ? 'is-ok' : '') + '" style="cursor:default">' + (vc.voskReady ? '✓ Vosk RU' : 'Vosk: нет') + '</span>' +
-              '<span class="ow-badge-btn ' + (vc.vadReady ? 'is-ok' : '') + '" style="cursor:default">' + (vc.vadReady ? '✓ Silero VAD' : 'VAD: нет') + '</span>' +
-              '<span class="ow-badge-btn ' + (vc.gigaAmReady ? 'is-ok' : '') + '" style="cursor:default">' + (vc.gigaAmReady ? '✓ GigaAM v3 RU' : 'GigaAM v3: нет') + '</span>' +
-              '<span class="ow-badge-btn ' + (vc.whisperReady ? 'is-ok' : '') + '" style="cursor:default">' + (vc.whisperReady ? '✓ Whisper Turbo v3' : 'Whisper Turbo: нет') + '</span>' +
-              '<span class="ow-badge-btn ' + (vc.neuralTtsReady ? 'is-ok' : '') + '" style="cursor:default">' + (vc.neuralTtsReady ? '✓ Нейро-голос' : 'Нейро-голос: нет') + '</span>' +
-              (vc.diskUsageMb > 0 ? '<span class="ow-mono" style="font-size:10px;color:var(--ow-text-muted);margin-left:auto">' + vc.diskUsageMb + ' МБ</span>' : '') +
+              '<span class="ow-badge-btn ' + (vc.gigaAmReady ? 'is-ok' : '') + '" style="cursor:default">' + (vc.gigaAmReady ? '✓ GigaAM v3' : 'GigaAM v3: нет') + '</span>' +
+              '<span class="ow-badge-btn ' + (vc.voskReady ? 'is-ok' : '') + '" style="cursor:default">' + (vc.voskReady ? '✓ Wake (Vosk)' : 'Wake: нет') + '</span>' +
+              '<span class="ow-badge-btn ' + (vc.neuralTtsReady ? 'is-ok' : '') + '" style="cursor:default">' + (vc.neuralTtsReady ? '✓ Нейро-голос' : 'Голос: нет') + '</span>' +
             '</div>' +
 
             (vc.downloadBusy
@@ -2539,24 +2527,19 @@ public static class PlayerChromaCardHtml
                   '<div class="ow-progress-bar"><div data-role="voice-dl-fill" class="ow-progress-fill" style="width:' + Math.max(0, Math.min(100, vc.downloadPercent || 0)) + '%"></div></div>' +
                   '<button data-action="voice-cancel-install" class="ow-btn-secondary">Отмена загрузки</button>' +
                 '</div>'
-              : ((!vc.voskReady && !vc.gigaAmReady && !vc.whisperReady && !vc.neuralTtsReady)
+              : ((!vc.voskReady && !vc.gigaAmReady && !vc.neuralTtsReady)
                   ? '<div style="display:flex;flex-direction:column;gap:6px">' +
+                      '<button data-action="voice-install-hybrid" class="ow-btn-secondary" style="border-color:rgba(var(--chroma-r),var(--chroma-g),var(--chroma-b),0.55);color:#FFFFFF">Установить всё (GigaAM v3 + Wake + Голос)</button>' +
                       '<div class="ow-btn-grid">' +
-                        '<button data-action="voice-install-hybrid" class="ow-btn-secondary" style="border-color:rgba(var(--chroma-r),var(--chroma-g),var(--chroma-b),0.5);color:#FFFFFF">Установить всё (Гибрид + GigaAM)</button>' +
-                        '<button data-action="voice-install-gigaam" class="ow-btn-secondary">GigaAM v3 RU (214 МБ)</button>' +
-                      '</div>' +
-                      '<div class="ow-btn-grid">' +
-                        '<button data-action="voice-install-vosk" class="ow-btn-secondary">Vosk + VAD (61 МБ)</button>' +
+                        '<button data-action="voice-install-gigaam" class="ow-btn-secondary">GigaAM v3 (214 МБ)</button>' +
                         '<button data-action="voice-install-tts" class="ow-btn-secondary">Нейро-голос (женский)</button>' +
                       '</div>' +
                     '</div>'
-                  : ((!vc.whisperReady || !vc.voskReady || !vc.gigaAmReady || !vc.neuralTtsReady || !vc.vadReady)
+                  : ((!vc.voskReady || !vc.gigaAmReady || !vc.neuralTtsReady)
                       ? '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
-                          (!vc.gigaAmReady ? '<button data-action="voice-install-gigaam" class="ow-btn-secondary" style="flex:1;min-width:165px;border-color:rgba(var(--chroma-r),var(--chroma-g),var(--chroma-b),0.55);color:#FFFFFF">Скачать GigaAM v3 RU (214 МБ)</button>' : '') +
-                          (!vc.vadReady ? '<button data-action="voice-install-vad" class="ow-btn-secondary" style="flex:1;min-width:130px">Докачать Silero VAD (3 МБ)</button>' : '') +
-                          (!vc.neuralTtsReady ? '<button data-action="voice-install-tts" class="ow-btn-secondary" style="flex:1;min-width:150px">Скачать нейро-голос (женский)</button>' : '') +
-                          (!vc.whisperReady ? '<button data-action="voice-install-whisper" class="ow-btn-secondary" style="flex:1;min-width:130px">' + esc(whisperInstallLabel) + '</button>' : '') +
-                          (!vc.voskReady ? '<button data-action="voice-install-vosk" class="ow-btn-secondary" style="flex:1;min-width:110px">Докачать Vosk</button>' : '') +
+                          (!vc.gigaAmReady ? '<button data-action="voice-install-gigaam" class="ow-btn-secondary" style="flex:1;min-width:155px;border-color:rgba(var(--chroma-r),var(--chroma-g),var(--chroma-b),0.55);color:#FFFFFF">Скачать GigaAM v3 (214 МБ)</button>' : '') +
+                          (!vc.voskReady ? '<button data-action="voice-install-vosk" class="ow-btn-secondary" style="flex:1;min-width:120px">Докачать Wake (Vosk)</button>' : '') +
+                          (!vc.neuralTtsReady ? '<button data-action="voice-install-tts" class="ow-btn-secondary" style="flex:1;min-width:140px">Скачать нейро-голос</button>' : '') +
                           '<button data-action="voice-delete-models" class="ow-btn-secondary" style="flex:0 0 auto;padding:6px 10px">Удалить</button>' +
                         '</div>'
                       : '<div class="ow-setting-row">' +
@@ -2564,7 +2547,7 @@ public static class PlayerChromaCardHtml
                           '<button data-action="voice-delete-models" class="ow-badge-btn">Удалить</button>' +
                         '</div>'))) +
 
-            (vd.enabled === false && (!vc.whisperReady || !vc.voskReady || !vc.gigaAmReady || !vc.neuralTtsReady || !vc.vadReady) && (vc.voskReady || vc.gigaAmReady || vc.whisperReady || vc.neuralTtsReady)
+            (vd.enabled === false && (!vc.voskReady || !vc.gigaAmReady || !vc.neuralTtsReady) && (vc.voskReady || vc.gigaAmReady || vc.neuralTtsReady)
               ? '<div class="ow-status-line">Помощник выключен — микрофон, модели и Alt+V не используются</div>'
               : '') +
 
@@ -2581,8 +2564,6 @@ public static class PlayerChromaCardHtml
                   '<button data-action="voice-save" class="ow-badge-btn is-ok">Сохранить</button>' +
                 '</div>' +
               '</div>' +
-
-              renderToggleRow('voiceWhisperEnabled', 'Уточнять треки через Whisper Turbo v3 (RU+EN)', vd.whisperEnabled !== false) +
 
               '<div style="display:flex;flex-direction:column;gap:6px">' +
                 '<div class="ow-setting-row">' +
@@ -3051,8 +3032,6 @@ public static class PlayerChromaCardHtml
           volume: typeof vd.volume === 'number' ? vd.volume : 85,
           wakeWordEnabled: Boolean(vd.wakeWordEnabled),
           wakeWords: vd.wakeWords || 'омни, волна',
-          whisperEnabled: vd.whisperEnabled !== false,
-          whisperModel: 'turbo-q5',
           ttsEnabled: vd.ttsEnabled !== false,
           ttsVoiceName: vd.ttsVoiceName || '',
           duckMusic: vd.duckMusic !== false,
@@ -3577,12 +3556,11 @@ public static class PlayerChromaCardHtml
           const sw = e.target.closest('[data-setting-toggle]');
           if (sw) {
             const key = sw.getAttribute('data-setting-toggle');
-            if (key === 'voiceAssistantEnabled' || key === 'voiceWakeWordEnabled' || key === 'voiceWhisperEnabled' || key === 'voiceTtsEnabled' || key === 'voiceDuckMusic' || key === 'voiceHotkeyEnabled') {
+            if (key === 'voiceAssistantEnabled' || key === 'voiceWakeWordEnabled' || key === 'voiceTtsEnabled' || key === 'voiceDuckMusic' || key === 'voiceHotkeyEnabled') {
               const draftProp = key === 'voiceAssistantEnabled' ? 'enabled'
                 : (key === 'voiceWakeWordEnabled' ? 'wakeWordEnabled'
-                : (key === 'voiceWhisperEnabled' ? 'whisperEnabled'
                 : (key === 'voiceTtsEnabled' ? 'ttsEnabled'
-                : (key === 'voiceDuckMusic' ? 'duckMusic' : 'hotkeyEnabled'))));
+                : (key === 'voiceDuckMusic' ? 'duckMusic' : 'hotkeyEnabled')));
               const nextVal = !Boolean(state.voiceDraft[draftProp]);
               state.voiceDraft[draftProp] = nextVal;
               if (key === 'voiceAssistantEnabled' && state.voice) state.voice.enabled = nextVal;
@@ -3797,14 +3775,8 @@ public static class PlayerChromaCardHtml
             case 'voice-install-gigaam':
               sendToHost('voice.installModels', { mode: 'gigaam' });
               break;
-            case 'voice-install-whisper':
-              sendToHost('voice.installModels', { mode: 'whisper' });
-              break;
             case 'voice-install-tts':
               sendToHost('voice.installModels', { mode: 'tts' });
-              break;
-            case 'voice-install-vad':
-              sendToHost('voice.installModels', { mode: 'vad' });
               break;
             case 'voice-cancel-install':
               sendToHost('voice.cancelInstall');
@@ -4538,12 +4510,12 @@ public static class PlayerChromaCardHtml
                 {
                   const prevSt = state.voice ? state.voice.state : '';
                   const prevBusy = Boolean(state.voice && state.voice.downloadBusy);
-                  const prevStrip = prevSt === 'commandListening' || prevSt === 'processingWhisper' || prevSt === 'speaking';
+                  const prevStrip = prevSt === 'commandListening' || prevSt === 'processing' || prevSt === 'speaking';
                   state.voice = Object.assign({}, state.voice, msg);
                   syncVoiceDraftFromServer(false);
                   const nextSt = state.voice.state || '';
                   const nextBusy = Boolean(state.voice.downloadBusy);
-                  const nextStrip = nextSt === 'commandListening' || nextSt === 'processingWhisper' || nextSt === 'speaking';
+                  const nextStrip = nextSt === 'commandListening' || nextSt === 'processing' || nextSt === 'speaking';
                   const mic = getVoiceMicMeta();
                   appRoot.querySelectorAll('[data-role="mic-btn"]').forEach(btn => {
                     btn.classList.toggle('is-listening', mic.active);

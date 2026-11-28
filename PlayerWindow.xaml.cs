@@ -182,7 +182,7 @@ public partial class PlayerWindow : Window
         _clipboardWatchTimer.Tick += async (_, _) => await OnClipboardWatchTickAsync();
 
         RestoreSavedGeometry();
-        _ = Task.Run(() => _voiceModels.CleanupObsoleteWhisperModels());
+        _ = Task.Run(() => _voiceModels.CleanupObsoleteVoiceModels());
         _voiceFeedback = new VoiceFeedbackService(_voiceModels)
         {
             VolumePercent = _settings.Current.VoiceAssistantVolume
@@ -4685,10 +4685,7 @@ public partial class PlayerWindow : Window
             volume = s.VoiceAssistantVolume,
             voskReady = st?.VoskReady ?? _voiceModels.IsVoskReady(),
             gigaAmReady = st?.GigaAmReady ?? _voiceModels.IsGigaAmReady(),
-            whisperReady = st?.WhisperReady ?? _voiceModels.IsWhisperReady(s.VoiceWhisperModel),
-            whisperRunning = st?.WhisperRunning ?? false,
             neuralTtsReady = st?.NeuralTtsReady ?? _voiceModels.IsNeuralTtsReady(),
-            vadReady = st?.VadReady ?? (_voiceModels.IsSileroVadReady() || _voiceModels.IsWhisperVadReady()),
             downloadBusy = st?.DownloadBusy ?? false,
             downloadPercent = st?.DownloadPercent ?? 0,
             downloadStage = st?.DownloadStage ?? "",
@@ -4697,14 +4694,11 @@ public partial class PlayerWindow : Window
             diskUsageMb = st?.DiskUsageMb ?? _voiceModels.GetTotalDiskUsageMb(),
             wakeWordEnabled = s.VoiceWakeWordEnabled,
             wakeWords = s.VoiceWakeWords,
-            whisperEnabled = s.VoiceWhisperEnabled,
-            whisperModel = s.VoiceWhisperModel,
             ttsEnabled = s.VoiceTtsEnabled,
             ttsVoiceName = s.VoiceTtsVoiceName,
             duckMusic = s.VoiceDuckMusic,
             hotkeyEnabled = s.VoiceHotkeyEnabled,
             inputDeviceIndex = s.VoiceInputDeviceIndex,
-            activeEngineLabel = st?.ActiveEngineLabel ?? "Модели не установлены",
             sleepTimerMinutes = sleepRemainingMin,
             russianVoices = VoiceFeedbackService.GetAvailableVoices(_voiceModels).Select(v => new
             {
@@ -4739,8 +4733,6 @@ public partial class PlayerWindow : Window
             ? wkEl.ValueKind == JsonValueKind.True
             : _settings.Current.VoiceWakeWordEnabled;
         string wakeWords = ReadStr(root, "wakeWords") ?? _settings.Current.VoiceWakeWords;
-        bool whisperOn = !root.TryGetProperty("whisperEnabled", out var whEl) || whEl.ValueKind != JsonValueKind.False;
-        string whisperModel = ReadStr(root, "whisperModel") ?? _settings.Current.VoiceWhisperModel;
         bool ttsOn = !root.TryGetProperty("ttsEnabled", out var ttEl) || ttEl.ValueKind != JsonValueKind.False;
         string ttsVoice = ReadStr(root, "ttsVoiceName") ?? _settings.Current.VoiceTtsVoiceName;
         bool duck = !root.TryGetProperty("duckMusic", out var dkEl) || dkEl.ValueKind != JsonValueKind.False;
@@ -4756,8 +4748,6 @@ public partial class PlayerWindow : Window
                 s.VoiceAssistantVolume = voiceVol;
                 s.VoiceWakeWordEnabled = wakeOn;
                 s.VoiceWakeWords = wakeWords;
-                s.VoiceWhisperEnabled = whisperOn;
-                s.VoiceWhisperModel = "turbo-q5";
                 s.VoiceTtsEnabled = ttsOn;
                 s.VoiceTtsVoiceName = ttsVoice;
                 s.VoiceDuckMusic = duck;
@@ -4873,7 +4863,7 @@ public partial class PlayerWindow : Window
         }
 
         if (_voiceAssistant != null &&
-            (_voiceModels.IsVoskReady() || _voiceModels.IsGigaAmReady() || _voiceModels.IsWhisperReady(_settings.Current.VoiceWhisperModel)))
+            (_voiceModels.IsGigaAmReady() || _voiceModels.IsVoskReady()))
         {
             await _voiceAssistant.ToggleManualListeningAsync();
             return;
