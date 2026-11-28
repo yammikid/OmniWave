@@ -25,6 +25,7 @@ public sealed class MicrophoneCaptureService : IDisposable
     private delegate void WaveInProc(IntPtr hwi, uint uMsg, IntPtr dwInstance, IntPtr dwParam1, IntPtr dwParam2);
 
     private readonly object _stateLock = new();
+    private readonly object _waveLock = new();
     private readonly WaveInProc _waveInCallback;
 
     private IntPtr _hWaveIn;
@@ -208,31 +209,41 @@ public sealed class MicrophoneCaptureService : IDisposable
 
             if (_stopping) break;
 
-            var hdrPtrs = _hdrPtrs;
-            var bufs = _audioBuffers;
-            var hWave = _hWaveIn;
-            if (hdrPtrs == null || bufs == null || hWave == IntPtr.Zero || idx < 0 || idx >= bufs.Length)
-                continue;
+            byte[]? chunkCopy = null;
+            int recorded = 0;
 
-            var hdr = Marshal.PtrToStructure<WAVEHDR>(hdrPtrs[idx]);
-            int recorded = (int)Math.Min(hdr.dwBytesRecorded, (uint)bufs[idx].Length);
-            if (recorded > 1)
+            lock (_waveLock)
             {
-                byte[] copy = new byte[recorded];
-                Buffer.BlockCopy(bufs[idx], 0, copy, 0, recorded);
-                float rms = ComputeNormalizedRms(copy, recorded);
-                try
+                var hdrPtrs = _hdrPtrs;
+                var bufs = _audioBuffers;
+                var hWave = _hWaveIn;
+                if (_stopping || hdrPtrs == null || bufs == null || hWave == IntPtr.Zero || idx < 0 || idx >= bufs.Length)
+                    continue;
+
+                var hdr = Marshal.PtrToStructure<WAVEHDR>(hdrPtrs[idx]);
+                recorded = (int)Math.Min(hdr.dwBytesRecorded, (uint)bufs[idx].Length);
+                if (recorded > 1)
                 {
-                    AudioChunkCaptured?.Invoke(copy, recorded, rms);
+                    chunkCopy = new byte[recorded];
+                    Buffer.BlockCopy(bufs[idx], 0, chunkCopy, 0, recorded);
                 }
-                catch { }
+
+                if (!_stopping && _hWaveIn != IntPtr.Zero)
+                {
+                    hdr.dwBytesRecorded = 0;
+                    Marshal.StructureToPtr(hdr, hdrPtrs[idx], false);
+                    _ = waveInAddBuffer(_hWaveIn, hdrPtrs[idx], (uint)hdrSize);
+                }
             }
 
-            if (!_stopping && _hWaveIn != IntPtr.Zero)
+            if (chunkCopy != null && !_stopping)
             {
-                hdr.dwBytesRecorded = 0;
-                Marshal.StructureToPtr(hdr, hdrPtrs[idx], false);
-                _ = waveInAddBuffer(_hWaveIn, hdrPtrs[idx], (uint)hdrSize);
+                float rms = ComputeNormalizedRms(chunkCopy, recorded);
+                try
+                {
+                    AudioChunkCaptured?.Invoke(chunkCopy, recorded, rms);
+                }
+                catch { }
             }
         }
     }
@@ -267,48 +278,54 @@ public sealed class MicrophoneCaptureService : IDisposable
 
         try { _readyQueue?.CompleteAdding(); } catch { }
 
-        if (_hWaveIn != IntPtr.Zero)
+        lock (_waveLock)
         {
-            try { _ = waveInStop(_hWaveIn); } catch { }
-            try { _ = waveInReset(_hWaveIn); } catch { }
+            if (_hWaveIn != IntPtr.Zero)
+            {
+                try { _ = waveInStop(_hWaveIn); } catch { }
+                try { _ = waveInReset(_hWaveIn); } catch { }
+            }
         }
 
         if (_workerThread != null && _workerThread != Thread.CurrentThread)
         {
-            try { _workerThread.Join(600); } catch { }
+            try { _workerThread.Join(300); } catch { }
             _workerThread = null;
         }
 
-        if (_hWaveIn != IntPtr.Zero && _hdrPtrs != null)
+        lock (_waveLock)
         {
-            int hdrSize = Marshal.SizeOf<WAVEHDR>();
-            for (int i = 0; i < _hdrPtrs.Length; i++)
+            if (_hWaveIn != IntPtr.Zero && _hdrPtrs != null)
             {
-                if (_hdrPtrs[i] != IntPtr.Zero)
+                int hdrSize = Marshal.SizeOf<WAVEHDR>();
+                for (int i = 0; i < _hdrPtrs.Length; i++)
                 {
-                    try { _ = waveInUnprepareHeader(_hWaveIn, _hdrPtrs[i], (uint)hdrSize); } catch { }
-                    Marshal.FreeHGlobal(_hdrPtrs[i]);
-                    _hdrPtrs[i] = IntPtr.Zero;
+                    if (_hdrPtrs[i] != IntPtr.Zero)
+                    {
+                        try { _ = waveInUnprepareHeader(_hWaveIn, _hdrPtrs[i], (uint)hdrSize); } catch { }
+                        Marshal.FreeHGlobal(_hdrPtrs[i]);
+                        _hdrPtrs[i] = IntPtr.Zero;
+                    }
                 }
             }
-        }
-        _hdrPtrs = null;
+            _hdrPtrs = null;
 
-        if (_audioPins != null)
-        {
-            for (int i = 0; i < _audioPins.Length; i++)
+            if (_audioPins != null)
             {
-                if (_audioPins[i].IsAllocated)
-                    _audioPins[i].Free();
+                for (int i = 0; i < _audioPins.Length; i++)
+                {
+                    if (_audioPins[i].IsAllocated)
+                        _audioPins[i].Free();
+                }
+                _audioPins = null;
             }
-            _audioPins = null;
-        }
-        _audioBuffers = null;
+            _audioBuffers = null;
 
-        if (_hWaveIn != IntPtr.Zero)
-        {
-            try { _ = waveInClose(_hWaveIn); } catch { }
-            _hWaveIn = IntPtr.Zero;
+            if (_hWaveIn != IntPtr.Zero)
+            {
+                try { _ = waveInClose(_hWaveIn); } catch { }
+                _hWaveIn = IntPtr.Zero;
+            }
         }
 
         try { _readyQueue?.Dispose(); } catch { }

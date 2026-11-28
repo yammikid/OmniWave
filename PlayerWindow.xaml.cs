@@ -121,6 +121,9 @@ public partial class PlayerWindow : Window
     private bool _isVoiceListening;
     private string _lastAliceQuery = "";
     private string _lastAliceReply = "";
+    private int _fastExitPrepared;
+    private int _bgDisposed;
+    private readonly TaskCompletionSource _webViewDisposeTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public bool AllowClose { get; set; }
     public bool IsCompactMode => _isCompactMode;
@@ -362,19 +365,22 @@ public partial class PlayerWindow : Window
         return IntPtr.Zero;
     }
 
-    protected override void OnClosing(CancelEventArgs e)
+    /// <summary>
+    /// Мгновенно скрывает окно, останавливает таймеры и отвязывает события на UI-потоке (&lt; 10 мс),
+    /// перенося Dispose WebView2 за пределы видимого кадра без чёрного прямоугольника.
+    /// </summary>
+    public Task PrepareForFastExit()
     {
-        if (!AllowClose)
+        if (Interlocked.Exchange(ref _fastExitPrepared, 1) != 0)
+            return _webViewDisposeTcs.Task;
+
+        AllowClose = true;
+        if (_posSaveTimer.IsEnabled)
         {
-            e.Cancel = true;
-            if (_settings.Current.MinimizeToTray)
-                HideToTray();
-            else
-                _requestExitAction();
-            return;
+            _posSaveTimer.Stop();
+            SaveCurrentWindowPosition();
         }
 
-        _posSaveTimer.Stop();
         _telemetryTimer.Stop();
         _suspendTimer.Stop();
         _edgeAnimTimer.Stop();
@@ -398,14 +404,46 @@ public partial class PlayerWindow : Window
         _hwndSource?.RemoveHook(WindowHwndProc);
         _hwndSource = null;
 
-        try { _authFlowCts?.Cancel(); _authFlowCts?.Dispose(); } catch { }
-        try { _voiceCts?.Cancel(); _voiceCts?.Dispose(); } catch { }
+        try { _authFlowCts?.Cancel(); _authFlowCts?.Dispose(); _authFlowCts = null; } catch { }
+        try { _voiceCts?.Cancel(); _voiceCts?.Dispose(); _voiceCts = null; } catch { }
+        try { _searchCts?.Cancel(); _searchCts?.Dispose(); _searchCts = null; } catch { }
+        try { _activeAuthWindow?.Close(); _activeAuthWindow = null; } catch { }
+
+        try { Hide(); } catch { }
+
+        _ = Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
+        {
+            try { PlayerWebView?.Dispose(); } catch { }
+            finally { _webViewDisposeTcs.TrySetResult(); }
+        });
+
+        return _webViewDisposeTcs.Task;
+    }
+
+    public void DisposeBackgroundResources()
+    {
+        if (Interlocked.Exchange(ref _bgDisposed, 1) != 0)
+            return;
+
         try { _voiceAssistant?.Dispose(); } catch { }
         try { _voiceFeedback.Dispose(); } catch { }
-        try { _activeAuthWindow?.Close(); _activeAuthWindow = null; } catch { }
-        try { _searchCts?.Cancel(); _searchCts?.Dispose(); } catch { }
         try { _telemetry.Dispose(); } catch { }
-        try { PlayerWebView?.Dispose(); } catch { }
+    }
+
+    protected override void OnClosing(CancelEventArgs e)
+    {
+        if (!AllowClose)
+        {
+            e.Cancel = true;
+            if (_settings.Current.MinimizeToTray)
+                HideToTray();
+            else
+                _requestExitAction();
+            return;
+        }
+
+        _ = PrepareForFastExit();
+        _ = Task.Run(DisposeBackgroundResources);
         base.OnClosing(e);
     }
 

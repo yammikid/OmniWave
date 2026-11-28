@@ -1062,14 +1062,14 @@ public sealed class VoiceAssistantService : IDisposable
         if (_disposed) return;
         _disposed = true;
 
-        try { _idleUnloadTimer.Dispose(); } catch { }
-        try { _engineStateLock.Dispose(); } catch { }
         try { _models.ProgressChanged -= OnModelDownloadProgress; } catch { }
         try { _mic.AudioChunkCaptured -= OnAudioChunkCaptured; } catch { }
         try { _processingCts?.Cancel(); _processingCts?.Dispose(); } catch { }
+        try { _idleUnloadTimer.Dispose(); } catch { }
         try { _mic.Dispose(); } catch { }
         try { _gigaAm.Dispose(); } catch { }
         try { _vad.Dispose(); } catch { }
         try { _vosk.Dispose(); } catch { }
+        try { _engineStateLock.Dispose(); } catch { }
     }
 }

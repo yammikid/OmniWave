@@ -230,7 +230,8 @@ public sealed class SupertonicTtsEngine : IDisposable
 
     public void Unload()
     {
-        _inferLock.Wait();
+        if (!_inferLock.Wait(250))
+            return;
         try
         {
             UnloadLocked();

@@ -36,6 +36,7 @@ public sealed class AppTelemetryService : IDisposable
     private bool _pdhHasRateBaseline;
 
     private TelemetrySample _lastSample = new(0, 0, 0, 1);
+    private volatile bool _disposed;
 
     public TelemetrySample LastSample
     {
@@ -50,8 +51,13 @@ public sealed class AppTelemetryService : IDisposable
 
     public TelemetrySample Sample()
     {
+        if (_disposed)
+            return _lastSample;
+
         lock (_lock)
         {
+            if (_disposed)
+                return _lastSample;
             var pids = CollectAppProcessIds();
             if (pids.Count == 0)
                 pids.Add(_rootPid);
@@ -420,8 +426,16 @@ public sealed class AppTelemetryService : IDisposable
 
     public void Dispose()
     {
-        lock (_lock)
+        if (_disposed) return;
+        _disposed = true;
+
+        bool entered = false;
+        try
         {
+            entered = Monitor.TryEnter(_lock, 100);
+            if (!entered)
+                return;
+
             if (_pdhQuery != IntPtr.Zero)
             {
                 try { _ = PdhCloseQuery(_pdhQuery); } catch { }
@@ -431,6 +445,11 @@ public sealed class AppTelemetryService : IDisposable
             _pdhProcPrivWsCounter = IntPtr.Zero;
             _pdhGpuCounter = IntPtr.Zero;
             _pdhReady = false;
+        }
+        finally
+        {
+            if (entered)
+                Monitor.Exit(_lock);
         }
     }
 

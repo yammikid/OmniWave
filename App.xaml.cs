@@ -186,7 +186,11 @@ public partial class App : Application
         miAccounts.Click += (_, _) => _playerWindow?.ShowSettingsSection("accounts");
 
         var miExit = new MenuItem { Header = "Выход", Style = itemStyle };
-        miExit.Click += (_, _) => ShutdownApp();
+        miExit.Click += (_, _) =>
+        {
+            menu.IsOpen = false;
+            ShutdownApp();
+        };
 
         menu.Items.Add(miShowHide);
         menu.Items.Add(_trayAlwaysOnTopMenuItem);
@@ -354,21 +358,51 @@ public partial class App : Application
         if (_isShuttingDown) return;
         _isShuttingDown = true;
 
-        if (_playerWindow != null)
+        // 1. Мгновенный UI-этап (< 10 мс): убрать меню, трей-иконку, хуки и скрыть все окна до Dispose WebView2
+        try { _trayIcon?.Dispose(); } catch { }
+        try { _hotkeys?.Dispose(); } catch { }
+
+        foreach (Window win in Windows)
         {
-            _playerWindow.AllowClose = true;
-            try { _playerWindow.Close(); } catch { }
+            if (!ReferenceEquals(win, _playerWindow))
+            {
+                try { win.Hide(); } catch { }
+            }
         }
 
-        Shutdown();
+        Task webViewDisposeTask = Task.CompletedTask;
+        if (_playerWindow != null)
+        {
+            try { webViewDisposeTask = _playerWindow.PrepareForFastExit(); } catch { }
+        }
+
+        if (_singleInstanceMutex != null)
+        {
+            try { _singleInstanceMutex.ReleaseMutex(); } catch { }
+            try { _singleInstanceMutex.Dispose(); } catch { }
+            _singleInstanceMutex = null;
+        }
+
+        // 2. Тяжёлый нативный teardown (Relay -> Mic/Vosk/GigaAM -> LibVLC -> Providers) в фоне с таймаутом 900 мс
+        var cleanupTask = Task.Run(DisposeBackgroundServices);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.WhenAll(
+                    Task.WhenAny(cleanupTask, Task.Delay(900)),
+                    Task.WhenAny(webViewDisposeTask, Task.Delay(350)));
+            }
+            catch { }
+            Environment.Exit(0);
+        });
     }
 
-    protected override void OnExit(ExitEventArgs e)
+    private void DisposeBackgroundServices()
     {
-        _isShuttingDown = true;
-        try { _hotkeys?.Dispose(); } catch { }
-        try { _trayIcon?.Dispose(); } catch { }
-        try { _syncLock.Dispose(); } catch { }
+        // MediaStreamRelayService останавливаем ДО LibVLC, чтобы потоки чтения получили EOF без deadlock
+        try { MediaStreamRelayService.Shutdown(); } catch { }
+        try { _playerWindow?.DisposeBackgroundResources(); } catch { }
         try { _controller?.Dispose(); } catch { }
         try { _audioPlayer?.Dispose(); } catch { }
         try { _downloads?.Dispose(); } catch { }
@@ -379,12 +413,27 @@ public partial class App : Application
                 try { d.Dispose(); } catch { }
             }
         }
-        MediaStreamRelayService.Shutdown();
-        if (_singleInstanceMutex != null)
+        try { _syncLock.Dispose(); } catch { }
+    }
+
+    protected override void OnExit(ExitEventArgs e)
+    {
+        if (!_isShuttingDown)
         {
-            try { _singleInstanceMutex.ReleaseMutex(); } catch { }
-            try { _singleInstanceMutex.Dispose(); } catch { }
-            _singleInstanceMutex = null;
+            _isShuttingDown = true;
+            try { _hotkeys?.Dispose(); } catch { }
+            try { _trayIcon?.Dispose(); } catch { }
+            try { _playerWindow?.PrepareForFastExit(); } catch { }
+
+            var cleanupTask = Task.Run(DisposeBackgroundServices);
+            try { cleanupTask.Wait(700); } catch { }
+
+            if (_singleInstanceMutex != null)
+            {
+                try { _singleInstanceMutex.ReleaseMutex(); } catch { }
+                try { _singleInstanceMutex.Dispose(); } catch { }
+                _singleInstanceMutex = null;
+            }
         }
         base.OnExit(e);
     }

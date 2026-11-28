@@ -278,6 +278,7 @@ public class TrayIconService : IDisposable
         if (_disposed) return;
         _disposed = true;
 
+        try { _menu.IsOpen = false; } catch { }
         RemoveIcon();
         _hwndSource?.RemoveHook(WndProc);
         _hwndSource = null;

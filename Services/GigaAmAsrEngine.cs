@@ -462,7 +462,7 @@ public sealed class GigaAmAsrEngine : IDisposable
         try { _idleUnloadTimer.Dispose(); } catch { }
         try
         {
-            if (_inferLock.Wait(500))
+            if (_inferLock.Wait(200))
             {
                 try { UnloadLocked(); }
                 finally { _inferLock.Release(); }

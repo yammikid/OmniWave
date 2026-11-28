@@ -59,6 +59,7 @@ public class AudioPlayerService : IDisposable
     private long _lastTimeMs;
     private long _cachedLengthMs;
     private RepeatMode _repeatMode = RepeatMode.Off;
+    private volatile bool _disposed;
 
     public TrackItem? CurrentTrack { get; private set; }
     public bool IsYandexWaveActive { get; private set; }
@@ -131,22 +132,26 @@ public class AudioPlayerService : IDisposable
         // Не вызываем методы/свойства MediaPlayer синхронно внутри нативных коллбэков LibVLC
         _player.LengthChanged += (_, e) =>
         {
+            if (_disposed) return;
             if (e.Length > 0)
                 _cachedLengthMs = e.Length;
         };
         _player.TimeChanged += (_, e) =>
         {
+            if (_disposed) return;
             _lastTimeMs = e.Time;
             PositionChanged?.Invoke(e.Time, _cachedLengthMs);
         };
         _player.Playing += (_, _) =>
         {
+            if (_disposed) return;
             long pending = Interlocked.Exchange(ref _pendingSeekMs, -1);
             if (pending >= 0)
             {
                 _lastTimeMs = pending;
                 _ = Task.Run(() =>
                 {
+                    if (_disposed) return;
                     try
                     {
                         if (Math.Abs(_player.Time - pending) > 1500)
@@ -156,17 +161,27 @@ public class AudioPlayerService : IDisposable
                 });
             }
             PlaybackStateChanged?.Invoke(true);
-            _ = Task.Run(ApplyAudioFxToPlayer);
+            _ = Task.Run(() =>
+            {
+                if (!_disposed)
+                    ApplyAudioFxToPlayer();
+            });
         };
         _player.Paused += (_, _) =>
         {
+            if (_disposed) return;
             SaveCurrentBrandState();
             PlaybackStateChanged?.Invoke(false);
         };
-        _player.Stopped += (_, _) => PlaybackStateChanged?.Invoke(false);
+        _player.Stopped += (_, _) =>
+        {
+            if (!_disposed)
+                PlaybackStateChanged?.Invoke(false);
+        };
         _player.EndReached += (_, _) =>
         {
-            _ = Task.Run(HandleEndReachedAsync);
+            if (!_disposed)
+                _ = Task.Run(HandleEndReachedAsync);
         };
     }
 
@@ -1257,6 +1272,9 @@ public class AudioPlayerService : IDisposable
 
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
+
         var lc = Interlocked.Exchange(ref _loadCts, null);
         if (lc != null) { try { lc.Cancel(); } catch { } try { lc.Dispose(); } catch { } }
         var pc = Interlocked.Exchange(ref _preResolveCts, null);
@@ -1264,9 +1282,9 @@ public class AudioPlayerService : IDisposable
 
         _streamUrlCache.Clear();
         try { _player.Stop(); } catch { }
-        _currentMedia?.Dispose();
-        _equalizer?.Dispose();
-        _player.Dispose();
-        _libVlc.Dispose();
+        try { _currentMedia?.Dispose(); } catch { }
+        try { _equalizer?.Dispose(); } catch { }
+        try { _player.Dispose(); } catch { }
+        try { _libVlc.Dispose(); } catch { }
     }
 }
