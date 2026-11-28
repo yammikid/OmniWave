@@ -229,7 +229,7 @@ public sealed class WhisperLocalClient : IDisposable
             if (!await EnsureStartedAsync(modelVariant, ct).ConfigureAwait(false))
                 return "";
 
-            byte[] processed = PreprocessPcm16k(pcmBytes);
+            byte[] processed = VoiceAudioDsp.PreprocessPcm16k(pcmBytes);
             byte[] wav = WrapPcm16kAsWav(processed);
             int port = _port;
             if (port <= 0) return "";
@@ -269,72 +269,6 @@ public sealed class WhisperLocalClient : IDisposable
             Interlocked.Decrement(ref _activeRequests);
             ScheduleIdleStop();
         }
-    }
-
-    private static byte[] PreprocessPcm16k(byte[] pcm)
-    {
-        int sampleCount = pcm.Length / 2;
-        if (sampleCount < 160)
-            return pcm;
-
-        var floats = new float[sampleCount];
-        double mean = 0;
-        for (int i = 0; i < sampleCount; i++)
-        {
-            short s = (short)(pcm[i * 2] | (pcm[i * 2 + 1] << 8));
-            float v = s / 32768f;
-            floats[i] = v;
-            mean += v;
-        }
-        float dc = (float)(mean / sampleCount);
-
-        // Высокочастотный фильтр 1-го порядка ~85 Гц (убирает гул вентиляторов/стола и DC-смещение)
-        const float alpha = 0.9677f;
-        float prevIn = 0f;
-        float prevOut = 0f;
-        double activeSqSum = 0;
-        int activeCount = 0;
-        double allSqSum = 0;
-
-        for (int i = 0; i < sampleCount; i++)
-        {
-            float x = floats[i] - dc;
-            float y = alpha * (prevOut + x - prevIn);
-            prevIn = x;
-            prevOut = y;
-            floats[i] = y;
-
-            float abs = MathF.Abs(y);
-            double sq = (double)y * y;
-            allSqSum += sq;
-            if (abs > 0.008f)
-            {
-                activeSqSum += sq;
-                activeCount++;
-            }
-        }
-
-        float rms = activeCount >= 80
-            ? (float)Math.Sqrt(activeSqSum / activeCount)
-            : (float)Math.Sqrt(allSqSum / sampleCount);
-
-        float gain = (rms >= 0.0025f && rms < 0.14f)
-            ? Math.Clamp(0.12f / rms, 1.0f, 6.0f)
-            : 1.0f;
-
-        byte[] outBytes = new byte[sampleCount * 2];
-        for (int i = 0; i < sampleCount; i++)
-        {
-            float v = floats[i] * gain;
-            float abs = MathF.Abs(v);
-            if (abs > 0.92f)
-                v = MathF.Sign(v) * (0.92f + 0.08f * MathF.Tanh((abs - 0.92f) / 0.08f));
-
-            short s = (short)Math.Clamp((int)MathF.Round(v * 32767f), -32768, 32767);
-            outBytes[i * 2] = (byte)(s & 0xFF);
-            outBytes[i * 2 + 1] = (byte)((s >> 8) & 0xFF);
-        }
-        return outBytes;
     }
 
     private static bool IsKnownHallucination(string text)

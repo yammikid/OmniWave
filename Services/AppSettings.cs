@@ -49,6 +49,8 @@ public class AppSettings
     public string? SpotifyUserId { get; set; }
     public string? SpotifyUserName { get; set; }
 
+    public bool VoiceAssistantEnabled { get; set; } = true;
+    public int VoiceAssistantVolume { get; set; } = 85;
     public bool VoiceWakeWordEnabled { get; set; }
     public string VoiceWakeWords { get; set; } = "омни, волна";
     public bool VoiceWhisperEnabled { get; set; } = true;
@@ -97,6 +99,7 @@ public class AppSettings
         if (string.IsNullOrWhiteSpace(DownloadFolder))
             DownloadFolder = DefaultDownloadFolder;
 
+        VoiceAssistantVolume = Math.Clamp(VoiceAssistantVolume, 0, 100);
         VoiceWakeWords = (VoiceWakeWords ?? "").Trim();
         if (string.IsNullOrWhiteSpace(VoiceWakeWords))
             VoiceWakeWords = "омни, волна";

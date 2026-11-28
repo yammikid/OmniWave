@@ -183,7 +183,10 @@ public partial class PlayerWindow : Window
 
         RestoreSavedGeometry();
         _ = Task.Run(() => _voiceModels.CleanupObsoleteWhisperModels());
-        _voiceFeedback = new VoiceFeedbackService(_voiceModels);
+        _voiceFeedback = new VoiceFeedbackService(_voiceModels)
+        {
+            VolumePercent = _settings.Current.VoiceAssistantVolume
+        };
         _voiceAssistant = new VoiceAssistantService(_voiceModels, _voiceFeedback, ExecuteAliceCommandAsync);
         _voiceAssistant.DuckingRequested += ducked => _player.SetDucking(ducked);
         _voiceAssistant.StatusChanged += status => Dispatcher.BeginInvoke(() => PostVoiceStateUpdate(status));
@@ -2361,6 +2364,14 @@ public partial class PlayerWindow : Window
             case "voice.saveSettings":
                 SaveVoiceSettingsFromWeb(root);
                 break;
+
+            case "voice.setVolume":
+            {
+                int vol = Math.Clamp(ReadInt(root, "volume", _settings.Current.VoiceAssistantVolume), 0, 100);
+                _settings.Update(s => s.VoiceAssistantVolume = vol, notify: false);
+                _voiceFeedback.VolumePercent = vol;
+                break;
+            }
 
             case "voice.testTts":
                 _ = TestVoiceTtsAsync();
@@ -4664,13 +4675,16 @@ public partial class PlayerWindow : Window
 
         return new
         {
-            state = st?.StateKey ?? "notInstalled",
-            statusText = st?.StatusText ?? "Установите модели распознавания",
+            state = st?.StateKey ?? (s.VoiceAssistantEnabled ? "notInstalled" : "disabled"),
+            statusText = st?.StatusText ?? (s.VoiceAssistantEnabled ? "Установите модели распознавания" : "Помощник выключен"),
             liveTranscript = st?.LiveTranscript ?? "",
             lastCommand = st?.LastCommand ?? "",
             lastReply = st?.LastReply ?? "",
             audioLevel = st != null ? Math.Round(st.AudioLevel, 3) : 0.0,
+            enabled = s.VoiceAssistantEnabled,
+            volume = s.VoiceAssistantVolume,
             voskReady = st?.VoskReady ?? _voiceModels.IsVoskReady(),
+            gigaAmReady = st?.GigaAmReady ?? _voiceModels.IsGigaAmReady(),
             whisperReady = st?.WhisperReady ?? _voiceModels.IsWhisperReady(s.VoiceWhisperModel),
             whisperRunning = st?.WhisperRunning ?? false,
             neuralTtsReady = st?.NeuralTtsReady ?? _voiceModels.IsNeuralTtsReady(),
@@ -4719,6 +4733,8 @@ public partial class PlayerWindow : Window
 
     private void SaveVoiceSettingsFromWeb(JsonElement root)
     {
+        bool enabled = !root.TryGetProperty("enabled", out var enEl) || enEl.ValueKind != JsonValueKind.False;
+        int voiceVol = Math.Clamp(ReadInt(root, "volume", _settings.Current.VoiceAssistantVolume), 0, 100);
         bool wakeOn = root.TryGetProperty("wakeWordEnabled", out var wkEl)
             ? wkEl.ValueKind == JsonValueKind.True
             : _settings.Current.VoiceWakeWordEnabled;
@@ -4736,6 +4752,8 @@ public partial class PlayerWindow : Window
         {
             _settings.Update(s =>
             {
+                s.VoiceAssistantEnabled = enabled;
+                s.VoiceAssistantVolume = voiceVol;
                 s.VoiceWakeWordEnabled = wakeOn;
                 s.VoiceWakeWords = wakeWords;
                 s.VoiceWhisperEnabled = whisperOn;
@@ -4769,6 +4787,13 @@ public partial class PlayerWindow : Window
         if (!_voiceModels.IsNeuralTtsReady())
         {
             PostToWeb("status", new { message = "Сначала скачайте нейро-голос Supertonic 3 в настройках" });
+            return;
+        }
+
+        _voiceFeedback.VolumePercent = _settings.Current.VoiceAssistantVolume;
+        if (_voiceFeedback.VolumePercent <= 0)
+        {
+            PostToWeb("status", new { message = "Громкость помощника на 0%" });
             return;
         }
 
@@ -4840,15 +4865,22 @@ public partial class PlayerWindow : Window
 
     private async Task StartVoiceListeningAsync()
     {
+        if (!_settings.Current.VoiceAssistantEnabled)
+        {
+            ShowSettingsSection("alice");
+            PostToWeb("status", new { message = "Голосовой помощник выключен в настройках" });
+            return;
+        }
+
         if (_voiceAssistant != null &&
-            (_voiceModels.IsVoskReady() || _voiceModels.IsWhisperReady(_settings.Current.VoiceWhisperModel)))
+            (_voiceModels.IsVoskReady() || _voiceModels.IsGigaAmReady() || _voiceModels.IsWhisperReady(_settings.Current.VoiceWhisperModel)))
         {
             await _voiceAssistant.ToggleManualListeningAsync();
             return;
         }
 
         ShowSettingsSection("alice");
-        PostToWeb("status", new { message = "Установите офлайн-модели (Vosk + Whisper) во вкладке «Алиса и голос»" });
+        PostToWeb("status", new { message = "Установите офлайн-модели во вкладке настроек голосового помощника" });
 
         if (_isVoiceListening)
         {

@@ -110,8 +110,8 @@ public partial class App : Application
         _hotkeys = new GlobalHotkeyService(() => _controller.IsLocalActive || _audioPlayer.CurrentTrack != null);
         _hotkeys.HotkeyTriggered += OnGlobalHotkeyTriggered;
         _hotkeys.Attach(_playerWindow);
-        _hotkeys.SetVoiceHotkeyEnabled(_settings.Current.VoiceHotkeyEnabled);
-        _settings.SettingsChanged += s => _ = Dispatcher.BeginInvoke(() => _hotkeys?.SetVoiceHotkeyEnabled(s.VoiceHotkeyEnabled));
+        _hotkeys.SetVoiceHotkeyEnabled(_settings.Current.VoiceAssistantEnabled && _settings.Current.VoiceHotkeyEnabled);
+        _settings.SettingsChanged += s => _ = Dispatcher.BeginInvoke(() => _hotkeys?.SetVoiceHotkeyEnabled(s.VoiceAssistantEnabled && s.VoiceHotkeyEnabled));
 
         _trayIcon = new TrayIconService(_playerWindow, BuildTrayContextMenu(), ToggleMainWindowVisibility);
         SyncTrayChecks();

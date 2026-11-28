@@ -27,6 +27,7 @@ public sealed class VoiceModelManager
     public const string WhisperModelLargeV3TurboUrl = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin";
     public const string OnnxRuntimeNuPkgUrl = "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/1.20.1/microsoft.ml.onnxruntime.directml.1.20.1.nupkg";
     public const string SupertonicBaseUrl = "https://huggingface.co/Supertone/supertonic-3/resolve/main/";
+    public const string GigaAmBaseUrl = "https://huggingface.co/istupakov/gigaam-v3-onnx/resolve/main/";
     public const string SileroVadOnnxUrl = "https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx";
     public const string SileroVadOnnxFallbackUrl = "https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx";
     public const string WhisperVadGgmlUrl = "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin";
@@ -66,6 +67,9 @@ public sealed class VoiceModelManager
     public string SupertonicDir => Path.Combine(RootDir, "tts-supertonic");
     public string SupertonicOnnxDir => Path.Combine(SupertonicDir, "onnx");
     public string SupertonicVoicesDir => Path.Combine(SupertonicDir, "voice_styles");
+    public string GigaAmDir => Path.Combine(RootDir, "gigaam-v3");
+    public string GigaAmModelPath => Path.Combine(GigaAmDir, "v3_e2e_ctc.int8.onnx");
+    public string GigaAmVocabPath => Path.Combine(GigaAmDir, "v3_e2e_ctc_vocab.txt");
 
     public VoiceDownloadProgress CurrentProgress { get; private set; } = new(false, 0, "", 0, 0);
     public event Action<VoiceDownloadProgress>? ProgressChanged;
@@ -137,6 +141,11 @@ public sealed class VoiceModelManager
     public bool IsWhisperVadReady()
         => HasMinFileSize(WhisperVadBinPath, 400 * 1024) && HasValidGgmlHeader(WhisperVadBinPath);
 
+    public bool IsGigaAmReady()
+        => IsOnnxRuntimeReady() &&
+           HasMinFileSize(GigaAmModelPath, 150L * 1024 * 1024) &&
+           HasMinFileSize(GigaAmVocabPath, 500);
+
     public bool IsNeuralTtsReady()
     {
         if (!IsOnnxRuntimeReady())
@@ -185,9 +194,10 @@ public sealed class VoiceModelManager
         {
             Directory.CreateDirectory(RootDir);
             bool needVosk = mode is "hybrid" or "vosk";
+            bool needGigaAm = mode is "hybrid" or "gigaam";
             bool needWhisper = mode is "hybrid" or "whisper";
             bool needTts = mode is "hybrid" or "tts";
-            bool needVad = mode is "hybrid" or "whisper" or "vosk" or "vad";
+            bool needVad = mode is "hybrid" or "whisper" or "vosk" or "vad" or "gigaam";
 
             if (needVosk)
             {
@@ -196,6 +206,11 @@ public sealed class VoiceModelManager
 
                 if (string.IsNullOrWhiteSpace(GetResolvedVoskModelPath()))
                     await DownloadAndExtractVoskModelAsync(cts.Token);
+            }
+
+            if (needGigaAm && !IsGigaAmReady())
+            {
+                await DownloadGigaAmAsync(cts.Token);
             }
 
             if (needWhisper)
@@ -487,6 +502,50 @@ public sealed class VoiceModelManager
         }
 
         File.Move(part, destPath, overwrite: true);
+    }
+
+    private async Task DownloadGigaAmAsync(CancellationToken ct)
+    {
+        if (!IsOnnxRuntimeReady())
+            await DownloadAndExtractOnnxRuntimeAsync(ct);
+
+        Directory.CreateDirectory(GigaAmDir);
+
+        if (!HasMinFileSize(GigaAmVocabPath, 500) || !HasValidGigaAmVocabHeader(GigaAmVocabPath))
+        {
+            string vocabPart = GigaAmVocabPath + ".part";
+            await DownloadFileWithProgressAsync(
+                GigaAmBaseUrl + "v3_e2e_ctc_vocab.txt",
+                vocabPart,
+                "Словарь Sber GigaAM v3 RU...",
+                ct,
+                HasValidGigaAmVocabHeader);
+
+            if (!HasMinFileSize(vocabPart, 500) || !HasValidGigaAmVocabHeader(vocabPart))
+            {
+                TryDeleteFile(vocabPart);
+                throw new InvalidDataException("Повреждённый файл словаря Sber GigaAM v3");
+            }
+            File.Move(vocabPart, GigaAmVocabPath, overwrite: true);
+        }
+
+        if (!HasMinFileSize(GigaAmModelPath, 150L * 1024 * 1024) || !HasNonHtmlHeader(GigaAmModelPath))
+        {
+            string modelPart = GigaAmModelPath + ".part";
+            await DownloadFileWithProgressAsync(
+                GigaAmBaseUrl + "v3_e2e_ctc.int8.onnx",
+                modelPart,
+                "Скачивание Sber GigaAM v3 RU (214 МБ)...",
+                ct,
+                HasNonHtmlHeader);
+
+            if (!HasMinFileSize(modelPart, 150L * 1024 * 1024) || !HasNonHtmlHeader(modelPart))
+            {
+                TryDeleteFile(modelPart);
+                throw new InvalidDataException("Повреждённый файл модели Sber GigaAM v3");
+            }
+            File.Move(modelPart, GigaAmModelPath, overwrite: true);
+        }
     }
 
     private static HttpClient CreateHttpClient(bool forceFreshConnection)
@@ -1040,6 +1099,26 @@ public sealed class VoiceModelManager
             if (n >= 3 && buf[0] == 0xEF && buf[1] == 0xBB && buf[2] == 0xBF) i = 3;
             while (i < n && buf[i] <= 0x20) i++;
             return i < n && (buf[i] == (byte)'{' || buf[i] == (byte)'[');
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool HasValidGigaAmVocabHeader(string path)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            Span<byte> buf = stackalloc byte[64];
+            int n = fs.Read(buf);
+            if (n <= 0) return false;
+            string head = System.Text.Encoding.UTF8.GetString(buf[..n]).TrimStart();
+            if (head.StartsWith("<!doctype", StringComparison.OrdinalIgnoreCase) ||
+                head.StartsWith("<html", StringComparison.OrdinalIgnoreCase))
+                return false;
+            return head.Contains("<unk> 0", StringComparison.Ordinal) || head.Contains(" 0", StringComparison.Ordinal);
         }
         catch
         {

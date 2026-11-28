@@ -4,6 +4,7 @@ namespace DynamicIsland.Services;
 
 public enum VoiceAssistantState
 {
+    Disabled,
     NotInstalled,
     Downloading,
     Idle,
@@ -21,7 +22,9 @@ public sealed record VoiceAssistantStatus(
     string LastCommand,
     string LastReply,
     float AudioLevel,
+    bool Enabled,
     bool VoskReady,
+    bool GigaAmReady,
     bool WhisperReady,
     bool WhisperRunning,
     bool NeuralTtsReady,
@@ -38,9 +41,9 @@ public sealed record VoiceAssistantStatus(
 
 /// <summary>
 /// Гибридный офлайн голосовый помощник OmniWave:
-/// - Потоковый Silero VAD v5 (ONNX) + Vosk (RU) для непрерывного распознавания ключевого слова
-/// - Локальный Whisper Large v3 Turbo (RU+EN) + Silero VAD GGML
-/// - Нейросетевая женская озвучка Supertonic 3 (F1–F5), автовыгрузка из RAM при простое
+/// - Потоковый Silero VAD v5 + Vosk RU (динамическая грамматика wake-слова)
+/// - Sber GigaAM v3 E2E CTC INT8 (SOTA RU) + каскадное уточнение RU+EN через Whisper Large v3 Turbo
+/// - Нейросетевая женская озвучка Supertonic 3 (F1–F5), регулировка громкости, полное отключение и автовыгрузка из RAM
 /// </summary>
 public sealed class VoiceAssistantService : IDisposable
 {
@@ -61,6 +64,7 @@ public sealed class VoiceAssistantService : IDisposable
     private readonly MicrophoneCaptureService _mic = new();
     private readonly VoskNativeEngine _vosk = new();
     private readonly SileroVadEngine _vad = new();
+    private readonly GigaAmAsrEngine _gigaAm;
     private readonly WhisperLocalClient _whisper;
     private readonly SemaphoreSlim _engineStateLock = new(1, 1);
     private readonly System.Threading.Timer _idleUnloadTimer;
@@ -70,12 +74,13 @@ public sealed class VoiceAssistantService : IDisposable
     private readonly MemoryStream _utterancePcm = new(256 * 1024);
 
     private VoiceAssistantState _state = VoiceAssistantState.NotInstalled;
-    private string _statusText = "Установите офлайн-модель (Vosk / Whisper Turbo)";
+    private string _statusText = "Установите офлайн-модель (Vosk / GigaAM v3 / Whisper Turbo)";
     private string _liveTranscript = "";
     private string _lastCommand = "";
     private string _lastReply = "";
     private float _audioLevel;
 
+    private bool _enabled = true;
     private bool _wakeWordEnabled;
     private string _wakeWordsCsv = "омни, волна";
     private IReadOnlyList<string> _wakeAliases = AliceCommandParser.ExpandWakeAliases("омни, волна");
@@ -112,6 +117,7 @@ public sealed class VoiceAssistantService : IDisposable
         _feedback = feedback;
         _commandExecutor = commandExecutor;
         _contextPromptProvider = contextPromptProvider;
+        _gigaAm = new GigaAmAsrEngine(models);
         _whisper = new WhisperLocalClient(models);
         _idleUnloadTimer = new System.Threading.Timer(OnIdleUnloadTimer, null, Timeout.Infinite, Timeout.Infinite);
 
@@ -129,13 +135,20 @@ public sealed class VoiceAssistantService : IDisposable
     {
         if (_disposed) return;
 
+        _feedback.VolumePercent = settings.VoiceAssistantVolume;
+
+        bool prevEnabled;
         bool prevWake;
         int prevDev;
+        bool enabledNow;
+        IReadOnlyList<string> aliasesCopy;
         lock (_syncLock)
         {
+            prevEnabled = _enabled;
             prevWake = _wakeWordEnabled;
             prevDev = _inputDeviceIndex;
 
+            _enabled = settings.VoiceAssistantEnabled;
             _wakeWordEnabled = settings.VoiceWakeWordEnabled;
             _wakeWordsCsv = settings.VoiceWakeWords;
             _wakeAliases = AliceCommandParser.ExpandWakeAliases(settings.VoiceWakeWords);
@@ -146,11 +159,19 @@ public sealed class VoiceAssistantService : IDisposable
             _duckMusic = settings.VoiceDuckMusic;
             _inputDeviceIndex = settings.VoiceInputDeviceIndex;
 
-            if (!_whisperEnabled && _whisper.IsRunning)
+            enabledNow = _enabled;
+            aliasesCopy = _wakeAliases;
+
+            if ((!_enabled || !_whisperEnabled) && _whisper.IsRunning)
                 _ = Task.Run(() => _whisper.Stop());
         }
 
-        _ = RefreshEngineStateAsync(restartMic: prevWake != _wakeWordEnabled || prevDev != _inputDeviceIndex);
+        if (enabledNow)
+            _vosk.SetWakeGrammar(aliasesCopy);
+        else
+            CancelActiveListening(silent: true);
+
+        _ = RefreshEngineStateAsync(restartMic: prevEnabled != enabledNow || prevWake != _wakeWordEnabled || prevDev != _inputDeviceIndex);
     }
 
     public async Task<(bool Ok, string Message)> InstallModelsAsync(string mode)
@@ -182,6 +203,7 @@ public sealed class VoiceAssistantService : IDisposable
         CancelActiveListening(silent: true);
         _mic.Stop();
         _whisper.Stop();
+        _gigaAm.Unload();
         _vosk.Dispose();
         _feedback.UnloadNeuralModels();
 
@@ -195,16 +217,18 @@ public sealed class VoiceAssistantService : IDisposable
         if (_disposed) return;
 
         VoiceAssistantState cur;
+        bool enabled;
         bool hasAnyModel;
         bool wakeOn;
         lock (_syncLock)
         {
             cur = _state;
-            hasAnyModel = _models.IsVoskReady() || _models.IsWhisperReady(_whisperModel);
+            enabled = _enabled;
+            hasAnyModel = _models.IsVoskReady() || _models.IsGigaAmReady() || _models.IsWhisperReady(_whisperModel);
             wakeOn = _wakeWordEnabled;
         }
 
-        if (cur == VoiceAssistantState.Downloading)
+        if (!enabled || cur == VoiceAssistantState.Downloading)
             return;
 
         if (!hasAnyModel)
@@ -212,7 +236,7 @@ public sealed class VoiceAssistantService : IDisposable
             lock (_syncLock)
             {
                 _state = VoiceAssistantState.NotInstalled;
-                _statusText = "Сначала установите модели Vosk / Whisper в настройках";
+                _statusText = "Сначала установите модели Vosk / GigaAM v3 / Whisper в настройках";
             }
             EmitStatus();
             return;
@@ -235,19 +259,22 @@ public sealed class VoiceAssistantService : IDisposable
         int devIdx;
         bool needDuck;
         bool warmWhisper;
+        bool needVoskStream;
         string variant;
         lock (_syncLock)
         {
             devIdx = _inputDeviceIndex;
             needDuck = _duckMusic;
             variant = _whisperModel;
-            warmWhisper = _whisperEnabled && _models.IsWhisperReady(variant);
+            bool hasGiga = _models.IsGigaAmReady();
+            warmWhisper = _whisperEnabled && !hasGiga && _models.IsWhisperReady(variant);
+            needVoskStream = !hasGiga && !warmWhisper && _models.IsVoskReady();
         }
 
         if (_models.IsSileroVadReady() && !_vad.IsReady)
             await Task.Run(() => _vad.Initialize(_models.OnnxRuntimeDir, _models.SileroVadOnnxPath));
 
-        if (!warmWhisper && _models.IsVoskReady() && !_vosk.IsReady)
+        if (needVoskStream && !_vosk.IsReady)
         {
             string? voskPath = _models.GetResolvedVoskModelPath();
             if (!string.IsNullOrWhiteSpace(voskPath))
@@ -299,12 +326,14 @@ public sealed class VoiceAssistantService : IDisposable
         _feedback.StopSpeaking();
         DuckingRequested?.Invoke(false);
 
+        bool enabled;
         bool wakeOn;
         bool hasAnyModel;
         lock (_syncLock)
         {
+            enabled = _enabled;
             wakeOn = _wakeWordEnabled;
-            hasAnyModel = _models.IsVoskReady() || _models.IsWhisperReady(_whisperModel);
+            hasAnyModel = _models.IsVoskReady() || _models.IsGigaAmReady() || _models.IsWhisperReady(_whisperModel);
             _utterancePcm.SetLength(0);
             _liveTranscript = "";
             _audioLevel = 0;
@@ -315,10 +344,15 @@ public sealed class VoiceAssistantService : IDisposable
             {
                 _state = VoiceAssistantState.Downloading;
             }
+            else if (!enabled)
+            {
+                _state = VoiceAssistantState.Disabled;
+                _statusText = "Помощник выключен";
+            }
             else if (!hasAnyModel)
             {
                 _state = VoiceAssistantState.NotInstalled;
-                _statusText = "Установите офлайн-модель (Vosk / Whisper)";
+                _statusText = "Установите офлайн-модель (Vosk / GigaAM v3 / Whisper)";
             }
             else if (wakeOn && _mic.IsCapturing)
             {
@@ -334,11 +368,14 @@ public sealed class VoiceAssistantService : IDisposable
             }
         }
 
-        if (!wakeOn)
+        if (!enabled || !wakeOn)
         {
             _mic.Stop();
-            lock (_syncLock) _lastVoiceActivityTick = Environment.TickCount64;
-            ScheduleIdleUnload();
+            if (enabled)
+            {
+                lock (_syncLock) _lastVoiceActivityTick = Environment.TickCount64;
+                ScheduleIdleUnload();
+            }
         }
 
         if (!silent)
@@ -357,22 +394,51 @@ public sealed class VoiceAssistantService : IDisposable
             if (_disposed) return;
 
             bool voskReady = _models.IsVoskReady();
+            bool gigaAmReady = _models.IsGigaAmReady();
+            bool enabled;
             string variant;
             bool wakeOn;
             int devIdx;
+            IReadOnlyList<string> aliasesCopy;
             lock (_syncLock)
             {
                 if (_models.CurrentProgress.Busy || _state == VoiceAssistantState.Downloading)
                     return;
+                enabled = _enabled;
                 variant = _whisperModel;
                 wakeOn = _wakeWordEnabled;
                 devIdx = _inputDeviceIndex;
+                aliasesCopy = _wakeAliases;
+            }
+
+            if (!enabled)
+            {
+                _mic.Stop();
+                _whisper.Stop();
+                _gigaAm.Unload();
+                _feedback.UnloadNeuralModels();
+                _vad.Unload();
+                _vosk.Unload();
+                WindowBlurHelper.TrimWorkingSet();
+
+                lock (_syncLock)
+                {
+                    _state = VoiceAssistantState.Disabled;
+                    _statusText = "Помощник выключен";
+                    _liveTranscript = "";
+                    _audioLevel = 0;
+                    _speechDetected = false;
+                    _voskCandidateText = "";
+                }
+                EmitStatus();
+                return;
             }
 
             bool whisperReady = _models.IsWhisperReady(variant);
 
             if (wakeOn && voskReady)
             {
+                _vosk.SetWakeGrammar(aliasesCopy);
                 if (!_vosk.IsReady)
                 {
                     string? modelPath = _models.GetResolvedVoskModelPath();
@@ -383,7 +449,7 @@ public sealed class VoiceAssistantService : IDisposable
                     await Task.Run(() => _vad.Initialize(_models.OnnxRuntimeDir, _models.SileroVadOnnxPath));
             }
 
-            if (!voskReady && !whisperReady)
+            if (!voskReady && !gigaAmReady && !whisperReady)
             {
                 _mic.Stop();
                 _vosk.Unload();
@@ -516,7 +582,9 @@ public sealed class VoiceAssistantService : IDisposable
             }
 
             (bool isFinal, string finalText, string partialText) voskRes = _vosk.IsReady
-                ? _vosk.FeedAudio(pcm, length)
+                ? (curState == VoiceAssistantState.WakeListening
+                    ? _vosk.FeedWakeAudio(pcm, length)
+                    : _vosk.FeedAudio(pcm, length))
                 : (false, "", "");
 
             if (curState == VoiceAssistantState.WakeListening)
@@ -525,7 +593,7 @@ public sealed class VoiceAssistantService : IDisposable
                 if (!string.IsNullOrWhiteSpace(checkStr) && TryDetectWakeWord(checkStr, out string trailing))
                 {
                     bool hasInlineCommand = !string.IsNullOrWhiteSpace(trailing);
-                    bool warmWhisper = _whisperEnabled && _models.IsWhisperReady(_whisperModel);
+                    bool warmWhisper = _whisperEnabled && !_models.IsGigaAmReady() && _models.IsWhisperReady(_whisperModel);
                     string variant = _whisperModel;
                     bool needDuck = _duckMusic;
 
@@ -764,41 +832,56 @@ public sealed class VoiceAssistantService : IDisposable
             try
             {
                 string finalCommand = voskText;
-                bool useWhisperRefine = useWhisper && pcmSnapshot.Length >= 3200;
-                bool fastVoskHit = false;
-
-                if (!string.IsNullOrWhiteSpace(voskText))
+                byte[] speechPcm = pcmSnapshot;
+                if (_vad.IsReady && speechPcm.Length > 3200)
                 {
-                    var fastParsed = AliceCommandParser.Parse(voskText, aliases);
-                    fastVoskHit = AliceCommandParser.IsFastControlCommand(fastParsed.Type);
+                    var trimmed = _vad.TrimNonSpeechPcm16k(speechPcm, threshold: 0.35f);
+                    if (trimmed.Length >= 2400)
+                        speechPcm = trimmed;
                 }
 
-                // Гибридный маршрутизатор: быстрые команды — сразу через Vosk (~80 мс),
-                // названия треков / исполнителей / плейлистов / пустой результат Vosk — уточняем через Silero VAD + Whisper Turbo v3 (RU+EN).
-                if (!fastVoskHit && useWhisperRefine)
+                bool hasSpeechEnergy = speechPcm.Length >= 2400 &&
+                                       (VoiceAudioDsp.ComputeRms16k(speechPcm) >= 0.0018f || _speechDetected);
+                bool hasGigaAm = _models.IsGigaAmReady();
+
+                // 1. Приоритетный SOTA-движок русской речи: Sber GigaAM v3 E2E CTC INT8 (~0.25 с, 2–3× точнее на RU)
+                if (hasGigaAm && hasSpeechEnergy)
                 {
-                    byte[] whisperPcm = pcmSnapshot;
-                    if (_vad.IsReady && whisperPcm.Length > 3200)
+                    lock (_syncLock)
                     {
-                        var trimmed = _vad.TrimNonSpeechPcm16k(whisperPcm, threshold: 0.35f);
-                        if (trimmed.Length >= 2400)
-                            whisperPcm = trimmed;
+                        _statusText = "Распознаю (GigaAM v3 RU)...";
                     }
+                    EmitStatus();
 
-                    if (ComputeRms16k(whisperPcm) >= 0.0018f || _speechDetected)
+                    string gigaText = await _gigaAm.TranscribePcm16kAsync(speechPcm, ct);
+                    string gigaCleaned = AliceCommandParser.StripWakeWords(gigaText, aliases);
+                    if (!string.IsNullOrWhiteSpace(gigaCleaned))
+                        finalCommand = gigaCleaned;
+                }
+
+                // 2. Если уже распознана быстрая команда управления (пауза, громче, таймер, моя волна и т.д.) —
+                // выполняем мгновенно без запуска тяжёлого Whisper; для поиска латинских треков/артистов
+                // и при отсутствии результата GigaAM уточняем через Silero VAD + Whisper Large v3 Turbo (RU+EN).
+                bool fastControlHit = false;
+                if (!string.IsNullOrWhiteSpace(finalCommand))
+                {
+                    var parsed = AliceCommandParser.Parse(finalCommand, aliases);
+                    fastControlHit = AliceCommandParser.IsFastControlCommand(parsed.Type);
+                }
+
+                if (!fastControlHit && useWhisper && speechPcm.Length >= 3200 && hasSpeechEnergy)
+                {
+                    lock (_syncLock)
                     {
-                        lock (_syncLock)
-                        {
-                            _statusText = "Распознаю (Whisper Turbo)...";
-                        }
-                        EmitStatus();
-
-                        string? dynPrompt = _contextPromptProvider?.Invoke();
-                        string wText = await _whisper.TranscribePcm16kAsync(whisperPcm, whisperVariant, dynPrompt, ct);
-                        string wCleaned = AliceCommandParser.StripWakeWords(wText, aliases);
-                        if (!string.IsNullOrWhiteSpace(wCleaned))
-                            finalCommand = wCleaned;
+                        _statusText = "Распознаю (Whisper Turbo)...";
                     }
+                    EmitStatus();
+
+                    string? dynPrompt = _contextPromptProvider?.Invoke();
+                    string wText = await _whisper.TranscribePcm16kAsync(speechPcm, whisperVariant, dynPrompt, ct);
+                    string wCleaned = AliceCommandParser.StripWakeWords(wText, aliases);
+                    if (!string.IsNullOrWhiteSpace(wCleaned))
+                        finalCommand = wCleaned;
                 }
 
                 if (ct.IsCancellationRequested)
@@ -892,6 +975,12 @@ public sealed class VoiceAssistantService : IDisposable
             _speechDetected = false;
             _voskCandidateText = "";
 
+            if (!_enabled)
+            {
+                _state = VoiceAssistantState.Disabled;
+                _statusText = "Помощник выключен";
+                return;
+            }
             if (wakeOn && _vosk.IsReady && _mic.IsCapturing)
             {
                 _vosk.Reset();
@@ -899,10 +988,10 @@ public sealed class VoiceAssistantService : IDisposable
                 _state = VoiceAssistantState.WakeListening;
                 _statusText = BuildWakeListeningLabelLocked();
             }
-            else if (!_models.IsVoskReady() && !_models.IsWhisperReady(_whisperModel))
+            else if (!_models.IsVoskReady() && !_models.IsGigaAmReady() && !_models.IsWhisperReady(_whisperModel))
             {
                 _state = VoiceAssistantState.NotInstalled;
-                _statusText = "Установите офлайн-модель (Vosk / Whisper)";
+                _statusText = "Установите офлайн-модель (Vosk / GigaAM v3 / Whisper)";
             }
             else
             {
@@ -924,10 +1013,11 @@ public sealed class VoiceAssistantService : IDisposable
         {
             if (_state is VoiceAssistantState.CommandListening or VoiceAssistantState.ProcessingWhisper or VoiceAssistantState.Speaking or VoiceAssistantState.Downloading)
                 return;
-            wakeOn = _wakeWordEnabled;
+            wakeOn = _wakeWordEnabled && _enabled;
         }
 
         try { _whisper.Stop(); } catch { }
+        try { _gigaAm.Unload(); } catch { }
         try { _feedback.UnloadNeuralModels(); } catch { }
         if (!wakeOn && !_mic.IsCapturing)
         {
@@ -948,33 +1038,20 @@ public sealed class VoiceAssistantService : IDisposable
         bool wakeOn;
         lock (_syncLock)
         {
-            if (_state != VoiceAssistantState.Idle || _mic.IsCapturing)
+            if (_state is not (VoiceAssistantState.Idle or VoiceAssistantState.Disabled) || _mic.IsCapturing)
                 return;
             if (Environment.TickCount64 - _lastVoiceActivityTick < IdleUnloadMs - 500)
                 return;
-            wakeOn = _wakeWordEnabled;
+            wakeOn = _wakeWordEnabled && _enabled;
         }
 
         if (!wakeOn)
         {
             try { _vad.Unload(); } catch { }
             try { _vosk.Unload(); } catch { }
+            try { _gigaAm.Unload(); } catch { }
             WindowBlurHelper.TrimWorkingSet();
         }
-    }
-
-    private static float ComputeRms16k(byte[] pcm)
-    {
-        int samples = pcm.Length / 2;
-        if (samples == 0) return 0f;
-        double sum = 0;
-        for (int i = 0; i < samples; i++)
-        {
-            short s = (short)(pcm[i * 2] | (pcm[i * 2 + 1] << 8));
-            double v = s / 32768.0;
-            sum += v * v;
-        }
-        return (float)Math.Sqrt(sum / samples);
     }
 
     private void OnModelDownloadProgress(VoiceDownloadProgress p)
@@ -998,33 +1075,54 @@ public sealed class VoiceAssistantService : IDisposable
 
     private string BuildIdleLabelLocked()
     {
+        if (!_enabled)
+            return "Помощник выключен";
+
         bool v = _models.IsVoskReady();
+        bool g = _models.IsGigaAmReady();
         bool w = _models.IsWhisperReady(_whisperModel);
         bool tts = _models.IsNeuralTtsReady();
 
+        if (g && w && _whisperEnabled) return tts ? "Готов (GigaAM v3 + Turbo + Нейро · Alt+V)" : "Готов (GigaAM v3 + Turbo v3 · Alt+V)";
+        if (g) return tts ? "Готов (GigaAM v3 RU + Нейро · Alt+V)" : "Готов (GigaAM v3 RU · Alt+V)";
         if (v && w && _whisperEnabled) return tts ? "Готов (Turbo v3 + Нейро-голос · Alt+V)" : "Готов (Vosk + Whisper Turbo v3 · Alt+V)";
         if (v) return tts ? "Готов (Vosk RU + Нейро-голос · Alt+V)" : "Готов (Vosk RU · Alt+V)";
         if (w) return tts ? "Готов (Whisper Turbo v3 + Нейро · Alt+V)" : "Готов (Whisper Turbo v3 · Alt+V)";
-        return tts ? "Нейро-голос готов · установите Vosk / Whisper Turbo" : "Установите модели распознавания";
+        return tts ? "Нейро-голос готов · установите распознавание" : "Установите модели распознавания";
     }
 
     private VoiceAssistantStatus BuildStatusLocked()
     {
         bool v = _models.IsVoskReady();
+        bool g = _models.IsGigaAmReady();
         bool w = _models.IsWhisperReady(_whisperModel);
         bool tts = _models.IsNeuralTtsReady();
         bool vad = _models.IsSileroVadReady() || _models.IsWhisperVadReady();
         var dl = _models.CurrentProgress;
 
-        string baseEngine = (v && w && _whisperEnabled)
-            ? (vad ? "VAD + Whisper Turbo" : "Vosk + Whisper Turbo")
-            : (w ? (vad ? "VAD + Whisper Turbo" : "Whisper Turbo v3") : (v ? "Vosk RU" : ""));
-        string engineLabel = string.IsNullOrEmpty(baseEngine)
-            ? (tts ? "Нейро-голос (нет STT)" : "Модели не установлены")
-            : (tts ? $"{baseEngine} + Нейро" : baseEngine);
+        string engineLabel;
+        if (!_enabled)
+        {
+            engineLabel = "Выключен";
+        }
+        else
+        {
+            string baseEngine;
+            if (g && w && _whisperEnabled) baseEngine = "GigaAM v3 + Turbo";
+            else if (g) baseEngine = vad ? "VAD + GigaAM v3 RU" : "GigaAM v3 RU";
+            else if (v && w && _whisperEnabled) baseEngine = vad ? "VAD + Whisper Turbo" : "Vosk + Whisper Turbo";
+            else if (w) baseEngine = vad ? "VAD + Whisper Turbo" : "Whisper Turbo v3";
+            else if (v) baseEngine = "Vosk RU";
+            else baseEngine = "";
+
+            engineLabel = string.IsNullOrEmpty(baseEngine)
+                ? (tts ? "Нейро-голос (нет STT)" : "Модели не установлены")
+                : (tts ? $"{baseEngine} + Нейро" : baseEngine);
+        }
 
         string stateKey = _state switch
         {
+            VoiceAssistantState.Disabled => "disabled",
             VoiceAssistantState.NotInstalled => "notInstalled",
             VoiceAssistantState.Downloading => "downloading",
             VoiceAssistantState.WakeListening => "wakeListening",
@@ -1042,7 +1140,9 @@ public sealed class VoiceAssistantService : IDisposable
             _lastCommand,
             _lastReply,
             _audioLevel,
+            _enabled,
             v,
+            g,
             w,
             _whisper.IsRunning,
             tts,
@@ -1053,7 +1153,7 @@ public sealed class VoiceAssistantService : IDisposable
             dl.DownloadedMb,
             dl.TotalMb,
             _models.GetTotalDiskUsageMb(),
-            _wakeWordEnabled && v,
+            _enabled && _wakeWordEnabled && v,
             _wakeWordsCsv,
             engineLabel);
     }
@@ -1077,6 +1177,7 @@ public sealed class VoiceAssistantService : IDisposable
         try { _processingCts?.Cancel(); _processingCts?.Dispose(); } catch { }
         try { _mic.Dispose(); } catch { }
         try { _whisper.Dispose(); } catch { }
+        try { _gigaAm.Dispose(); } catch { }
         try { _vad.Dispose(); } catch { }
         try { _vosk.Dispose(); } catch { }
     }

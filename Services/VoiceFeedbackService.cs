@@ -23,9 +23,16 @@ public sealed class VoiceFeedbackService : IDisposable
     private readonly SupertonicTtsEngine? _neuralEngine;
     private readonly SemaphoreSlim _playLock = new(1, 1);
     private CancellationTokenSource? _speakCts;
+    private int _volumePercent = 85;
     private bool _disposed;
 
     public bool IsNeuralLoaded => _neuralEngine?.IsLoaded == true;
+
+    public int VolumePercent
+    {
+        get => Volatile.Read(ref _volumePercent);
+        set => Volatile.Write(ref _volumePercent, Math.Clamp(value, 0, 100));
+    }
 
     public VoiceFeedbackService(VoiceModelManager? models = null)
     {
@@ -73,7 +80,7 @@ public sealed class VoiceFeedbackService : IDisposable
 
     public async Task SpeakAsync(string text, string preferredVoiceName = "", CancellationToken outerCt = default)
     {
-        if (_disposed || string.IsNullOrWhiteSpace(text)) return;
+        if (_disposed || string.IsNullOrWhiteSpace(text) || VolumePercent <= 0) return;
         if (_neuralEngine == null || _models?.IsNeuralTtsReady() != true)
             return;
 
@@ -109,6 +116,11 @@ public sealed class VoiceFeedbackService : IDisposable
     private async Task PlayWavBytesAsync(byte[] wavBytes, CancellationToken ct)
     {
         if (_disposed || wavBytes.Length < 44) return;
+        int vol = VolumePercent;
+        if (vol <= 0) return;
+
+        byte[] playbackWav = ApplyVolumeToWav(wavBytes, vol);
+        if (playbackWav.Length < 44) return;
 
         await _playLock.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -117,7 +129,7 @@ public sealed class VoiceFeedbackService : IDisposable
 
             await Task.Run(() =>
             {
-                var pin = GCHandle.Alloc(wavBytes, GCHandleType.Pinned);
+                var pin = GCHandle.Alloc(playbackWav, GCHandleType.Pinned);
                 try
                 {
                     if (!ct.IsCancellationRequested && !_disposed)
@@ -136,6 +148,67 @@ public sealed class VoiceFeedbackService : IDisposable
         {
             _playLock.Release();
         }
+    }
+
+    /// <summary>
+    /// Применяет перцептивную кривую громкости (vol/100)^1.5 к PCM16LE WAV-буферу без изменения исходного кэша.
+    /// </summary>
+    public static byte[] ApplyVolumeToWav(byte[] wavBytes, int volumePercent)
+    {
+        int vol = Math.Clamp(volumePercent, 0, 100);
+        if (vol <= 0 || wavBytes == null || wavBytes.Length < 44)
+            return Array.Empty<byte>();
+        if (vol >= 100)
+            return wavBytes;
+
+        byte[] scaled = new byte[wavBytes.Length];
+        Buffer.BlockCopy(wavBytes, 0, scaled, 0, wavBytes.Length);
+
+        int dataStart = FindWavDataChunkOffset(scaled, out int dataLength);
+        int dataEnd = Math.Min(scaled.Length, dataStart + dataLength);
+        float gain = MathF.Pow(vol / 100f, 1.5f);
+
+        for (int i = dataStart; i + 1 < dataEnd; i += 2)
+        {
+            short sample = (short)(scaled[i] | (scaled[i + 1] << 8));
+            int amplified = Math.Clamp((int)MathF.Round(sample * gain), -32768, 32767);
+            short outSample = (short)amplified;
+            scaled[i] = (byte)(outSample & 0xFF);
+            scaled[i + 1] = (byte)((outSample >> 8) & 0xFF);
+        }
+
+        return scaled;
+    }
+
+    private static int FindWavDataChunkOffset(byte[] wav, out int dataLength)
+    {
+        if (wav.Length >= 44 &&
+            wav[0] == (byte)'R' && wav[1] == (byte)'I' && wav[2] == (byte)'F' && wav[3] == (byte)'F' &&
+            wav[8] == (byte)'W' && wav[9] == (byte)'A' && wav[10] == (byte)'V' && wav[11] == (byte)'E')
+        {
+            int pos = 12;
+            while (pos + 8 <= wav.Length)
+            {
+                int chunkSize = wav[pos + 4] | (wav[pos + 5] << 8) | (wav[pos + 6] << 16) | (wav[pos + 7] << 24);
+                if (chunkSize < 0)
+                    break;
+
+                if (wav[pos] == (byte)'d' && wav[pos + 1] == (byte)'a' &&
+                    wav[pos + 2] == (byte)'t' && wav[pos + 3] == (byte)'a')
+                {
+                    dataLength = Math.Min(chunkSize, wav.Length - (pos + 8));
+                    return pos + 8;
+                }
+
+                int step = 8 + chunkSize + (chunkSize & 1);
+                if (step <= 8 || pos + step > wav.Length)
+                    break;
+                pos += step;
+            }
+        }
+
+        dataLength = Math.Max(0, wav.Length - 44);
+        return Math.Min(44, wav.Length);
     }
 
     private static byte[] BuildTwoToneChime(double f1Hz, double f2Hz, int ms1, int ms2, double amp)
